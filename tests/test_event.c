@@ -176,6 +176,32 @@ LIBBGP_TEST(event_publish_null_inputs_return_zero)
     libbgp_event_bus_destroy(&bus);
 }
 
+LIBBGP_TEST(event_operations_after_destroy_use_null_behavior)
+{
+    libbgp_event_bus_t bus;
+    callback_record_t record;
+    callback_ctx_t ctx;
+    libbgp_event_t event;
+    uint64_t id = 0u;
+
+    memset(&record, 0, sizeof(record));
+    ctx.record = &record;
+    ctx.marker = 1;
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_SESSION_DOWN;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, recording_cb, &ctx, &id));
+    libbgp_event_bus_destroy(&bus);
+
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_event_bus_subscriber_count(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, recording_cb, &ctx, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_event_bus_unsubscribe(&bus, id));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_event_bus_publish(&bus, &event));
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -184,7 +210,8 @@ int main(void)
         { "event_publish_different_type_does_not_notify", event_publish_different_type_does_not_notify },
         { "event_custom_subscriber_only_receives_custom_events", event_custom_subscriber_only_receives_custom_events },
         { "event_unsubscribe_removes_subscriber_and_reports_absent_id", event_unsubscribe_removes_subscriber_and_reports_absent_id },
-        { "event_publish_null_inputs_return_zero", event_publish_null_inputs_return_zero }
+        { "event_publish_null_inputs_return_zero", event_publish_null_inputs_return_zero },
+        { "event_operations_after_destroy_use_null_behavior", event_operations_after_destroy_use_null_behavior }
     };
 
     return libbgp_run_tests("event", tests, LIBBGP_ARRAY_LEN(tests));
