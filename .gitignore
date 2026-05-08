@@ -9,6 +9,7 @@ config.*
 aclocal.m4
 install-sh
 autom4te.cache
+build/
 *.lo
 *.o
 *.la
