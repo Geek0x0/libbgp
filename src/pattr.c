@@ -685,6 +685,9 @@ static libbgp_err_t pattr_value_len(const libbgp_pattr_t *attr, size_t *value_le
         attr->type_code != pattr_default_type_code(attr->type)) {
         return LIBBGP_ERR_BAD_LEN;
     }
+    if (!pattr_known_flags_valid(attr->type, attr->flags)) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
 
     switch (attr->type) {
     case LIBBGP_PATTR_ORIGIN:
