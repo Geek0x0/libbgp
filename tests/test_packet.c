@@ -121,13 +121,61 @@ LIBBGP_TEST(packet_unknown_type_preserves_raw_body_and_write_small_output)
     libbgp_packet_destroy(&pkt);
 }
 
+LIBBGP_TEST(packet_write_oversized_unknown_leaves_output_unchanged)
+{
+    uint8_t body[LIBBGP_BGP_MAX_PACKET_LEN - LIBBGP_BGP_HEADER_LEN + 1u];
+    uint8_t out[LIBBGP_BGP_MAX_PACKET_LEN + 1u];
+    uint8_t expected[sizeof(out)];
+    size_t out_len = 99u;
+    libbgp_packet_t pkt;
+
+    memset(body, 0xaau, sizeof(body));
+    memset(out, 0x5au, sizeof(out));
+    memcpy(expected, out, sizeof(expected));
+    libbgp_packet_init(&pkt);
+    pkt.type = LIBBGP_PACKET_UNKNOWN;
+    pkt.raw_type = 200u;
+    pkt.raw_body = body;
+    pkt.raw_body_len = sizeof(body);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(out));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+
+    pkt.raw_body = NULL;
+    pkt.raw_body_len = 0u;
+    libbgp_packet_destroy(&pkt);
+}
+
+LIBBGP_TEST(packet_write_known_body_failure_leaves_output_unchanged)
+{
+    uint8_t out[64];
+    uint8_t expected[sizeof(out)];
+    size_t out_len = 99u;
+    libbgp_packet_t pkt;
+
+    memset(out, 0x5au, sizeof(out));
+    memcpy(expected, out, sizeof(expected));
+    libbgp_packet_init(&pkt);
+    pkt.type = LIBBGP_PACKET_OPEN;
+    libbgp_open_init(&pkt.data.open);
+    pkt.data.open.version = 3u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(out));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    libbgp_packet_destroy(&pkt);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "keepalive_body_parse_write_and_packet_fixture", keepalive_body_parse_write_and_packet_fixture },
         { "packet_parse_write_known_fixtures", packet_parse_write_known_fixtures },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
-        { "packet_unknown_type_preserves_raw_body_and_write_small_output", packet_unknown_type_preserves_raw_body_and_write_small_output }
+        { "packet_unknown_type_preserves_raw_body_and_write_small_output", packet_unknown_type_preserves_raw_body_and_write_small_output },
+        { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },
+        { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged }
     };
 
     return libbgp_run_tests("packet", tests, LIBBGP_ARRAY_LEN(tests));
