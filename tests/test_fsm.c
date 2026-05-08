@@ -1347,6 +1347,68 @@ LIBBGP_TEST(fsm_unexpected_packet_does_not_refresh_hold_timer)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_invalid_update_does_not_refresh_hold_timer)
+{
+    struct libbgp_fsm_config config;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_rib6_t rib6;
+    out_ctx_t out;
+    event_ctx_t events;
+    uint8_t addr[16] = {
+        0x20u, 0x01u, 0x0du, 0xb8u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u
+    };
+    uint8_t next_hop[16] = {
+        0x20u, 0x01u, 0x0du, 0xb8u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x00u,
+        0x00u, 0x00u, 0x00u, 0x01u
+    };
+    libbgp_packet_t update = make_update_mp_reach6(p6(addr, 64u), next_hop);
+    libbgp_pattr_t *mp = libbgp_update_find_attr(&update.data.update, LIBBGP_PATTR_MP_REACH_IPV6);
+
+    config.local_asn = 65000u;
+    config.local_bgp_id = ip4(192u, 0u, 2u, 1u);
+    config.hold_time = 3u;
+    config.keepalive_time = 0u;
+    config.enable_4byte_asn = true;
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib6));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_rib6(&fsm, &rib6);
+    establish(&fsm, &out, &events);
+
+    LIBBGP_ASSERT(mp != NULL);
+    mp->data.mp_reach_ipv6.nexthop_len = 15u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 1000u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 3500u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_fsm_on_packet(&fsm, &update));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 4501u));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(4u, out.count);
+    assert_sent_notification(&out, 3u, 4u, 0u);
+    LIBBGP_ASSERT_EQ_U64(2u, events.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_EVENT_SESSION_DOWN, events.types[1]);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib6_route_count(&rib6));
+
+    libbgp_packet_destroy(&update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_rib6_destroy(&rib6);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -1378,7 +1440,8 @@ int main(void)
         { "fsm_keepalive_zero_uses_negotiated_hold_third", fsm_keepalive_zero_uses_negotiated_hold_third },
         { "fsm_negotiated_hold_zero_disables_periodic_keepalive", fsm_negotiated_hold_zero_disables_periodic_keepalive },
         { "fsm_accepted_keepalive_refreshes_hold_timer", fsm_accepted_keepalive_refreshes_hold_timer },
-        { "fsm_unexpected_packet_does_not_refresh_hold_timer", fsm_unexpected_packet_does_not_refresh_hold_timer }
+        { "fsm_unexpected_packet_does_not_refresh_hold_timer", fsm_unexpected_packet_does_not_refresh_hold_timer },
+        { "fsm_invalid_update_does_not_refresh_hold_timer", fsm_invalid_update_does_not_refresh_hold_timer }
     };
 
     return libbgp_run_tests("fsm", tests, LIBBGP_ARRAY_LEN(tests));
