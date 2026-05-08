@@ -167,13 +167,13 @@ static uint16_t fsm_effective_keepalive_time(const fsm_impl_t *impl)
     if (impl->negotiated_hold_time == 0u) {
         return 0u;
     }
-    interval = impl->config.keepalive_time;
-    if (interval == 0u) {
-        return 0u;
-    }
     hold_third = (uint16_t)(impl->negotiated_hold_time / 3u);
     if (hold_third == 0u) {
         hold_third = 1u;
+    }
+    interval = impl->config.keepalive_time;
+    if (interval == 0u) {
+        return hold_third;
     }
     if (hold_third < interval) {
         interval = hold_third;
