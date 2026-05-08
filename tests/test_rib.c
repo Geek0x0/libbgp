@@ -185,6 +185,51 @@ LIBBGP_TEST(rib4_best_route_ordering_for_same_prefix)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib_best_route_compares_router_ids_as_network_order)
+{
+    libbgp_rib4_t rib4;
+    libbgp_rib6_t rib6;
+    libbgp_prefix4_t prefix4 = p4(203u, 0u, 113u, 0u, 24u);
+    const uint8_t prefix6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 2u };
+    const uint8_t dest6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 2u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t nh6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu };
+    libbgp_prefix6_t prefix6 = p6(prefix6_addr, 48u);
+    libbgp_rib4_route_t route4_low = route4(prefix4, ip4(1u, 1u, 1u, 2u));
+    libbgp_rib4_route_t route4_high = route4(prefix4, ip4(2u, 1u, 1u, 1u));
+    libbgp_rib6_route_t route6_low;
+    libbgp_rib6_route_t route6_high;
+    const libbgp_rib4_route_t *found4 = NULL;
+    const libbgp_rib6_route_t *found6 = NULL;
+
+    route4_low.update_id = 100u;
+    route4_high.update_id = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib4));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib4, &route4_low));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib4, &route4_high));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib4, ip4(203u, 0u, 113u, 9u), &found4));
+    LIBBGP_ASSERT(found4 != NULL);
+    LIBBGP_ASSERT_EQ_U64(ip4(1u, 1u, 1u, 2u), found4->source_router_id);
+    libbgp_rib4_destroy(&rib4);
+
+    memset(&route6_low, 0, sizeof(route6_low));
+    route6_low.prefix = prefix6;
+    route6_low.source_router_id = ip4(1u, 1u, 1u, 2u);
+    memcpy(route6_low.next_hop, nh6, sizeof(route6_low.next_hop));
+    route6_low.local_pref = 100u;
+    route6_low.update_id = 100u;
+    route6_high = route6_low;
+    route6_high.source_router_id = ip4(2u, 1u, 1u, 1u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib6));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib6, &route6_low));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib6, &route6_high));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib6, dest6, &found6));
+    LIBBGP_ASSERT(found6 != NULL);
+    LIBBGP_ASSERT_EQ_U64(ip4(1u, 1u, 1u, 2u), found6->source_router_id);
+    libbgp_rib6_destroy(&rib6);
+}
+
 LIBBGP_TEST(rib4_replace_withdraw_discard_and_scoped_lookup)
 {
     libbgp_rib4_t rib;
@@ -321,6 +366,7 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "rib4_insert_local_and_lookup_longest_prefix", rib4_insert_local_and_lookup_longest_prefix },
         { "rib4_best_route_ordering_for_same_prefix", rib4_best_route_ordering_for_same_prefix },
+        { "rib_best_route_compares_router_ids_as_network_order", rib_best_route_compares_router_ids_as_network_order },
         { "rib4_replace_withdraw_discard_and_scoped_lookup", rib4_replace_withdraw_discard_and_scoped_lookup },
         { "rib4_lookup_returns_borrowed_pointer_replaced_by_mutation", rib4_lookup_returns_borrowed_pointer_replaced_by_mutation },
         { "rib4_insert_refs_attrs_and_destroy_unrefs", rib4_insert_refs_attrs_and_destroy_unrefs },

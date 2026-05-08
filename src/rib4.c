@@ -42,6 +42,16 @@ static bool rib4_key_eq(const void *a, const void *b, void *ctx)
     return libbgp_prefix4_eq(&ka->prefix, &kb->prefix);
 }
 
+static int bgp_router_id_cmp(uint32_t a, uint32_t b)
+{
+    uint8_t a_bytes[4];
+    uint8_t b_bytes[4];
+
+    memcpy(a_bytes, &a, sizeof(a_bytes));
+    memcpy(b_bytes, &b, sizeof(b_bytes));
+    return memcmp(a_bytes, b_bytes, sizeof(a_bytes));
+}
+
 static void rib4_route_free(libbgp_rib4_route_t *route)
 {
     size_t i;
@@ -162,7 +172,7 @@ static bool rib4_better(const libbgp_rib4_route_t *a, const libbgp_rib4_route_t 
     if (a->update_id != b->update_id) {
         return a->update_id > b->update_id;
     }
-    return a->source_router_id < b->source_router_id;
+    return bgp_router_id_cmp(a->source_router_id, b->source_router_id) < 0;
 }
 
 static bool rib4_addr_matches(const libbgp_prefix4_t *prefix, uint32_t dest)
