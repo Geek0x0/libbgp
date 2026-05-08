@@ -25,6 +25,7 @@ typedef struct fsm_impl {
     uint64_t last_keepalive_ms;
     bool clock_initialized;
     libbgp_rib4_t *rib4;
+    libbgp_rib6_t *rib6;
     libbgp_event_bus_t *bus;
     libbgp_out_handler_t *out;
     bgp_lock_t lock;
@@ -214,8 +215,92 @@ static void fsm_fill_route_attrs(libbgp_rib4_route_t *route, const libbgp_update
     route->as_path_len = fsm_as_path_len_and_origin_as(attr, &route->origin_as);
 }
 
+static bool fsm_ipv6_route_attr(const libbgp_pattr_t *attr)
+{
+    return attr != NULL &&
+        attr->type != LIBBGP_PATTR_NEXT_HOP &&
+        attr->type != LIBBGP_PATTR_MP_REACH_IPV6 &&
+        attr->type != LIBBGP_PATTR_MP_UNREACH_IPV6;
+}
+
+static void fsm_fill_route6_attrs(
+    libbgp_rib6_route_t *route,
+    const libbgp_update_msg_t *update,
+    const libbgp_pattr_t *mp_reach)
+{
+    libbgp_pattr_t *attr;
+
+    route->local_pref = 100u;
+    memcpy(route->next_hop, mp_reach->data.mp_reach_ipv6.nexthop, sizeof(route->next_hop));
+
+    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
+    if (attr != NULL) {
+        route->local_pref = attr->data.local_pref.value;
+    }
+    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_ORIGIN);
+    if (attr != NULL) {
+        route->origin = attr->data.origin.origin;
+    }
+    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_MED);
+    if (attr != NULL) {
+        route->med = attr->data.med.value;
+    }
+    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_AS_PATH);
+    route->as_path_len = fsm_as_path_len_and_origin_as(attr, &route->origin_as);
+}
+
+static libbgp_err_t fsm_insert_route6(
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id,
+    const libbgp_update_msg_t *update,
+    const libbgp_pattr_t *mp_reach,
+    const libbgp_prefix6_t *prefix)
+{
+    libbgp_rib6_route_t route;
+    libbgp_pattr_t **filtered = NULL;
+    libbgp_err_t err;
+    size_t i;
+    size_t count = 0u;
+
+    if (mp_reach->data.mp_reach_ipv6.nexthop_len != 16u &&
+        mp_reach->data.mp_reach_ipv6.nexthop_len != 32u) {
+        return LIBBGP_ERR_INVALID;
+    }
+    memset(&route, 0, sizeof(route));
+    route.prefix = *prefix;
+    route.source_router_id = peer_bgp_id;
+    fsm_fill_route6_attrs(&route, update, mp_reach);
+    for (i = 0u; i < update->attr_count; i++) {
+        if (fsm_ipv6_route_attr(update->attrs[i])) {
+            count++;
+        }
+    }
+    if (count != 0u) {
+        size_t pos = 0u;
+
+        if (count > SIZE_MAX / sizeof(*filtered)) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        filtered = (libbgp_pattr_t **)bgp_calloc(count, sizeof(*filtered));
+        if (filtered == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        for (i = 0u; i < update->attr_count; i++) {
+            if (fsm_ipv6_route_attr(update->attrs[i])) {
+                filtered[pos++] = update->attrs[i];
+            }
+        }
+    }
+    route.attrs = filtered;
+    route.attr_count = count;
+    err = libbgp_rib6_insert(rib6, &route);
+    bgp_free(filtered);
+    return err;
+}
+
 static libbgp_err_t fsm_apply_update(
     libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
     libbgp_event_bus_t *bus,
     uint32_t peer_bgp_id,
     const libbgp_update_msg_t *update)
@@ -253,6 +338,37 @@ static libbgp_err_t fsm_apply_update(
         }
         if (err == LIBBGP_OK) {
             fsm_publish_event(bus, LIBBGP_EVENT_ROUTE_ADDED, peer_bgp_id, &update->nlri[i], update);
+        }
+    }
+    for (i = 0u; i < update->attr_count; i++) {
+        const libbgp_pattr_t *attr = update->attrs[i];
+        size_t j;
+
+        if (attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
+            for (j = 0u; j < attr->data.mp_unreach_ipv6.withdrawn_count; j++) {
+                libbgp_err_t err = LIBBGP_OK;
+
+                if (rib6 != NULL) {
+                    err = libbgp_rib6_withdraw(rib6, peer_bgp_id, &attr->data.mp_unreach_ipv6.withdrawn[j]);
+                    if (err == LIBBGP_ERR_NOT_FOUND) {
+                        err = LIBBGP_OK;
+                    }
+                }
+                if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
+                    first_err = err;
+                }
+            }
+        } else if (attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
+            for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
+                libbgp_err_t err = LIBBGP_OK;
+
+                if (rib6 != NULL) {
+                    err = fsm_insert_route6(rib6, peer_bgp_id, update, attr, &attr->data.mp_reach_ipv6.nlri[j]);
+                }
+                if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
+                    first_err = err;
+                }
+            }
         }
     }
     return first_err;
@@ -317,6 +433,18 @@ void libbgp_fsm_set_rib4(libbgp_fsm_t *fsm, libbgp_rib4_t *rib4)
     }
     bgp_lock(&impl->lock);
     impl->rib4 = rib4;
+    bgp_unlock(&impl->lock);
+}
+
+void libbgp_fsm_set_rib6(libbgp_fsm_t *fsm, libbgp_rib6_t *rib6)
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+
+    if (impl == NULL) {
+        return;
+    }
+    bgp_lock(&impl->lock);
+    impl->rib6 = rib6;
     bgp_unlock(&impl->lock);
 }
 
@@ -475,6 +603,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
 {
     libbgp_event_bus_t *bus;
     libbgp_rib4_t *rib4;
+    libbgp_rib6_t *rib6;
     uint32_t peer_bgp_id;
 
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
@@ -500,10 +629,11 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     }
     fsm_mark_rx_current(impl);
     rib4 = impl->rib4;
+    rib6 = impl->rib6;
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
     bgp_unlock(&impl->lock);
-    return fsm_apply_update(rib4, bus, peer_bgp_id, &pkt->data.update);
+    return fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update);
 }
 
 libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt)
