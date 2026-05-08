@@ -118,6 +118,9 @@ void libbgp_out_handler_set_fd(libbgp_out_handler_t *handler, int fd)
 libbgp_err_t libbgp_out_handler_send(libbgp_out_handler_t *handler, const uint8_t *buf, size_t len, size_t *sent)
 {
     out_handler_impl_t *impl;
+    libbgp_io_ops_t ops;
+    bool has_ops;
+    int fd;
     ssize_t ret;
 
     if (len == 0u) {
@@ -133,33 +136,37 @@ libbgp_err_t libbgp_out_handler_send(libbgp_out_handler_t *handler, const uint8_
     if (impl == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (impl->has_ops) {
-        if (impl->ops.send_fn == NULL) {
-            bgp_unlock(&impl->lock);
+    has_ops = impl->has_ops;
+    ops = impl->ops;
+    fd = impl->fd;
+    bgp_unlock(&impl->lock);
+
+    if (has_ops) {
+        if (ops.send_fn == NULL) {
             return LIBBGP_ERR_INVALID;
         }
-        ret = impl->ops.send_fn(impl->ops.ctx, buf, len);
+        ret = ops.send_fn(ops.ctx, buf, len);
     } else {
-        if (impl->fd < 0) {
-            bgp_unlock(&impl->lock);
+        if (fd < 0) {
             return LIBBGP_ERR_INVALID;
         }
-        ret = send(impl->fd, buf, len, 0);
+        ret = send(fd, buf, len, 0);
     }
     if (ret < 0) {
-        bgp_unlock(&impl->lock);
         return LIBBGP_ERR_WRITE;
     }
     if (sent != NULL) {
         *sent = (size_t)ret;
     }
-    bgp_unlock(&impl->lock);
     return LIBBGP_OK;
 }
 
 libbgp_err_t libbgp_out_handler_recv(libbgp_out_handler_t *handler, uint8_t *buf, size_t len, size_t *received)
 {
     out_handler_impl_t *impl;
+    libbgp_io_ops_t ops;
+    bool has_ops;
+    int fd;
     ssize_t ret;
 
     if (len == 0u) {
@@ -175,26 +182,27 @@ libbgp_err_t libbgp_out_handler_recv(libbgp_out_handler_t *handler, uint8_t *buf
     if (impl == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (impl->has_ops) {
-        if (impl->ops.recv_fn == NULL) {
-            bgp_unlock(&impl->lock);
+    has_ops = impl->has_ops;
+    ops = impl->ops;
+    fd = impl->fd;
+    bgp_unlock(&impl->lock);
+
+    if (has_ops) {
+        if (ops.recv_fn == NULL) {
             return LIBBGP_ERR_INVALID;
         }
-        ret = impl->ops.recv_fn(impl->ops.ctx, buf, len);
+        ret = ops.recv_fn(ops.ctx, buf, len);
     } else {
-        if (impl->fd < 0) {
-            bgp_unlock(&impl->lock);
+        if (fd < 0) {
             return LIBBGP_ERR_INVALID;
         }
-        ret = recv(impl->fd, buf, len, 0);
+        ret = recv(fd, buf, len, 0);
     }
     if (ret < 0) {
-        bgp_unlock(&impl->lock);
         return LIBBGP_ERR_PARSE;
     }
     if (received != NULL) {
         *received = (size_t)ret;
     }
-    bgp_unlock(&impl->lock);
     return LIBBGP_OK;
 }

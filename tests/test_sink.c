@@ -110,6 +110,32 @@ LIBBGP_TEST(sink_clear_discards_packets_and_buffer)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_pop_moves_dynamic_packet_into_zeroed_output)
+{
+    const uint8_t unknown[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x16, 0x63,
+        0xde, 0xad, 0xbe
+    };
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    memset(&pkt, 0, sizeof(pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, unknown, sizeof(unknown)));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_UNKNOWN, pkt.type);
+    LIBBGP_ASSERT_EQ_U64(99u, pkt.raw_type);
+    LIBBGP_ASSERT_EQ_U64(3u, pkt.raw_body_len);
+    LIBBGP_ASSERT_BYTES_EQ(&unknown[19], pkt.raw_body, pkt.raw_body_len);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_clear(&sink);
+    libbgp_sink_destroy(&sink);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -118,7 +144,8 @@ int main(void)
         { "sink_pops_multiple_packets_in_order", sink_pops_multiple_packets_in_order },
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
-        { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer }
+        { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer },
+        { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output }
     };
 
     return libbgp_run_tests("sink", tests, LIBBGP_ARRAY_LEN(tests));

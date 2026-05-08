@@ -287,7 +287,6 @@ libbgp_err_t libbgp_sink_pop(libbgp_sink_t *sink, libbgp_packet_t *out_packet)
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOT_FOUND;
     }
-    libbgp_packet_destroy(out_packet);
     *out_packet = impl->packets[0];
     memset(&impl->packets[0], 0, sizeof(impl->packets[0]));
     remaining = impl->packet_count - 1u;
