@@ -24,7 +24,7 @@ endif
 CFLAGS := $(CFLAGS_BASE) $(CFLAGS_EXTRA)
 CPPFLAGS := $(CPPFLAGS_BASE)
 
-LIB_SRCS := src/alloc.c src/errcode.c
+LIB_SRCS := src/alloc.c src/errcode.c src/log.c
 LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SUPPORT := tests/test_main.c tests/fixtures/alloc_tracker.c
