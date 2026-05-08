@@ -730,6 +730,8 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     libbgp_rib4_t *rib4;
     libbgp_rib6_t *rib6;
     uint32_t peer_bgp_id;
+    uint64_t rx_ms;
+    libbgp_err_t err;
 
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
         fsm_mark_rx_current(impl);
@@ -751,13 +753,21 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         return LIBBGP_ERR_BAD_TYPE;
     }
-    fsm_mark_rx_current(impl);
+    rx_ms = impl->current_ms;
     rib4 = impl->rib4;
     rib6 = impl->rib6;
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
     bgp_unlock(&impl->lock);
-    return fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update);
+    err = fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update);
+    if (err == LIBBGP_OK) {
+        bgp_lock(&impl->lock);
+        if (impl->clock_initialized) {
+            impl->last_rx_ms = rx_ms;
+        }
+        bgp_unlock(&impl->lock);
+    }
+    return err;
 }
 
 libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt)
