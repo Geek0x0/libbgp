@@ -9,6 +9,14 @@
 #include "libbgp/prefix4.h"
 #include "libbgp/pattr.h"
 
+/*
+ * Route objects returned by lookup functions are borrowed internal pointers.
+ * They remain valid until the next mutating operation on the same RIB
+ * (insert, insert_local, withdraw, discard, destroy) or until destroy.
+ * With THREADSAFE=1, callers that need pointer stability across concurrent
+ * mutation must provide external synchronization; the internal lock protects
+ * only the lookup operation itself.
+ */
 typedef struct libbgp_rib4_route {
     libbgp_prefix4_t prefix;
     uint32_t source_router_id;
@@ -35,7 +43,17 @@ LIBBGP_API libbgp_err_t libbgp_rib4_insert_local(libbgp_rib4_t *rib, const libbg
 LIBBGP_API libbgp_err_t libbgp_rib4_insert(libbgp_rib4_t *rib, const libbgp_rib4_route_t *route);
 LIBBGP_API libbgp_err_t libbgp_rib4_withdraw(libbgp_rib4_t *rib, uint32_t source_router_id, const libbgp_prefix4_t *prefix);
 LIBBGP_API libbgp_err_t libbgp_rib4_discard(libbgp_rib4_t *rib, uint32_t source_router_id);
+/*
+ * On success, out_route receives a borrowed internal route pointer. The pointer
+ * is invalidated by the next mutating operation on the same RIB or by destroy.
+ * With THREADSAFE=1, external synchronization is required if another thread may
+ * mutate the RIB while the caller still uses the borrowed pointer.
+ */
 LIBBGP_API libbgp_err_t libbgp_rib4_lookup(const libbgp_rib4_t *rib, uint32_t dest_addr, const libbgp_rib4_route_t **out_route);
+/*
+ * Same borrowed-pointer lifetime and THREADSAFE=1 synchronization contract as
+ * libbgp_rib4_lookup.
+ */
 LIBBGP_API libbgp_err_t libbgp_rib4_lookup_scoped(const libbgp_rib4_t *rib, uint32_t source_router_id, uint32_t dest_addr, const libbgp_rib4_route_t **out_route);
 LIBBGP_API size_t libbgp_rib4_route_count(const libbgp_rib4_t *rib);
 
