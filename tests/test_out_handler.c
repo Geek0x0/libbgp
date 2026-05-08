@@ -12,6 +12,11 @@ typedef struct io_ctx {
     int recv_called;
 } io_ctx_t;
 
+typedef struct reentrant_ctx {
+    libbgp_out_handler_t *handler;
+    int called;
+} reentrant_ctx_t;
+
 static ssize_t test_send(void *ctx, const uint8_t *buf, size_t len)
 {
     io_ctx_t *io = (io_ctx_t *)ctx;
@@ -46,6 +51,16 @@ static ssize_t negative_recv(void *ctx, uint8_t *buf, size_t len)
     (void)buf;
     (void)len;
     return -1;
+}
+
+static ssize_t reentrant_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    reentrant_ctx_t *reentrant = (reentrant_ctx_t *)ctx;
+
+    (void)buf;
+    reentrant->called++;
+    libbgp_out_handler_set_fd(reentrant->handler, -1);
+    return (ssize_t)len;
 }
 
 LIBBGP_TEST(out_handler_custom_callbacks)
@@ -146,6 +161,31 @@ LIBBGP_TEST(out_handler_set_fd_resets_custom_ops)
     libbgp_out_handler_destroy(&handler);
 }
 
+LIBBGP_TEST(out_handler_send_callback_can_reenter_handler)
+{
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    reentrant_ctx_t ctx;
+    size_t count = 99u;
+    uint8_t byte = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    ctx.handler = &handler;
+    ctx.called = 0;
+    ops.send_fn = reentrant_send;
+    ops.recv_fn = NULL;
+    ops.ctx = &ctx;
+
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_send(&handler, &byte, 1u, &count));
+    LIBBGP_ASSERT_EQ_U64(1u, count);
+    LIBBGP_ASSERT_EQ_I64(1, ctx.called);
+    count = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_send(&handler, &byte, 1u, &count));
+    LIBBGP_ASSERT_EQ_U64(99u, count);
+    libbgp_out_handler_destroy(&handler);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -153,7 +193,8 @@ int main(void)
         { "out_handler_zero_length_succeeds", out_handler_zero_length_succeeds },
         { "out_handler_unconfigured_is_invalid", out_handler_unconfigured_is_invalid },
         { "out_handler_negative_callbacks_map_errors", out_handler_negative_callbacks_map_errors },
-        { "out_handler_set_fd_resets_custom_ops", out_handler_set_fd_resets_custom_ops }
+        { "out_handler_set_fd_resets_custom_ops", out_handler_set_fd_resets_custom_ops },
+        { "out_handler_send_callback_can_reenter_handler", out_handler_send_callback_can_reenter_handler }
     };
 
     return libbgp_run_tests("out_handler", tests, LIBBGP_ARRAY_LEN(tests));
