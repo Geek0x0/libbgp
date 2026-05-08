@@ -100,6 +100,80 @@ static void pattr_set_defaults(libbgp_pattr_t *attr, libbgp_pattr_type_t type)
     }
 }
 
+static uint8_t pattr_default_flags(libbgp_pattr_type_t type)
+{
+    switch (type) {
+    case LIBBGP_PATTR_ORIGIN:
+    case LIBBGP_PATTR_AS_PATH:
+    case LIBBGP_PATTR_NEXT_HOP:
+    case LIBBGP_PATTR_LOCAL_PREF:
+    case LIBBGP_PATTR_ATOMIC_AGGREGATE:
+        return LIBBGP_PATTR_FLAG_TRANSITIVE;
+    case LIBBGP_PATTR_MED:
+    case LIBBGP_PATTR_MP_REACH_IPV6:
+    case LIBBGP_PATTR_MP_UNREACH_IPV6:
+        return LIBBGP_PATTR_FLAG_OPTIONAL;
+    case LIBBGP_PATTR_AGGREGATOR:
+    case LIBBGP_PATTR_COMMUNITY:
+    case LIBBGP_PATTR_AS4_PATH:
+    case LIBBGP_PATTR_AS4_AGGREGATOR:
+        return LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_TRANSITIVE;
+    case LIBBGP_PATTR_UNKNOWN:
+    default:
+        return 0u;
+    }
+}
+
+static uint8_t pattr_default_type_code(libbgp_pattr_type_t type)
+{
+    switch (type) {
+    case LIBBGP_PATTR_ORIGIN:
+        return LIBBGP_PATTR_CODE_ORIGIN;
+    case LIBBGP_PATTR_AS_PATH:
+        return LIBBGP_PATTR_CODE_AS_PATH;
+    case LIBBGP_PATTR_NEXT_HOP:
+        return LIBBGP_PATTR_CODE_NEXT_HOP;
+    case LIBBGP_PATTR_MED:
+        return LIBBGP_PATTR_CODE_MED;
+    case LIBBGP_PATTR_LOCAL_PREF:
+        return LIBBGP_PATTR_CODE_LOCAL_PREF;
+    case LIBBGP_PATTR_ATOMIC_AGGREGATE:
+        return LIBBGP_PATTR_CODE_ATOMIC_AGGREGATE;
+    case LIBBGP_PATTR_AGGREGATOR:
+        return LIBBGP_PATTR_CODE_AGGREGATOR;
+    case LIBBGP_PATTR_COMMUNITY:
+        return LIBBGP_PATTR_CODE_COMMUNITY;
+    case LIBBGP_PATTR_AS4_PATH:
+        return LIBBGP_PATTR_CODE_AS4_PATH;
+    case LIBBGP_PATTR_AS4_AGGREGATOR:
+        return LIBBGP_PATTR_CODE_AS4_AGGREGATOR;
+    case LIBBGP_PATTR_MP_REACH_IPV6:
+        return LIBBGP_PATTR_CODE_MP_REACH_NLRI;
+    case LIBBGP_PATTR_MP_UNREACH_IPV6:
+        return LIBBGP_PATTR_CODE_MP_UNREACH_NLRI;
+    case LIBBGP_PATTR_UNKNOWN:
+    default:
+        return 0u;
+    }
+}
+
+static bool pattr_known_flags_valid(libbgp_pattr_type_t type, uint8_t flags)
+{
+    uint8_t allowed = LIBBGP_PATTR_FLAG_OPTIONAL |
+        LIBBGP_PATTR_FLAG_TRANSITIVE |
+        LIBBGP_PATTR_FLAG_PARTIAL |
+        LIBBGP_PATTR_FLAG_EXTENDED_LENGTH;
+    uint8_t base = (uint8_t)(flags & (uint8_t)~LIBBGP_PATTR_FLAG_EXTENDED_LENGTH);
+
+    if (type == LIBBGP_PATTR_UNKNOWN) {
+        return true;
+    }
+    if ((flags & (uint8_t)~allowed) != 0u) {
+        return false;
+    }
+    return base == pattr_default_flags(type);
+}
+
 static void pattr_free_data(libbgp_pattr_t *attr)
 {
     size_t i;
@@ -498,6 +572,9 @@ libbgp_err_t libbgp_pattr_parse(
     tmp.type_code = code;
     tmp.type = pattr_type_from_code(code);
     value = buf + header_len;
+    if (!pattr_known_flags_valid(tmp.type, flags)) {
+        return LIBBGP_ERR_INVALID;
+    }
 
     switch (tmp.type) {
     case LIBBGP_PATTR_ORIGIN:
@@ -604,12 +681,21 @@ static libbgp_err_t pattr_value_len(const libbgp_pattr_t *attr, size_t *value_le
     size_t len = 0u;
     size_t i;
 
+    if (attr->type != LIBBGP_PATTR_UNKNOWN &&
+        attr->type_code != pattr_default_type_code(attr->type)) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+
     switch (attr->type) {
     case LIBBGP_PATTR_ORIGIN:
         len = 1u;
         break;
     case LIBBGP_PATTR_AS_PATH:
     case LIBBGP_PATTR_AS4_PATH:
+        if ((attr->type == LIBBGP_PATTR_AS_PATH && attr->data.as_path.is_4b) ||
+            (attr->type == LIBBGP_PATTR_AS4_PATH && !attr->data.as_path.is_4b)) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
         if (attr->data.as_path.segment_count != 0u &&
             attr->data.as_path.segments == NULL) {
             return LIBBGP_ERR_BAD_LEN;
