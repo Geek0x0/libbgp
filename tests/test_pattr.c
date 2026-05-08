@@ -267,18 +267,35 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
 LIBBGP_TEST(pattr_write_rejects_type_code_and_as_width_mismatch)
 {
     uint8_t out[16];
+    size_t out_len = 0u;
     uint32_t asns[] = { 65000u };
     libbgp_as_path_segment_t segment;
     libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *med = libbgp_pattr_new(LIBBGP_PATTR_MED);
     libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
     libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
+    libbgp_pattr_t *unknown = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
 
     LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(med != NULL);
     LIBBGP_ASSERT(as_path != NULL);
     LIBBGP_ASSERT(as4_path != NULL);
+    LIBBGP_ASSERT(unknown != NULL);
 
     origin->type_code = LIBBGP_PATTR_CODE_AS_PATH;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(origin, out, sizeof(out), NULL));
+    origin->type_code = LIBBGP_PATTR_CODE_ORIGIN;
+
+    origin->flags = LIBBGP_PATTR_FLAG_OPTIONAL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(origin, out, sizeof(out), NULL));
+    origin->flags = LIBBGP_PATTR_FLAG_TRANSITIVE | LIBBGP_PATTR_FLAG_EXTENDED_LENGTH;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(origin, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(5u, out_len);
+    LIBBGP_ASSERT_EQ_U64(0x50u, out[0]);
+
+    med->data.med.value = 1u;
+    med->flags = (uint8_t)(LIBBGP_PATTR_FLAG_OPTIONAL | 0x01u);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(med, out, sizeof(out), NULL));
 
     segment.type = 2u;
     segment.asn_count = 1u;
@@ -297,8 +314,16 @@ LIBBGP_TEST(pattr_write_rejects_type_code_and_as_width_mismatch)
     as4_path->data.as_path.segments = NULL;
     as4_path->data.as_path.segment_count = 0u;
 
+    unknown->flags = 0x8fu;
+    unknown->type_code = 200u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(unknown, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(3u, out_len);
+    LIBBGP_ASSERT_EQ_U64(0x8fu, out[0]);
+
+    libbgp_pattr_unref(unknown);
     libbgp_pattr_unref(as4_path);
     libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(med);
     libbgp_pattr_unref(origin);
 }
 
