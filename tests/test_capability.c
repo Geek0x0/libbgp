@@ -5,6 +5,56 @@
 #include "libbgp/capability.h"
 #include "libbgp/types.h"
 
+typedef struct fail_malloc_alloc_ctx {
+    size_t malloc_calls;
+    size_t free_calls;
+} fail_malloc_alloc_ctx_t;
+
+static void *fail_malloc_alloc_malloc(size_t size, void *ctx)
+{
+    fail_malloc_alloc_ctx_t *fail_ctx = (fail_malloc_alloc_ctx_t *)ctx;
+
+    fail_ctx->malloc_calls++;
+    (void)size;
+    return NULL;
+}
+
+static void *fail_malloc_alloc_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)nmemb;
+    (void)size;
+    (void)ctx;
+    return NULL;
+}
+
+static void *fail_malloc_alloc_realloc(void *ptr, size_t size, void *ctx)
+{
+    (void)ptr;
+    (void)size;
+    (void)ctx;
+    return NULL;
+}
+
+static void fail_malloc_alloc_free(void *ptr, void *ctx)
+{
+    fail_malloc_alloc_ctx_t *fail_ctx = (fail_malloc_alloc_ctx_t *)ctx;
+
+    fail_ctx->free_calls++;
+    free(ptr);
+}
+
+static libbgp_alloc_t fail_malloc_alloc_make(fail_malloc_alloc_ctx_t *ctx)
+{
+    libbgp_alloc_t alloc;
+
+    alloc.malloc = fail_malloc_alloc_malloc;
+    alloc.calloc = fail_malloc_alloc_calloc;
+    alloc.realloc = fail_malloc_alloc_realloc;
+    alloc.free = fail_malloc_alloc_free;
+    alloc.ctx = ctx;
+    return alloc;
+}
+
 LIBBGP_TEST(capability_new_initializes_refcount_type_and_code)
 {
     libbgp_capability_t *asn = libbgp_capability_new(LIBBGP_CAP_4B_ASN);
@@ -47,6 +97,19 @@ LIBBGP_TEST(capability_ref_increments_and_unref_null_is_safe)
     libbgp_capability_unref(NULL);
     libbgp_capability_unref(cap);
     LIBBGP_ASSERT_EQ_U64(1u, cap->refcount);
+    libbgp_capability_unref(cap);
+}
+
+LIBBGP_TEST(capability_ref_saturates_at_uint32_max)
+{
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    cap->refcount = UINT32_MAX;
+    LIBBGP_ASSERT(libbgp_capability_ref(cap) == cap);
+    LIBBGP_ASSERT_EQ_U64(UINT32_MAX, cap->refcount);
+
+    cap->refcount = 1u;
     libbgp_capability_unref(cap);
 }
 
@@ -213,17 +276,53 @@ LIBBGP_TEST(capability_unknown_parse_replaces_previous_unknown_value)
     libbgp_set_alloc(NULL);
 }
 
+LIBBGP_TEST(capability_unknown_parse_nomem_preserves_existing_unknown)
+{
+    const uint8_t first[] = { 212u, 3u, 4u, 5u, 6u };
+    const uint8_t second[] = { 213u, 2u, 7u, 8u };
+    uint8_t expected_value[3];
+    fail_malloc_alloc_ctx_t fail_ctx = { 0u, 0u };
+    libbgp_alloc_t fail_alloc;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+    uint8_t *old_value;
+
+    LIBBGP_ASSERT(cap != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_capability_parse(cap, first, sizeof(first), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_CAP_UNKNOWN, cap->type);
+    LIBBGP_ASSERT_EQ_U64(212u, cap->code);
+    LIBBGP_ASSERT_EQ_U64(3u, cap->data.unknown.len);
+    LIBBGP_ASSERT(cap->data.unknown.value != NULL);
+    old_value = cap->data.unknown.value;
+    memcpy(expected_value, old_value, sizeof(expected_value));
+
+    fail_alloc = fail_malloc_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&fail_alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_capability_parse(cap, second, sizeof(second), NULL));
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.malloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, fail_ctx.free_calls);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_CAP_UNKNOWN, cap->type);
+    LIBBGP_ASSERT_EQ_U64(212u, cap->code);
+    LIBBGP_ASSERT_EQ_U64(3u, cap->data.unknown.len);
+    LIBBGP_ASSERT(cap->data.unknown.value == old_value);
+    LIBBGP_ASSERT_BYTES_EQ(expected_value, cap->data.unknown.value, sizeof(expected_value));
+
+    libbgp_set_alloc(NULL);
+    libbgp_capability_unref(cap);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "capability_new_initializes_refcount_type_and_code", capability_new_initializes_refcount_type_and_code },
         { "capability_ref_increments_and_unref_null_is_safe", capability_ref_increments_and_unref_null_is_safe },
+        { "capability_ref_saturates_at_uint32_max", capability_ref_saturates_at_uint32_max },
         { "capability_parse_write_4b_asn_exact_bytes", capability_parse_write_4b_asn_exact_bytes },
         { "capability_parse_write_mp_bgp_exact_bytes", capability_parse_write_mp_bgp_exact_bytes },
         { "capability_parse_write_unknown_passthrough_and_zero_length", capability_parse_write_unknown_passthrough_and_zero_length },
         { "capability_parse_rejects_bad_lengths", capability_parse_rejects_bad_lengths },
         { "capability_write_rejects_invalid_buffers_and_unknown_value", capability_write_rejects_invalid_buffers_and_unknown_value },
-        { "capability_unknown_parse_replaces_previous_unknown_value", capability_unknown_parse_replaces_previous_unknown_value }
+        { "capability_unknown_parse_replaces_previous_unknown_value", capability_unknown_parse_replaces_previous_unknown_value },
+        { "capability_unknown_parse_nomem_preserves_existing_unknown", capability_unknown_parse_nomem_preserves_existing_unknown }
     };
 
     return libbgp_run_tests("capability", tests, LIBBGP_ARRAY_LEN(tests));

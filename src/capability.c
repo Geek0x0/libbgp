@@ -60,7 +60,9 @@ libbgp_capability_t *libbgp_capability_ref(libbgp_capability_t *cap)
         return NULL;
     }
 
-    cap->refcount++;
+    if (cap->refcount != UINT32_MAX) {
+        cap->refcount++;
+    }
     return cap;
 }
 
