@@ -153,6 +153,13 @@ LIBBGP_TEST(pattr_parse_write_fixed_scalar_attributes)
     assert_roundtrip(attr, local_pref, sizeof(local_pref));
     LIBBGP_ASSERT_EQ_U64(100u, attr->data.local_pref.value);
     assert_roundtrip(attr, atomic, sizeof(atomic));
+
+    attr->type = LIBBGP_PATTR_ORIGIN;
+    attr->flags = 0x40u;
+    attr->type_code = 1u;
+    attr->data.origin.origin = 3u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(attr, (uint8_t *)origin, sizeof(origin), NULL));
+
     libbgp_pattr_unref(attr);
 }
 
@@ -177,11 +184,15 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     };
     const uint8_t short_as_path[] = { 0x40u, 2u, 4u, 2u, 2u, 0u, 1u };
     const uint8_t invalid_segment[] = { 0x40u, 2u, 4u, 3u, 1u, 0u, 1u };
+    uint32_t bad_asns[] = { 65536u };
+    libbgp_as_path_segment_t bad_segment;
     libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
     libbgp_pattr_t *bad_write = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *bad_aggregator = libbgp_pattr_new(LIBBGP_PATTR_AGGREGATOR);
 
     LIBBGP_ASSERT(attr != NULL);
     LIBBGP_ASSERT(bad_write != NULL);
+    LIBBGP_ASSERT(bad_aggregator != NULL);
     assert_roundtrip(attr, aggregator, sizeof(aggregator));
     LIBBGP_ASSERT_EQ_U64(65000u, attr->data.aggregator.asn);
     LIBBGP_ASSERT(!attr->data.aggregator.is_4b);
@@ -205,13 +216,21 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     bad_write->data.as_path.segments = NULL;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(bad_write, (uint8_t *)community, sizeof(community), NULL));
 
-    attr->type = LIBBGP_PATTR_AGGREGATOR;
-    attr->flags = 0xc0u;
-    attr->type_code = 7u;
-    attr->data.aggregator.asn = 65536u;
-    attr->data.aggregator.router_id = 1u;
-    attr->data.aggregator.is_4b = false;
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_write(attr, (uint8_t *)community, sizeof(community), NULL));
+    bad_segment.type = 2u;
+    bad_segment.asn_count = 1u;
+    bad_segment.asns = bad_asns;
+    bad_write->data.as_path.segment_count = 1u;
+    bad_write->data.as_path.segments = &bad_segment;
+    bad_write->data.as_path.is_4b = false;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(bad_write, (uint8_t *)community, sizeof(community), NULL));
+    bad_write->data.as_path.segments = NULL;
+    bad_write->data.as_path.segment_count = 0u;
+
+    bad_aggregator->data.aggregator.asn = 65536u;
+    bad_aggregator->data.aggregator.router_id = 1u;
+    bad_aggregator->data.aggregator.is_4b = false;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(bad_aggregator, (uint8_t *)community, sizeof(community), NULL));
+    libbgp_pattr_unref(bad_aggregator);
     libbgp_pattr_unref(bad_write);
     libbgp_pattr_unref(attr);
 }

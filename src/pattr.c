@@ -641,7 +641,7 @@ static libbgp_err_t pattr_value_len(const libbgp_pattr_t *attr, size_t *value_le
     case LIBBGP_PATTR_AGGREGATOR:
         len = 6u;
         if (attr->data.aggregator.asn > 65535u) {
-            return LIBBGP_ERR_INVALID;
+            return LIBBGP_ERR_BAD_LEN;
         }
         break;
     case LIBBGP_PATTR_COMMUNITY:
@@ -754,7 +754,7 @@ static libbgp_err_t write_value(const libbgp_pattr_t *attr, uint8_t *buf, size_t
     switch (attr->type) {
     case LIBBGP_PATTR_ORIGIN:
         if (attr->data.origin.origin > 2u) {
-            return LIBBGP_ERR_INVALID;
+            return LIBBGP_ERR_BAD_LEN;
         }
         buf[0] = attr->data.origin.origin;
         break;
@@ -765,7 +765,7 @@ static libbgp_err_t write_value(const libbgp_pattr_t *attr, uint8_t *buf, size_t
             if (!attr->data.as_path.is_4b) {
                 for (j = 0u; j < attr->data.as_path.segments[i].asn_count; j++) {
                     if (attr->data.as_path.segments[i].asns[j] > 65535u) {
-                        return LIBBGP_ERR_INVALID;
+                        return LIBBGP_ERR_BAD_LEN;
                     }
                 }
             }
