@@ -4,6 +4,18 @@
 
 #include "internal.h"
 
+#ifdef BGP_THREADSAFE
+#include <pthread.h>
+
+static pthread_mutex_t filter_acquire_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define filter_acquire_global() pthread_mutex_lock(&filter_acquire_lock)
+#define filter_release_global() pthread_mutex_unlock(&filter_acquire_lock)
+#else
+#define filter_acquire_global() ((void)0)
+#define filter_release_global() ((void)0)
+#endif
+
 typedef struct filter_impl {
     libbgp_filter_rule_t *rules;
     size_t count;
@@ -14,6 +26,24 @@ typedef struct filter_impl {
 static filter_impl_t *filter_impl_get(const libbgp_filter_t *filter)
 {
     return filter == NULL ? NULL : (filter_impl_t *)filter->impl;
+}
+
+static filter_impl_t *filter_impl_lock(libbgp_filter_t *filter)
+{
+    filter_impl_t *impl;
+
+    filter_acquire_global();
+    impl = filter_impl_get(filter);
+    if (impl != NULL) {
+        bgp_lock(&impl->lock);
+    }
+    filter_release_global();
+    return impl;
+}
+
+static filter_impl_t *filter_impl_lock_const(const libbgp_filter_t *filter)
+{
+    return filter_impl_lock((libbgp_filter_t *)filter);
 }
 
 static bool filter_reserve(filter_impl_t *impl, size_t needed)
@@ -146,24 +176,31 @@ libbgp_err_t libbgp_filter_init(libbgp_filter_t *filter)
         return LIBBGP_ERR_NOMEM;
     }
     bgp_lock_init(&impl->lock);
+    filter_acquire_global();
     filter->impl = impl;
+    filter_release_global();
     return LIBBGP_OK;
 }
 
 void libbgp_filter_destroy(libbgp_filter_t *filter)
 {
-    filter_impl_t *impl = filter_impl_get(filter);
+    filter_impl_t *impl;
     libbgp_filter_rule_t *rules;
 
+    filter_acquire_global();
+    impl = filter_impl_get(filter);
     if (impl == NULL) {
+        filter_release_global();
         return;
     }
     bgp_lock(&impl->lock);
+    filter->impl = NULL;
+    filter_release_global();
+
     rules = impl->rules;
     impl->rules = NULL;
     impl->count = 0u;
     impl->cap = 0u;
-    filter->impl = NULL;
     bgp_unlock(&impl->lock);
     bgp_lock_destroy(&impl->lock);
     bgp_free(rules);
@@ -172,12 +209,15 @@ void libbgp_filter_destroy(libbgp_filter_t *filter)
 
 libbgp_err_t libbgp_filter_add_rule(libbgp_filter_t *filter, const libbgp_filter_rule_t *rule)
 {
-    filter_impl_t *impl = filter_impl_get(filter);
+    filter_impl_t *impl;
 
-    if (impl == NULL || rule == NULL) {
+    if (rule == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    bgp_lock(&impl->lock);
+    impl = filter_impl_lock(filter);
+    if (impl == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
     if (!filter_reserve(impl, impl->count + 1u)) {
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOMEM;
@@ -189,12 +229,11 @@ libbgp_err_t libbgp_filter_add_rule(libbgp_filter_t *filter, const libbgp_filter
 
 void libbgp_filter_clear(libbgp_filter_t *filter)
 {
-    filter_impl_t *impl = filter_impl_get(filter);
+    filter_impl_t *impl = filter_impl_lock(filter);
 
     if (impl == NULL) {
         return;
     }
-    bgp_lock(&impl->lock);
     impl->count = 0u;
     bgp_unlock(&impl->lock);
 }
@@ -204,14 +243,17 @@ libbgp_filter_decision_t libbgp_filter_apply_route(
     const libbgp_rib4_route_t *route,
     libbgp_filter_decision_t default_decision)
 {
-    filter_impl_t *impl = filter_impl_get(filter);
+    filter_impl_t *impl;
     libbgp_filter_decision_t decision = default_decision;
     size_t i;
 
-    if (impl == NULL || route == NULL) {
+    if (route == NULL) {
         return default_decision;
     }
-    bgp_lock(&impl->lock);
+    impl = filter_impl_lock_const(filter);
+    if (impl == NULL) {
+        return default_decision;
+    }
     for (i = 0u; i < impl->count; i++) {
         if (filter_rule_matches(&impl->rules[i], route)) {
             decision = impl->rules[i].decision;
@@ -224,13 +266,12 @@ libbgp_filter_decision_t libbgp_filter_apply_route(
 
 size_t libbgp_filter_rule_count(const libbgp_filter_t *filter)
 {
-    filter_impl_t *impl = filter_impl_get(filter);
+    filter_impl_t *impl = filter_impl_lock_const(filter);
     size_t count;
 
     if (impl == NULL) {
         return 0u;
     }
-    bgp_lock(&impl->lock);
     count = impl->count;
     bgp_unlock(&impl->lock);
     return count;

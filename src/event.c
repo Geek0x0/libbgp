@@ -4,6 +4,18 @@
 
 #include "internal.h"
 
+#ifdef BGP_THREADSAFE
+#include <pthread.h>
+
+static pthread_mutex_t event_acquire_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define event_acquire_global() pthread_mutex_lock(&event_acquire_lock)
+#define event_release_global() pthread_mutex_unlock(&event_acquire_lock)
+#else
+#define event_acquire_global() ((void)0)
+#define event_release_global() ((void)0)
+#endif
+
 typedef struct event_subscriber {
     uint64_t id;
     libbgp_event_type_t type;
@@ -27,6 +39,24 @@ typedef struct event_bus_impl {
 static event_bus_impl_t *event_bus_impl_get(const libbgp_event_bus_t *bus)
 {
     return bus == NULL ? NULL : (event_bus_impl_t *)bus->impl;
+}
+
+static event_bus_impl_t *event_bus_impl_lock(libbgp_event_bus_t *bus)
+{
+    event_bus_impl_t *impl;
+
+    event_acquire_global();
+    impl = event_bus_impl_get(bus);
+    if (impl != NULL) {
+        bgp_lock(&impl->lock);
+    }
+    event_release_global();
+    return impl;
+}
+
+static event_bus_impl_t *event_bus_impl_lock_const(const libbgp_event_bus_t *bus)
+{
+    return event_bus_impl_lock((libbgp_event_bus_t *)bus);
 }
 
 static bool event_reserve(event_bus_impl_t *impl, size_t needed)
@@ -78,24 +108,31 @@ libbgp_err_t libbgp_event_bus_init(libbgp_event_bus_t *bus)
         return LIBBGP_ERR_NOMEM;
     }
     bgp_lock_init(&impl->lock);
+    event_acquire_global();
     bus->impl = impl;
+    event_release_global();
     return LIBBGP_OK;
 }
 
 void libbgp_event_bus_destroy(libbgp_event_bus_t *bus)
 {
-    event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_bus_impl_t *impl;
     event_subscriber_t *subs;
 
+    event_acquire_global();
+    impl = event_bus_impl_get(bus);
     if (impl == NULL) {
+        event_release_global();
         return;
     }
     bgp_lock(&impl->lock);
+    bus->impl = NULL;
+    event_release_global();
+
     subs = impl->subs;
     impl->subs = NULL;
     impl->count = 0u;
     impl->cap = 0u;
-    bus->impl = NULL;
     bgp_unlock(&impl->lock);
     bgp_lock_destroy(&impl->lock);
     bgp_free(subs);
@@ -109,13 +146,16 @@ libbgp_err_t libbgp_event_bus_subscribe(
     void *ctx,
     uint64_t *out_id)
 {
-    event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_bus_impl_t *impl;
     uint64_t id;
 
-    if (impl == NULL || cb == NULL) {
+    if (cb == NULL) {
         return LIBBGP_ERR_BAD_LEN;
     }
-    bgp_lock(&impl->lock);
+    impl = event_bus_impl_lock(bus);
+    if (impl == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
     if (!event_reserve(impl, impl->count + 1u)) {
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOMEM;
@@ -135,13 +175,12 @@ libbgp_err_t libbgp_event_bus_subscribe(
 
 libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id)
 {
-    event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_bus_impl_t *impl = event_bus_impl_lock(bus);
     size_t i;
 
     if (impl == NULL) {
         return LIBBGP_ERR_BAD_LEN;
     }
-    bgp_lock(&impl->lock);
     for (i = 0u; i < impl->count; i++) {
         if (impl->subs[i].id == id) {
             if (i + 1u < impl->count) {
@@ -159,15 +198,18 @@ libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id)
 
 size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *event)
 {
-    event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_bus_impl_t *impl;
     event_snapshot_t *snapshot = NULL;
     size_t match_count = 0u;
     size_t i;
 
-    if (impl == NULL || event == NULL) {
+    if (event == NULL) {
         return 0u;
     }
-    bgp_lock(&impl->lock);
+    impl = event_bus_impl_lock(bus);
+    if (impl == NULL) {
+        return 0u;
+    }
     for (i = 0u; i < impl->count; i++) {
         if (impl->subs[i].type == event->type) {
             match_count++;
@@ -203,13 +245,12 @@ size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *e
 
 size_t libbgp_event_bus_subscriber_count(const libbgp_event_bus_t *bus)
 {
-    event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_bus_impl_t *impl = event_bus_impl_lock_const(bus);
     size_t count;
 
     if (impl == NULL) {
         return 0u;
     }
-    bgp_lock(&impl->lock);
     count = impl->count;
     bgp_unlock(&impl->lock);
     return count;

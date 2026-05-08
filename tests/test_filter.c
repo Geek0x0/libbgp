@@ -288,6 +288,26 @@ LIBBGP_TEST(filter_clear_and_rule_count)
     libbgp_filter_destroy(&filter);
 }
 
+LIBBGP_TEST(filter_operations_after_destroy_use_null_behavior)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_ANY;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    libbgp_filter_destroy(&filter);
+
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_filter_rule_count(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_filter_add_rule(&filter, &rule));
+    libbgp_filter_clear(&filter);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -297,7 +317,8 @@ int main(void)
         { "filter_as_path_and_as4_path_contains_asn", filter_as_path_and_as4_path_contains_asn },
         { "filter_community_contains_exact_value", filter_community_contains_exact_value },
         { "filter_malformed_public_attr_structs_fail_closed", filter_malformed_public_attr_structs_fail_closed },
-        { "filter_clear_and_rule_count", filter_clear_and_rule_count }
+        { "filter_clear_and_rule_count", filter_clear_and_rule_count },
+        { "filter_operations_after_destroy_use_null_behavior", filter_operations_after_destroy_use_null_behavior }
     };
 
     return libbgp_run_tests("filter", tests, LIBBGP_ARRAY_LEN(tests));
