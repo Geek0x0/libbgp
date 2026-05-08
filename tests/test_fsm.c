@@ -32,6 +32,12 @@ typedef struct reentrant_start_ctx {
     size_t calls;
 } reentrant_start_ctx_t;
 
+typedef struct short_send_ctx {
+    uint8_t bytes[LIBBGP_BGP_MAX_PACKET_LEN];
+    size_t len;
+    size_t calls;
+} short_send_ctx_t;
+
 static uint32_t ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
     uint8_t bytes[4];
@@ -93,6 +99,18 @@ static ssize_t reentrant_start_send(void *ctx, const uint8_t *buf, size_t len)
         LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(reentrant->fsm));
     }
     return (ssize_t)len;
+}
+
+static ssize_t zero_progress_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    short_send_ctx_t *short_send = (short_send_ctx_t *)ctx;
+
+    LIBBGP_ASSERT(short_send->calls < 4u);
+    LIBBGP_ASSERT(short_send->len + len <= sizeof(short_send->bytes));
+    memcpy(short_send->bytes + short_send->len, buf, len);
+    short_send->len += len;
+    short_send->calls++;
+    return 0;
 }
 
 static void event_capture(const libbgp_event_t *event, void *ctx)
@@ -372,6 +390,27 @@ LIBBGP_TEST(fsm_start_send_failure_leaves_idle_and_retryable)
     LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_OPEN_SENT, libbgp_fsm_state(&fsm));
     LIBBGP_ASSERT_EQ_U64(1u, out.count);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_OPEN, out.sent[0].type);
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_start_zero_progress_short_send_rolls_back_to_idle)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    short_send_ctx_t short_send;
+
+    memset(&short_send, 0, sizeof(short_send));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out_handler));
+    set_out_send_fn(&out_handler, zero_progress_send, &short_send);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, NULL));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_WRITE, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, short_send.calls);
+    LIBBGP_ASSERT(short_send.len > 0u);
 
     libbgp_fsm_destroy(&fsm);
     libbgp_out_handler_destroy(&out_handler);
@@ -730,6 +769,45 @@ LIBBGP_TEST(fsm_tick_keepalive_and_hold_timeout)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_accepted_keepalive_refreshes_hold_timer)
+{
+    struct libbgp_fsm_config config;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    out_ctx_t out;
+    event_ctx_t events;
+    libbgp_packet_t keepalive = make_keepalive_packet();
+
+    config.local_asn = 65000u;
+    config.local_bgp_id = ip4(192u, 0u, 2u, 1u);
+    config.hold_time = 3u;
+    config.keepalive_time = 0u;
+    config.enable_4byte_asn = true;
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    establish(&fsm, &out, &events);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 1000u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 3500u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &keepalive));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 4501u));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(2u, out.count);
+    LIBBGP_ASSERT_EQ_U64(1u, events.count);
+
+    libbgp_packet_destroy(&keepalive);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_unexpected_packet_does_not_refresh_hold_timer)
 {
     struct libbgp_fsm_config config;
@@ -781,6 +859,7 @@ int main(void)
         { "fsm_init_defaults_and_custom_config", fsm_init_defaults_and_custom_config },
         { "fsm_start_sends_open_and_moves_open_sent", fsm_start_sends_open_and_moves_open_sent },
         { "fsm_start_send_failure_leaves_idle_and_retryable", fsm_start_send_failure_leaves_idle_and_retryable },
+        { "fsm_start_zero_progress_short_send_rolls_back_to_idle", fsm_start_zero_progress_short_send_rolls_back_to_idle },
         { "fsm_start_reentrant_start_does_not_send_duplicate_open", fsm_start_reentrant_start_does_not_send_duplicate_open },
         { "fsm_open_sent_accepts_open_records_peer_and_sends_keepalive", fsm_open_sent_accepts_open_records_peer_and_sends_keepalive },
         { "fsm_open_sent_rejects_invalid_open_version_with_open_error", fsm_open_sent_rejects_invalid_open_version_with_open_error },
@@ -794,6 +873,7 @@ int main(void)
         { "fsm_notification_moves_idle_and_session_down", fsm_notification_moves_idle_and_session_down },
         { "fsm_wrong_packet_in_open_sent_returns_bad_type_and_idle", fsm_wrong_packet_in_open_sent_returns_bad_type_and_idle },
         { "fsm_tick_keepalive_and_hold_timeout", fsm_tick_keepalive_and_hold_timeout },
+        { "fsm_accepted_keepalive_refreshes_hold_timer", fsm_accepted_keepalive_refreshes_hold_timer },
         { "fsm_unexpected_packet_does_not_refresh_hold_timer", fsm_unexpected_packet_does_not_refresh_hold_timer }
     };
 

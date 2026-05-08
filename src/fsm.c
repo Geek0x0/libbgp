@@ -48,6 +48,7 @@ static libbgp_err_t fsm_send_packet(libbgp_out_handler_t *out, const libbgp_pack
 {
     uint8_t buf[LIBBGP_BGP_MAX_PACKET_LEN];
     size_t len = 0u;
+    size_t total = 0u;
     size_t sent = 0u;
     libbgp_err_t err;
 
@@ -58,7 +59,18 @@ static libbgp_err_t fsm_send_packet(libbgp_out_handler_t *out, const libbgp_pack
     if (err != LIBBGP_OK) {
         return err;
     }
-    return libbgp_out_handler_send(out, buf, len, &sent);
+    while (total < len) {
+        sent = 0u;
+        err = libbgp_out_handler_send(out, buf + total, len - total, &sent);
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+        if (sent == 0u || sent > len - total) {
+            return LIBBGP_ERR_WRITE;
+        }
+        total += sent;
+    }
+    return LIBBGP_OK;
 }
 
 static libbgp_err_t fsm_send_keepalive(libbgp_out_handler_t *out)
