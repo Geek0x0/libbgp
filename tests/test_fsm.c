@@ -68,6 +68,14 @@ static ssize_t capture_send(void *ctx, const uint8_t *buf, size_t len)
     return (ssize_t)len;
 }
 
+static ssize_t fail_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    (void)buf;
+    (void)len;
+    return -1;
+}
+
 static void event_capture(const libbgp_event_t *event, void *ctx)
 {
     event_ctx_t *events = (event_ctx_t *)ctx;
@@ -93,6 +101,31 @@ static void setup_out(libbgp_out_handler_t *handler, out_ctx_t *ctx)
     ops.ctx = ctx;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(handler));
     libbgp_out_handler_set_ops(handler, &ops);
+}
+
+static void set_out_send_fn(libbgp_out_handler_t *handler, libbgp_io_send_fn send_fn, void *ctx)
+{
+    libbgp_io_ops_t ops;
+
+    ops.send_fn = send_fn;
+    ops.recv_fn = NULL;
+    ops.ctx = ctx;
+    libbgp_out_handler_set_ops(handler, &ops);
+}
+
+static void assert_sent_notification(const out_ctx_t *out, size_t idx, uint8_t code, uint8_t subcode)
+{
+    libbgp_packet_t pkt;
+    size_t used = 0u;
+
+    LIBBGP_ASSERT(idx < out->count);
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, out->sent[idx].bytes, out->sent[idx].len, &used));
+    LIBBGP_ASSERT_EQ_U64(out->sent[idx].len, used);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_NOTIFICATION, pkt.type);
+    LIBBGP_ASSERT_EQ_U64(code, pkt.data.notification.err_code);
+    LIBBGP_ASSERT_EQ_U64(subcode, pkt.data.notification.err_subcode);
+    libbgp_packet_destroy(&pkt);
 }
 
 static libbgp_packet_t make_open_packet(uint32_t asn, uint16_t hold, uint32_t bgp_id, bool cap4)
@@ -300,6 +333,31 @@ LIBBGP_TEST(fsm_start_sends_open_and_moves_open_sent)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_start_send_failure_leaves_idle_and_retryable)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out_handler));
+    set_out_send_fn(&out_handler, fail_send, NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, NULL));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_WRITE, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+
+    memset(&out, 0, sizeof(out));
+    set_out_send_fn(&out_handler, capture_send, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_OPEN_SENT, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_OPEN, out.sent[0].type);
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_open_sent_accepts_open_records_peer_and_sends_keepalive)
 {
     libbgp_fsm_t fsm;
@@ -322,7 +380,11 @@ LIBBGP_TEST(fsm_open_sent_accepts_open_records_peer_and_sends_keepalive)
     libbgp_out_handler_destroy(&out_handler);
 }
 
-static void assert_open_sent_rejects_invalid_open(libbgp_packet_t *open)
+static void assert_open_sent_rejects_invalid_open(
+    libbgp_packet_t *open,
+    libbgp_err_t expected_err,
+    uint8_t expected_code,
+    uint8_t expected_subcode)
 {
     libbgp_fsm_t fsm;
     libbgp_out_handler_t out_handler;
@@ -333,24 +395,33 @@ static void assert_open_sent_rejects_invalid_open(libbgp_packet_t *open)
     libbgp_fsm_set_out_handler(&fsm, &out_handler);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
 
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_fsm_on_packet(&fsm, open));
+    LIBBGP_ASSERT_EQ_I64(expected_err, libbgp_fsm_on_packet(&fsm, open));
     LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_fsm_peer_asn(&fsm));
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_fsm_peer_bgp_id(&fsm));
     LIBBGP_ASSERT_EQ_U64(2u, out.count);
-    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_NOTIFICATION, out.sent[1].type);
+    assert_sent_notification(&out, 1u, expected_code, expected_subcode);
 
     libbgp_fsm_destroy(&fsm);
     libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_open_sent_rejects_invalid_open_version_with_open_error)
+{
+    libbgp_packet_t open = make_open_packet(65010u, 3u, ip4(203u, 0u, 113u, 9u), true);
+
+    open.data.open.version = 3u;
+    assert_open_sent_rejects_invalid_open(&open, LIBBGP_ERR_BAD_LEN, 2u, 1u);
+    libbgp_packet_destroy(&open);
 }
 
 LIBBGP_TEST(fsm_open_sent_rejects_invalid_open_hold_time)
 {
     libbgp_packet_t open = make_open_packet(65010u, 1u, ip4(203u, 0u, 113u, 9u), true);
 
-    assert_open_sent_rejects_invalid_open(&open);
+    assert_open_sent_rejects_invalid_open(&open, LIBBGP_ERR_INVALID, 2u, 6u);
     open.data.open.hold_time = 2u;
-    assert_open_sent_rejects_invalid_open(&open);
+    assert_open_sent_rejects_invalid_open(&open, LIBBGP_ERR_INVALID, 2u, 6u);
     libbgp_packet_destroy(&open);
 }
 
@@ -358,7 +429,7 @@ LIBBGP_TEST(fsm_open_sent_rejects_invalid_open_bgp_id)
 {
     libbgp_packet_t open = make_open_packet(65010u, 3u, 0u, true);
 
-    assert_open_sent_rejects_invalid_open(&open);
+    assert_open_sent_rejects_invalid_open(&open, LIBBGP_ERR_INVALID, 2u, 3u);
     libbgp_packet_destroy(&open);
 }
 
@@ -583,12 +654,59 @@ LIBBGP_TEST(fsm_tick_keepalive_and_hold_timeout)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_unexpected_packet_does_not_refresh_hold_timer)
+{
+    struct libbgp_fsm_config config;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    out_ctx_t out;
+    event_ctx_t events;
+    libbgp_packet_t unknown;
+
+    config.local_asn = 65000u;
+    config.local_bgp_id = ip4(192u, 0u, 2u, 1u);
+    config.hold_time = 3u;
+    config.keepalive_time = 0u;
+    config.enable_4byte_asn = true;
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    establish(&fsm, &out, &events);
+
+    libbgp_packet_init(&unknown);
+    unknown.type = LIBBGP_PACKET_UNKNOWN;
+    unknown.raw_type = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 1000u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 3500u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_TYPE, libbgp_fsm_on_packet(&fsm, &unknown));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 4501u));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(3u, out.count);
+    assert_sent_notification(&out, 2u, 4u, 0u);
+    LIBBGP_ASSERT_EQ_U64(2u, events.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_EVENT_SESSION_DOWN, events.types[1]);
+
+    libbgp_packet_destroy(&unknown);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "fsm_init_defaults_and_custom_config", fsm_init_defaults_and_custom_config },
         { "fsm_start_sends_open_and_moves_open_sent", fsm_start_sends_open_and_moves_open_sent },
+        { "fsm_start_send_failure_leaves_idle_and_retryable", fsm_start_send_failure_leaves_idle_and_retryable },
         { "fsm_open_sent_accepts_open_records_peer_and_sends_keepalive", fsm_open_sent_accepts_open_records_peer_and_sends_keepalive },
+        { "fsm_open_sent_rejects_invalid_open_version_with_open_error", fsm_open_sent_rejects_invalid_open_version_with_open_error },
         { "fsm_open_sent_rejects_invalid_open_hold_time", fsm_open_sent_rejects_invalid_open_hold_time },
         { "fsm_open_sent_rejects_invalid_open_bgp_id", fsm_open_sent_rejects_invalid_open_bgp_id },
         { "fsm_open_confirm_keepalive_establishes_and_events", fsm_open_confirm_keepalive_establishes_and_events },
@@ -597,7 +715,8 @@ int main(void)
         { "fsm_established_update_withdraws_route_and_event", fsm_established_update_withdraws_route_and_event },
         { "fsm_notification_moves_idle_and_session_down", fsm_notification_moves_idle_and_session_down },
         { "fsm_wrong_packet_in_open_sent_returns_bad_type_and_idle", fsm_wrong_packet_in_open_sent_returns_bad_type_and_idle },
-        { "fsm_tick_keepalive_and_hold_timeout", fsm_tick_keepalive_and_hold_timeout }
+        { "fsm_tick_keepalive_and_hold_timeout", fsm_tick_keepalive_and_hold_timeout },
+        { "fsm_unexpected_packet_does_not_refresh_hold_timer", fsm_unexpected_packet_does_not_refresh_hold_timer }
     };
 
     return libbgp_run_tests("fsm", tests, LIBBGP_ARRAY_LEN(tests));

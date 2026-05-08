@@ -7,8 +7,12 @@
 #include "libbgp/notification.h"
 
 #define FSM_NOTIFY_MESSAGE_HEADER_ERROR 1u
+#define FSM_NOTIFY_OPEN_MESSAGE_ERROR 2u
 #define FSM_NOTIFY_HOLD_TIMER_EXPIRED 4u
 #define FSM_NOTIFY_CEASE 6u
+#define FSM_OPEN_ERR_UNSUPPORTED_VERSION 1u
+#define FSM_OPEN_ERR_BAD_BGP_ID 3u
+#define FSM_OPEN_ERR_UNACCEPTABLE_HOLD_TIME 6u
 
 typedef struct fsm_impl {
     struct libbgp_fsm_config config;
@@ -136,6 +140,13 @@ static void fsm_publish_event(
 static bool fsm_state_session_up(libbgp_fsm_state_t state)
 {
     return state == LIBBGP_FSM_OPEN_CONFIRM || state == LIBBGP_FSM_ESTABLISHED;
+}
+
+static void fsm_mark_rx_current(fsm_impl_t *impl)
+{
+    if (impl->clock_initialized) {
+        impl->last_rx_ms = impl->current_ms;
+    }
 }
 
 static size_t fsm_as_path_len_and_origin_as(const libbgp_pattr_t *attr, uint32_t *origin_as)
@@ -326,6 +337,8 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     fsm_impl_t *impl = fsm_impl_get(fsm);
     struct libbgp_fsm_config config;
     libbgp_out_handler_t *out;
+    libbgp_fsm_state_t start_state;
+    libbgp_err_t err;
 
     if (impl == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -337,7 +350,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
         bgp_unlock(&impl->lock);
         return LIBBGP_OK;
     }
-    impl->state = LIBBGP_FSM_OPEN_SENT;
+    start_state = impl->state;
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
     impl->negotiated_hold_time = impl->config.hold_time;
@@ -346,7 +359,15 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     out = impl->out;
     bgp_unlock(&impl->lock);
 
-    return fsm_send_open(out, &config);
+    err = fsm_send_open(out, &config);
+    bgp_lock(&impl->lock);
+    if (err == LIBBGP_OK) {
+        impl->state = LIBBGP_FSM_OPEN_SENT;
+    } else if (impl->state == start_state) {
+        impl->state = start_state;
+    }
+    bgp_unlock(&impl->lock);
+    return err;
 }
 
 libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
@@ -385,15 +406,21 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
         out = impl->out;
         impl->state = LIBBGP_FSM_IDLE;
         bgp_unlock(&impl->lock);
-        (void)fsm_send_notification(out, FSM_NOTIFY_MESSAGE_HEADER_ERROR, 0u);
+        (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_UNSUPPORTED_VERSION);
         return LIBBGP_ERR_BAD_LEN;
     }
-    if ((pkt->data.open.hold_time != 0u && pkt->data.open.hold_time < 3u) ||
-        pkt->data.open.bgp_id == 0u) {
+    if (pkt->data.open.hold_time != 0u && pkt->data.open.hold_time < 3u) {
         out = impl->out;
         impl->state = LIBBGP_FSM_IDLE;
         bgp_unlock(&impl->lock);
-        (void)fsm_send_notification(out, FSM_NOTIFY_MESSAGE_HEADER_ERROR, 0u);
+        (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_UNACCEPTABLE_HOLD_TIME);
+        return LIBBGP_ERR_INVALID;
+    }
+    if (pkt->data.open.bgp_id == 0u) {
+        out = impl->out;
+        impl->state = LIBBGP_FSM_IDLE;
+        bgp_unlock(&impl->lock);
+        (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_BAD_BGP_ID);
         return LIBBGP_ERR_INVALID;
     }
     local_hold = impl->config.hold_time;
@@ -416,6 +443,7 @@ static libbgp_err_t fsm_on_open_confirm(fsm_impl_t *impl, const libbgp_packet_t 
     libbgp_event_bus_t *bus = NULL;
 
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
+        fsm_mark_rx_current(impl);
         impl->state = LIBBGP_FSM_ESTABLISHED;
         bus = impl->bus;
         bgp_unlock(&impl->lock);
@@ -439,6 +467,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     uint32_t peer_bgp_id;
 
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
+        fsm_mark_rx_current(impl);
         bgp_unlock(&impl->lock);
         return LIBBGP_OK;
     }
@@ -458,6 +487,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_BAD_TYPE;
     }
+    fsm_mark_rx_current(impl);
     rib4 = impl->rib4;
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
@@ -474,9 +504,6 @@ libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt)
         return LIBBGP_ERR_INVALID;
     }
     bgp_lock(&impl->lock);
-    if (impl->clock_initialized) {
-        impl->last_rx_ms = impl->current_ms;
-    }
     state = impl->state;
     if (pkt->type == LIBBGP_PACKET_NOTIFICATION) {
         if (state == LIBBGP_FSM_ESTABLISHED) {
