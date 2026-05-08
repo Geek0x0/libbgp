@@ -14,6 +14,10 @@ typedef struct libbgp_alloc {
 
 LIBBGP_API extern const libbgp_alloc_t libbgp_default_alloc;
 
+/*
+ * The allocator object passed to libbgp_set_alloc() must remain valid until
+ * another allocator is installed or the default allocator is restored.
+ */
 LIBBGP_API void libbgp_set_alloc(const libbgp_alloc_t *alloc);
 LIBBGP_API const libbgp_alloc_t *libbgp_get_alloc(void);
 

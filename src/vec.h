@@ -20,14 +20,17 @@
 } while (0)
 
 #define bgp_vec_reserve(v, n) \
-    bgp_vec_reserve_impl((void **)&((v)->data), &((v)->cap), sizeof(*(v)->data), (n))
+    (((n) <= (v)->cap || \
+        ((v)->data = bgp_vec_reserve_impl((v)->data, &((v)->cap), \
+            sizeof(*(v)->data), (n))) != NULL) ? \
+        LIBBGP_OK : LIBBGP_ERR_NOMEM)
 
 #define bgp_vec_push(v, value) \
     (bgp_vec_reserve((v), (v)->len + 1) == LIBBGP_OK ? \
         ((v)->data[(v)->len++] = (value), LIBBGP_OK) : LIBBGP_ERR_NOMEM)
 
-static inline libbgp_err_t bgp_vec_reserve_impl(
-    void **data,
+static inline void *bgp_vec_reserve_impl(
+    void *data,
     size_t *cap,
     size_t elem_size,
     size_t need)
@@ -36,30 +39,29 @@ static inline libbgp_err_t bgp_vec_reserve_impl(
     void *new_data;
 
     if (need <= *cap) {
-        return LIBBGP_OK;
+        return data;
     }
 
     new_cap = *cap == 0 ? 4u : *cap;
 
     while (new_cap < need) {
         if (new_cap > ((size_t)-1) / 2u) {
-            return LIBBGP_ERR_NOMEM;
+            return NULL;
         }
         new_cap *= 2u;
     }
 
     if (elem_size != 0 && new_cap > ((size_t)-1) / elem_size) {
-        return LIBBGP_ERR_NOMEM;
+        return NULL;
     }
 
-    new_data = bgp_realloc(*data, new_cap * elem_size);
+    new_data = bgp_realloc(data, new_cap * elem_size);
     if (new_data == NULL) {
-        return LIBBGP_ERR_NOMEM;
+        return NULL;
     }
 
-    *data = new_data;
     *cap = new_cap;
-    return LIBBGP_OK;
+    return new_data;
 }
 
 #endif
