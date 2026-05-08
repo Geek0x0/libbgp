@@ -27,6 +27,15 @@ typedef struct libbgp_logger {
 
 LIBBGP_API void libbgp_logger_init(libbgp_logger_t *logger);
 LIBBGP_API void libbgp_set_default_logger(const libbgp_logger_t *logger);
+
+/*
+ * Returns the internal default logger object.
+ *
+ * In THREADSAFE=1 builds, libbgp_set_default_logger() and libbgp_log(NULL, ...)
+ * synchronize their access to the default logger. Direct mutation through this
+ * pointer is not synchronized; callers that need thread-safe reconfiguration
+ * should install a complete logger with libbgp_set_default_logger().
+ */
 LIBBGP_API libbgp_logger_t *libbgp_get_default_logger(void);
 LIBBGP_API void libbgp_log(libbgp_logger_t *logger, libbgp_log_level_t level, const char *fmt, ...);
 

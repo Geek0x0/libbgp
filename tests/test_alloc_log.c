@@ -26,6 +26,15 @@ static void capture_log(
     (void)vsnprintf(capture->message, sizeof(capture->message), fmt, args);
 }
 
+static void capture_log_alt(
+    libbgp_log_level_t level,
+    const char *fmt,
+    va_list args,
+    void *ctx)
+{
+    capture_log(level, fmt, args, ctx);
+}
+
 LIBBGP_TEST(default_allocator_wrappers_allocate_and_free)
 {
     void *p;
@@ -170,6 +179,70 @@ LIBBGP_TEST(null_logger_uses_default_logger)
     LIBBGP_ASSERT(strcmp("default logger", capture.message) == 0);
 }
 
+LIBBGP_TEST(null_format_is_noop)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_ERROR, NULL, { 0 } };
+    libbgp_logger_t logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_DEBUG;
+
+    libbgp_log(&logger, LIBBGP_LOG_ERROR, NULL);
+
+    LIBBGP_ASSERT_EQ_U64(0u, capture.calls);
+}
+
+LIBBGP_TEST(set_default_logger_copies_by_value)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_DEBUG, NULL, { 0 } };
+    log_capture_t other = { 0u, LIBBGP_LOG_DEBUG, NULL, { 0 } };
+    libbgp_logger_t logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_INFO;
+    libbgp_set_default_logger(&logger);
+
+    logger.log_fn = capture_log_alt;
+    logger.ctx = &other;
+    logger.level = LIBBGP_LOG_ERROR;
+
+    libbgp_log(NULL, LIBBGP_LOG_WARN, "copied %u", 5u);
+    libbgp_set_default_logger(NULL);
+
+    LIBBGP_ASSERT_EQ_U64(1u, capture.calls);
+    LIBBGP_ASSERT_EQ_U64(0u, other.calls);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_LOG_WARN, capture.level);
+    LIBBGP_ASSERT(capture.ctx_seen == &capture);
+    LIBBGP_ASSERT(strcmp("copied 5", capture.message) == 0);
+}
+
+LIBBGP_TEST(set_default_logger_null_resets_defaults)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_DEBUG, NULL, { 0 } };
+    libbgp_logger_t logger;
+    libbgp_logger_t *default_logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_DEBUG;
+    libbgp_set_default_logger(&logger);
+
+    libbgp_set_default_logger(NULL);
+    default_logger = libbgp_get_default_logger();
+
+    LIBBGP_ASSERT(default_logger->log_fn == NULL);
+    LIBBGP_ASSERT(default_logger->ctx == NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_LOG_INFO, default_logger->level);
+
+    libbgp_log(NULL, LIBBGP_LOG_ERROR, "ignored");
+    LIBBGP_ASSERT_EQ_U64(0u, capture.calls);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -179,7 +252,10 @@ int main(void)
         { "strerror_returns_exact_strings", strerror_returns_exact_strings },
         { "error_is_emitted_at_info_level", error_is_emitted_at_info_level },
         { "debug_is_filtered_at_info_level", debug_is_filtered_at_info_level },
-        { "null_logger_uses_default_logger", null_logger_uses_default_logger }
+        { "null_logger_uses_default_logger", null_logger_uses_default_logger },
+        { "null_format_is_noop", null_format_is_noop },
+        { "set_default_logger_copies_by_value", set_default_logger_copies_by_value },
+        { "set_default_logger_null_resets_defaults", set_default_logger_null_resets_defaults }
     };
 
     return libbgp_run_tests("alloc_log", tests, LIBBGP_ARRAY_LEN(tests));
