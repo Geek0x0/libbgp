@@ -88,7 +88,7 @@ libbgp_err_t libbgp_packet_parse(
         return LIBBGP_ERR_BAD_LEN;
     }
     if (!packet_marker_valid(buf)) {
-        return LIBBGP_ERR_INVALID;
+        return LIBBGP_ERR_BAD_LEN;
     }
     wire_len = bgp_get_be16(buf + 16u);
     if (wire_len < LIBBGP_BGP_MIN_PACKET_LEN || wire_len > LIBBGP_BGP_MAX_PACKET_LEN ||

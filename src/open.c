@@ -170,7 +170,7 @@ libbgp_err_t libbgp_open_parse(
         return LIBBGP_ERR_BAD_LEN;
     }
     if (buf[0] != 4u) {
-        return LIBBGP_ERR_INVALID;
+        return LIBBGP_ERR_BAD_LEN;
     }
 
     libbgp_open_init(&tmp);
@@ -240,7 +240,7 @@ libbgp_err_t libbgp_open_write(
         return LIBBGP_ERR_BAD_LEN;
     }
     if (msg->version != 4u) {
-        return LIBBGP_ERR_INVALID;
+        return LIBBGP_ERR_BAD_LEN;
     }
     if (msg->capability_count != 0u && msg->capabilities == NULL) {
         return LIBBGP_ERR_BAD_LEN;

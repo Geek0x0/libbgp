@@ -84,7 +84,7 @@ LIBBGP_TEST(packet_rejects_marker_length_and_keepalive_body)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(NULL, bad_marker, sizeof(bad_marker), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, NULL, sizeof(bad_marker), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_marker, LIBBGP_BGP_HEADER_LEN - 1u, &marker));
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_packet_parse(&pkt, bad_marker, sizeof(bad_marker), &marker));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_marker, sizeof(bad_marker), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_min_len, sizeof(bad_min_len), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_max_len, sizeof(bad_max_len), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_keepalive_len, sizeof(bad_keepalive_len), &marker));
