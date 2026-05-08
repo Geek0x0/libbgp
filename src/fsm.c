@@ -576,6 +576,7 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
 {
     fsm_impl_t *impl = fsm_impl_get(fsm);
     libbgp_out_handler_t *out;
+    libbgp_event_bus_t *bus = NULL;
     libbgp_rib4_t *rib4 = NULL;
     libbgp_rib6_t *rib6 = NULL;
     uint32_t peer_bgp_id = 0u;
@@ -588,11 +589,12 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
     bgp_lock(&impl->lock);
     notify = impl->state != LIBBGP_FSM_IDLE;
     was_established = impl->state == LIBBGP_FSM_ESTABLISHED;
-    fsm_snapshot_teardown(impl, &out, NULL, &rib4, &rib6, &peer_bgp_id);
+    fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
     bgp_unlock(&impl->lock);
 
     if (was_established) {
         fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
     }
     return notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, 0u) : LIBBGP_OK;
 }
