@@ -26,7 +26,7 @@ CPPFLAGS := $(CPPFLAGS_BASE)
 
 LIB_SRCS := src/alloc.c src/errcode.c src/log.c src/prefix4.c src/prefix6.c src/capability.c src/pattr.c \
 	src/open.c src/keepalive.c src/notification.c src/update.c src/packet.c \
-	src/hashmap.c src/rib4.c src/rib6.c src/filter.c src/event.c
+	src/hashmap.c src/rib4.c src/rib6.c src/filter.c src/event.c src/sink.c src/out_handler.c
 LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SUPPORT := tests/test_main.c tests/fixtures/alloc_tracker.c
@@ -34,7 +34,8 @@ TEST_COMMON_OBJS := $(TEST_SUPPORT:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c tests/test_prefix.c tests/test_capability.c tests/test_pattr.c \
 	tests/test_open.c tests/test_notification.c tests/test_update.c tests/test_packet.c \
-	tests/test_hashmap.c tests/test_rib.c tests/test_filter.c tests/test_event.c
+	tests/test_hashmap.c tests/test_rib.c tests/test_filter.c tests/test_event.c \
+	tests/test_sink.c tests/test_out_handler.c
 TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
