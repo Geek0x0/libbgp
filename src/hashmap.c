@@ -105,7 +105,7 @@ libbgp_err_t bgp_hashmap_insert(bgp_hashmap_t *map, void *key, void *value)
         return LIBBGP_ERR_INVALID;
     }
 
-    if (map->len >= map->bucket_count * 3u / 4u) {
+    if (map->len >= map->bucket_count - map->bucket_count / 4u) {
         if (map->bucket_count > SIZE_MAX / 2u ||
             hashmap_resize(map, map->bucket_count * 2u) != LIBBGP_OK) {
             return LIBBGP_ERR_NOMEM;

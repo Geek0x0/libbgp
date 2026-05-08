@@ -221,6 +221,31 @@ LIBBGP_TEST(rib4_replace_withdraw_discard_and_scoped_lookup)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_lookup_returns_borrowed_pointer_replaced_by_mutation)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(192u, 0u, 2u, 0u, 24u);
+    libbgp_rib4_route_t route = route4(prefix, 55u);
+    const libbgp_rib4_route_t *before = NULL;
+    const libbgp_rib4_route_t *after = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    route.weight = 1;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(192u, 0u, 2u, 9u), &before));
+    LIBBGP_ASSERT(before != NULL);
+    LIBBGP_ASSERT_EQ_I64(1, before->weight);
+
+    route.weight = 2;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(192u, 0u, 2u, 9u), &after));
+    LIBBGP_ASSERT(after != NULL);
+    LIBBGP_ASSERT(after != before);
+    LIBBGP_ASSERT_EQ_I64(2, after->weight);
+
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_insert_refs_attrs_and_destroy_unrefs)
 {
     libbgp_rib4_t rib;
@@ -297,6 +322,7 @@ int main(void)
         { "rib4_insert_local_and_lookup_longest_prefix", rib4_insert_local_and_lookup_longest_prefix },
         { "rib4_best_route_ordering_for_same_prefix", rib4_best_route_ordering_for_same_prefix },
         { "rib4_replace_withdraw_discard_and_scoped_lookup", rib4_replace_withdraw_discard_and_scoped_lookup },
+        { "rib4_lookup_returns_borrowed_pointer_replaced_by_mutation", rib4_lookup_returns_borrowed_pointer_replaced_by_mutation },
         { "rib4_insert_refs_attrs_and_destroy_unrefs", rib4_insert_refs_attrs_and_destroy_unrefs },
         { "rib6_insert_lookup_withdraw_discard_and_scoped", rib6_insert_lookup_withdraw_discard_and_scoped }
     };
