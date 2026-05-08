@@ -322,6 +322,46 @@ LIBBGP_TEST(fsm_open_sent_accepts_open_records_peer_and_sends_keepalive)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+static void assert_open_sent_rejects_invalid_open(libbgp_packet_t *open)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+
+    setup_out(&out_handler, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, NULL));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_fsm_on_packet(&fsm, open));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_fsm_peer_asn(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_fsm_peer_bgp_id(&fsm));
+    LIBBGP_ASSERT_EQ_U64(2u, out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_NOTIFICATION, out.sent[1].type);
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_open_sent_rejects_invalid_open_hold_time)
+{
+    libbgp_packet_t open = make_open_packet(65010u, 1u, ip4(203u, 0u, 113u, 9u), true);
+
+    assert_open_sent_rejects_invalid_open(&open);
+    open.data.open.hold_time = 2u;
+    assert_open_sent_rejects_invalid_open(&open);
+    libbgp_packet_destroy(&open);
+}
+
+LIBBGP_TEST(fsm_open_sent_rejects_invalid_open_bgp_id)
+{
+    libbgp_packet_t open = make_open_packet(65010u, 3u, 0u, true);
+
+    assert_open_sent_rejects_invalid_open(&open);
+    libbgp_packet_destroy(&open);
+}
+
 LIBBGP_TEST(fsm_open_confirm_keepalive_establishes_and_events)
 {
     libbgp_fsm_t fsm;
@@ -549,6 +589,8 @@ int main(void)
         { "fsm_init_defaults_and_custom_config", fsm_init_defaults_and_custom_config },
         { "fsm_start_sends_open_and_moves_open_sent", fsm_start_sends_open_and_moves_open_sent },
         { "fsm_open_sent_accepts_open_records_peer_and_sends_keepalive", fsm_open_sent_accepts_open_records_peer_and_sends_keepalive },
+        { "fsm_open_sent_rejects_invalid_open_hold_time", fsm_open_sent_rejects_invalid_open_hold_time },
+        { "fsm_open_sent_rejects_invalid_open_bgp_id", fsm_open_sent_rejects_invalid_open_bgp_id },
         { "fsm_open_confirm_keepalive_establishes_and_events", fsm_open_confirm_keepalive_establishes_and_events },
         { "fsm_established_keepalive_stays_established", fsm_established_keepalive_stays_established },
         { "fsm_established_update_adds_route_and_event", fsm_established_update_adds_route_and_event },
