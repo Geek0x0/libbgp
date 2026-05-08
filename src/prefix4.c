@@ -1,0 +1,175 @@
+#include "libbgp/prefix4.h"
+
+#include <string.h>
+
+#include "internal.h"
+
+static size_t prefix4_octets(uint8_t cidr)
+{
+    return ((size_t)cidr + 7u) / 8u;
+}
+
+static uint8_t partial_mask(uint8_t bits)
+{
+    return (uint8_t)(0xffu << (8u - bits));
+}
+
+uint32_t libbgp_cidr_to_mask(uint8_t cidr)
+{
+    uint8_t bytes[4] = { 0u, 0u, 0u, 0u };
+    size_t full;
+    uint8_t rem;
+    size_t i;
+
+    if (cidr > 32u) {
+        return 0u;
+    }
+
+    full = (size_t)cidr / 8u;
+    rem = (uint8_t)(cidr % 8u);
+
+    for (i = 0u; i < full; i++) {
+        bytes[i] = 0xffu;
+    }
+    if (rem != 0u) {
+        bytes[full] = partial_mask(rem);
+    }
+
+    {
+        uint32_t mask = 0u;
+        memcpy(&mask, bytes, sizeof(mask));
+        return mask;
+    }
+}
+
+libbgp_err_t libbgp_prefix4_parse(
+    libbgp_prefix4_t *p,
+    const uint8_t *buf,
+    size_t len,
+    size_t *consumed)
+{
+    uint8_t cidr;
+    size_t octets;
+    uint8_t bytes[4] = { 0u, 0u, 0u, 0u };
+
+    if (p == NULL || buf == NULL || len < 1u) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+
+    cidr = buf[0];
+    if (cidr > 32u) {
+        return LIBBGP_ERR_INVALID;
+    }
+
+    octets = prefix4_octets(cidr);
+    if (len < 1u + octets) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+
+    if (octets != 0u) {
+        memcpy(bytes, buf + 1u, octets);
+        if ((cidr % 8u) != 0u) {
+            bytes[octets - 1u] &= partial_mask((uint8_t)(cidr % 8u));
+        }
+    }
+
+    memcpy(&p->addr, bytes, sizeof(p->addr));
+    p->len = cidr;
+    if (consumed != NULL) {
+        *consumed = 1u + octets;
+    }
+
+    return LIBBGP_OK;
+}
+
+libbgp_err_t libbgp_prefix4_write(
+    const libbgp_prefix4_t *p,
+    uint8_t *buf,
+    size_t len,
+    size_t *out_len)
+{
+    size_t octets;
+    uint8_t bytes[4];
+
+    if (p == NULL || buf == NULL || p->len > 32u) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+
+    octets = prefix4_octets(p->len);
+    if (len < 1u + octets) {
+        return LIBBGP_ERR_BUFFER;
+    }
+
+    memcpy(bytes, &p->addr, sizeof(bytes));
+    if (octets != 0u && (p->len % 8u) != 0u) {
+        bytes[octets - 1u] &= partial_mask((uint8_t)(p->len % 8u));
+    }
+
+    buf[0] = p->len;
+    if (octets != 0u) {
+        memcpy(buf + 1u, bytes, octets);
+    }
+    if (out_len != NULL) {
+        *out_len = 1u + octets;
+    }
+
+    return LIBBGP_OK;
+}
+
+bool libbgp_prefix4_eq(const libbgp_prefix4_t *a, const libbgp_prefix4_t *b)
+{
+    if (a == NULL || b == NULL) {
+        return false;
+    }
+
+    return a->addr == b->addr && a->len == b->len;
+}
+
+bool libbgp_prefix4_includes(
+    const libbgp_prefix4_t *outer,
+    const libbgp_prefix4_t *inner)
+{
+    uint32_t mask;
+
+    if (outer == NULL || inner == NULL || outer->len > 32u || inner->len > 32u) {
+        return false;
+    }
+    if (inner->len < outer->len) {
+        return false;
+    }
+
+    mask = libbgp_cidr_to_mask(outer->len);
+    return (inner->addr & mask) == (outer->addr & mask);
+}
+
+int libbgp_prefix4_cmp(const libbgp_prefix4_t *a, const libbgp_prefix4_t *b)
+{
+    uint8_t a_bytes[4];
+    uint8_t b_bytes[4];
+    int cmp;
+
+    if (a == b) {
+        return 0;
+    }
+    if (a == NULL) {
+        return -1;
+    }
+    if (b == NULL) {
+        return 1;
+    }
+
+    memcpy(a_bytes, &a->addr, sizeof(a_bytes));
+    memcpy(b_bytes, &b->addr, sizeof(b_bytes));
+    cmp = memcmp(a_bytes, b_bytes, sizeof(a_bytes));
+    if (cmp != 0) {
+        return cmp;
+    }
+    if (a->len < b->len) {
+        return -1;
+    }
+    if (a->len > b->len) {
+        return 1;
+    }
+
+    return 0;
+}
