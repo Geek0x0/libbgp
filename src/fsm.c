@@ -388,6 +388,14 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
         (void)fsm_send_notification(out, FSM_NOTIFY_MESSAGE_HEADER_ERROR, 0u);
         return LIBBGP_ERR_BAD_LEN;
     }
+    if ((pkt->data.open.hold_time != 0u && pkt->data.open.hold_time < 3u) ||
+        pkt->data.open.bgp_id == 0u) {
+        out = impl->out;
+        impl->state = LIBBGP_FSM_IDLE;
+        bgp_unlock(&impl->lock);
+        (void)fsm_send_notification(out, FSM_NOTIFY_MESSAGE_HEADER_ERROR, 0u);
+        return LIBBGP_ERR_INVALID;
+    }
     local_hold = impl->config.hold_time;
     peer_hold = pkt->data.open.hold_time;
     impl->peer_asn = libbgp_open_get_4b_asn(&pkt->data.open);
