@@ -169,10 +169,6 @@ libbgp_err_t libbgp_open_parse(
     if (len - LIBBGP_OPEN_FIXED_LEN < (size_t)opt_len) {
         return LIBBGP_ERR_BAD_LEN;
     }
-    if (buf[0] != 4u) {
-        return LIBBGP_ERR_BAD_LEN;
-    }
-
     libbgp_open_init(&tmp);
     tmp.version = buf[0];
     tmp.my_asn = bgp_get_be16(buf + 1u);

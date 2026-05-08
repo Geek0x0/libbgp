@@ -59,6 +59,22 @@ LIBBGP_TEST(open_parse_write_four_byte_asn_and_mpbgp_caps)
     libbgp_open_destroy(&msg);
 }
 
+LIBBGP_TEST(open_parse_accepts_unsupported_version_for_fsm_notification)
+{
+    const uint8_t body[] = { 3u, 0xfdu, 0xe8u, 0u, 90u, 203u, 0u, 113u, 1u, 0u };
+    size_t used = 0u;
+    libbgp_open_msg_t msg;
+
+    libbgp_open_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_open_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(body), used);
+    LIBBGP_ASSERT_EQ_U64(3u, msg.version);
+    LIBBGP_ASSERT_EQ_U64(65000u, msg.my_asn);
+    LIBBGP_ASSERT_EQ_U64(90u, msg.hold_time);
+    LIBBGP_ASSERT_EQ_U64(0xcb007101u, msg.bgp_id);
+    libbgp_open_destroy(&msg);
+}
+
 LIBBGP_TEST(open_add_capability_refs_and_write_emits_capability_param)
 {
     const uint8_t expected[] = {
@@ -91,7 +107,6 @@ LIBBGP_TEST(open_add_capability_refs_and_write_emits_capability_param)
 LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
 {
     const uint8_t short_body[] = { 4u, 0u, 1u };
-    const uint8_t bad_version[] = { 3u, 0u, 1u, 0u, 90u, 1u, 2u, 3u, 4u, 0u };
     const uint8_t bad_opt_len[] = { 4u, 0u, 1u, 0u, 90u, 1u, 2u, 3u, 4u, 2u, 99u };
     uint8_t out[9];
     size_t marker = 99u;
@@ -101,7 +116,6 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(NULL, short_body, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, NULL, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, short_body, sizeof(short_body), &marker));
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, bad_version, sizeof(bad_version), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, bad_opt_len, sizeof(bad_opt_len), &marker));
     LIBBGP_ASSERT_EQ_U64(99u, marker);
 
@@ -120,6 +134,7 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "open_parse_write_two_byte_asn_fixture_body", open_parse_write_two_byte_asn_fixture_body },
         { "open_parse_write_four_byte_asn_and_mpbgp_caps", open_parse_write_four_byte_asn_and_mpbgp_caps },
+        { "open_parse_accepts_unsupported_version_for_fsm_notification", open_parse_accepts_unsupported_version_for_fsm_notification },
         { "open_add_capability_refs_and_write_emits_capability_param", open_add_capability_refs_and_write_emits_capability_param },
         { "open_rejects_invalid_version_lengths_and_small_output", open_rejects_invalid_version_lengths_and_small_output }
     };
