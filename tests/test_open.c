@@ -101,13 +101,15 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(NULL, short_body, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, NULL, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, short_body, sizeof(short_body), &marker));
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_open_parse(&msg, bad_version, sizeof(bad_version), &marker));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, bad_version, sizeof(bad_version), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, bad_opt_len, sizeof(bad_opt_len), &marker));
     LIBBGP_ASSERT_EQ_U64(99u, marker);
 
-    msg.version = 4u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_write(NULL, out, sizeof(out), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_write(&msg, NULL, sizeof(out), &marker));
+    msg.version = 3u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_write(&msg, out, sizeof(out), &marker));
+    msg.version = 4u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_open_write(&msg, out, sizeof(out), &marker));
     LIBBGP_ASSERT_EQ_U64(99u, marker);
     libbgp_open_destroy(&msg);
