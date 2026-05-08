@@ -57,8 +57,11 @@ static bool as_path_contains(const libbgp_pattr_t *attr, uint32_t asn)
     }
     for (i = 0u; i < attr->data.as_path.segment_count; i++) {
         const libbgp_as_path_segment_t *segment = &attr->data.as_path.segments[i];
+        if (segment->asn_count != 0u && segment->asns == NULL) {
+            return false;
+        }
         for (j = 0u; j < segment->asn_count; j++) {
-            if (segment->asns != NULL && segment->asns[j] == asn) {
+            if (segment->asns[j] == asn) {
                 return true;
             }
         }
@@ -73,8 +76,11 @@ static bool community_contains(const libbgp_pattr_t *attr, uint32_t community)
     if (attr == NULL || attr->type != LIBBGP_PATTR_COMMUNITY) {
         return false;
     }
+    if (attr->data.community.count != 0u && attr->data.community.values == NULL) {
+        return false;
+    }
     for (i = 0u; i < attr->data.community.count; i++) {
-        if (attr->data.community.values != NULL && attr->data.community.values[i] == community) {
+        if (attr->data.community.values[i] == community) {
             return true;
         }
     }
@@ -85,8 +91,11 @@ static bool route_has_asn(const libbgp_rib4_route_t *route, uint32_t asn)
 {
     size_t i;
 
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
     for (i = 0u; i < route->attr_count; i++) {
-        if (as_path_contains(route->attrs == NULL ? NULL : route->attrs[i], asn)) {
+        if (as_path_contains(route->attrs[i], asn)) {
             return true;
         }
     }
@@ -97,8 +106,11 @@ static bool route_has_community(const libbgp_rib4_route_t *route, uint32_t commu
 {
     size_t i;
 
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
     for (i = 0u; i < route->attr_count; i++) {
-        if (community_contains(route->attrs == NULL ? NULL : route->attrs[i], community)) {
+        if (community_contains(route->attrs[i], community)) {
             return true;
         }
     }
@@ -141,14 +153,21 @@ libbgp_err_t libbgp_filter_init(libbgp_filter_t *filter)
 void libbgp_filter_destroy(libbgp_filter_t *filter)
 {
     filter_impl_t *impl = filter_impl_get(filter);
+    libbgp_filter_rule_t *rules;
 
     if (impl == NULL) {
         return;
     }
-    bgp_lock_destroy(&impl->lock);
-    bgp_free(impl->rules);
-    bgp_free(impl);
+    bgp_lock(&impl->lock);
+    rules = impl->rules;
+    impl->rules = NULL;
+    impl->count = 0u;
+    impl->cap = 0u;
     filter->impl = NULL;
+    bgp_unlock(&impl->lock);
+    bgp_lock_destroy(&impl->lock);
+    bgp_free(rules);
+    bgp_free(impl);
 }
 
 libbgp_err_t libbgp_filter_add_rule(libbgp_filter_t *filter, const libbgp_filter_rule_t *rule)
