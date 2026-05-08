@@ -351,6 +351,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
         return LIBBGP_OK;
     }
     start_state = impl->state;
+    impl->state = LIBBGP_FSM_OPEN_SENT;
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
     impl->negotiated_hold_time = impl->config.hold_time;
@@ -361,9 +362,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
 
     err = fsm_send_open(out, &config);
     bgp_lock(&impl->lock);
-    if (err == LIBBGP_OK) {
-        impl->state = LIBBGP_FSM_OPEN_SENT;
-    } else if (impl->state == start_state) {
+    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_SENT) {
         impl->state = start_state;
     }
     bgp_unlock(&impl->lock);
