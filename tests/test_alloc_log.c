@@ -2,7 +2,29 @@
 #include "fixtures/alloc_tracker.h"
 
 #include "libbgp/alloc.h"
+#include "libbgp/log.h"
 #include "libbgp/types.h"
+
+typedef struct log_capture {
+    unsigned int calls;
+    libbgp_log_level_t level;
+    void *ctx_seen;
+    char message[128];
+} log_capture_t;
+
+static void capture_log(
+    libbgp_log_level_t level,
+    const char *fmt,
+    va_list args,
+    void *ctx)
+{
+    log_capture_t *capture = (log_capture_t *)ctx;
+
+    capture->calls++;
+    capture->level = level;
+    capture->ctx_seen = ctx;
+    (void)vsnprintf(capture->message, sizeof(capture->message), fmt, args);
+}
 
 LIBBGP_TEST(default_allocator_wrappers_allocate_and_free)
 {
@@ -95,13 +117,69 @@ LIBBGP_TEST(strerror_returns_exact_strings)
     LIBBGP_ASSERT(strcmp("unknown error", libbgp_strerror((libbgp_err_t)-999)) == 0);
 }
 
+LIBBGP_TEST(error_is_emitted_at_info_level)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_DEBUG, NULL, { 0 } };
+    libbgp_logger_t logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_INFO;
+
+    libbgp_log(&logger, LIBBGP_LOG_ERROR, "failure %d", 7);
+
+    LIBBGP_ASSERT_EQ_U64(1u, capture.calls);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_LOG_ERROR, capture.level);
+    LIBBGP_ASSERT(capture.ctx_seen == &capture);
+    LIBBGP_ASSERT(strcmp("failure 7", capture.message) == 0);
+}
+
+LIBBGP_TEST(debug_is_filtered_at_info_level)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_ERROR, NULL, { 0 } };
+    libbgp_logger_t logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_INFO;
+
+    libbgp_log(&logger, LIBBGP_LOG_DEBUG, "hidden");
+
+    LIBBGP_ASSERT_EQ_U64(0u, capture.calls);
+}
+
+LIBBGP_TEST(null_logger_uses_default_logger)
+{
+    log_capture_t capture = { 0u, LIBBGP_LOG_DEBUG, NULL, { 0 } };
+    libbgp_logger_t logger;
+
+    libbgp_logger_init(&logger);
+    logger.log_fn = capture_log;
+    logger.ctx = &capture;
+    logger.level = LIBBGP_LOG_WARN;
+    libbgp_set_default_logger(&logger);
+
+    libbgp_log(NULL, LIBBGP_LOG_ERROR, "default %s", "logger");
+    libbgp_set_default_logger(NULL);
+
+    LIBBGP_ASSERT_EQ_U64(1u, capture.calls);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_LOG_ERROR, capture.level);
+    LIBBGP_ASSERT(capture.ctx_seen == &capture);
+    LIBBGP_ASSERT(strcmp("default logger", capture.message) == 0);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "default_allocator_wrappers_allocate_and_free", default_allocator_wrappers_allocate_and_free },
         { "custom_allocator_callbacks_are_used_with_ctx", custom_allocator_callbacks_are_used_with_ctx },
         { "set_alloc_null_resets_default_allocator", set_alloc_null_resets_default_allocator },
-        { "strerror_returns_exact_strings", strerror_returns_exact_strings }
+        { "strerror_returns_exact_strings", strerror_returns_exact_strings },
+        { "error_is_emitted_at_info_level", error_is_emitted_at_info_level },
+        { "debug_is_filtered_at_info_level", debug_is_filtered_at_info_level },
+        { "null_logger_uses_default_logger", null_logger_uses_default_logger }
     };
 
     return libbgp_run_tests("alloc_log", tests, LIBBGP_ARRAY_LEN(tests));
