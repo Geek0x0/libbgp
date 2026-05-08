@@ -38,6 +38,10 @@ struct libbgp_fsm {
 LIBBGP_API libbgp_err_t libbgp_fsm_init(libbgp_fsm_t *fsm, const struct libbgp_fsm_config *config);
 LIBBGP_API void libbgp_fsm_destroy(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_fsm_state_t libbgp_fsm_state(const libbgp_fsm_t *fsm);
+/*
+ * Attached RIBs, event buses, and output handlers are borrowed pointers.
+ * Keep them alive while attached and externally synchronize destroy/replace.
+ */
 LIBBGP_API void libbgp_fsm_set_rib4(libbgp_fsm_t *fsm, libbgp_rib4_t *rib4);
 LIBBGP_API void libbgp_fsm_set_rib6(libbgp_fsm_t *fsm, libbgp_rib6_t *rib6);
 LIBBGP_API void libbgp_fsm_set_event_bus(libbgp_fsm_t *fsm, libbgp_event_bus_t *bus);
