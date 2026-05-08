@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 #if defined(LIBBGP_SHARED) && defined(__GNUC__)
 #define LIBBGP_API __attribute__((visibility("default")))

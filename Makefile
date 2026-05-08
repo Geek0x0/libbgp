@@ -3,7 +3,8 @@ AR ?= ar
 PREFIX ?= /usr/local
 THREADSAFE ?= 0
 
-BUILD_DIR := build
+BUILD_ROOT := build
+BUILD_DIR := $(BUILD_ROOT)/threadsafe-$(THREADSAFE)
 LIB_NAME := bgp
 STATIC_LIB := $(BUILD_DIR)/lib$(LIB_NAME).a
 SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
@@ -11,7 +12,7 @@ SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
 PUBLIC_HEADERS := $(wildcard include/libbgp/*.h)
 
 CPPFLAGS_BASE := -Iinclude
-CFLAGS_BASE := -std=c11 -Wall -Wextra -pedantic -fPIC
+CFLAGS_BASE := -std=c11 -Wall -Wextra -pedantic -fPIC -MMD -MP
 CFLAGS_EXTRA ?=
 LDFLAGS_EXTRA ?=
 
@@ -29,10 +30,14 @@ LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_SUPPORT := tests/test_main.c tests/fixtures/alloc_tracker.c
 TEST_COMMON_OBJS := $(TEST_SUPPORT:%.c=$(BUILD_DIR)/%.o)
 
-TEST_SRCS := tests/test_alloc_log.c
+TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c
+TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
+DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+
 .PHONY: all clean test install headers
+.SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB)
 
@@ -49,7 +54,7 @@ $(STATIC_LIB): $(BUILD_DIR) $(LIB_OBJS)
 $(SHARED_LIB): $(BUILD_DIR) $(LIB_OBJS)
 	$(CC) -shared $(LIB_OBJS) $(LDFLAGS_EXTRA) -o $@
 
-$(BUILD_DIR)/tests/%: tests/%.c $(TEST_COMMON_OBJS) $(STATIC_LIB)
+$(BUILD_DIR)/tests/%: $(BUILD_DIR)/tests/%.o $(TEST_COMMON_OBJS) $(STATIC_LIB)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(TEST_COMMON_OBJS) $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
 
@@ -68,4 +73,6 @@ install: all
 	cp $(STATIC_LIB) $(SHARED_LIB) $(DESTDIR)$(PREFIX)/lib/
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_ROOT)
+
+-include $(DEPS)

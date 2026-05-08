@@ -1,3 +1,4 @@
+#include <stdatomic.h>
 #include <stdlib.h>
 #include "libbgp/alloc.h"
 
@@ -33,16 +34,19 @@ const libbgp_alloc_t libbgp_default_alloc = {
     NULL
 };
 
-static const libbgp_alloc_t *g_alloc = &libbgp_default_alloc;
+static _Atomic(const libbgp_alloc_t *) g_alloc = &libbgp_default_alloc;
 
 void libbgp_set_alloc(const libbgp_alloc_t *alloc)
 {
-    g_alloc = alloc ? alloc : &libbgp_default_alloc;
+    atomic_store_explicit(
+        &g_alloc,
+        alloc ? alloc : &libbgp_default_alloc,
+        memory_order_release);
 }
 
 const libbgp_alloc_t *libbgp_get_alloc(void)
 {
-    return g_alloc;
+    return atomic_load_explicit(&g_alloc, memory_order_acquire);
 }
 
 void *libbgp_malloc(size_t size)
