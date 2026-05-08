@@ -39,6 +39,11 @@ LIBBGP_API libbgp_err_t libbgp_event_bus_subscribe(
     void *ctx,
     uint64_t *out_id);
 LIBBGP_API libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id);
+/*
+ * Publish snapshots matching subscribers before invoking callbacks. An
+ * unsubscribe during an in-flight publish does not cancel callbacks already
+ * captured by that publish.
+ */
 LIBBGP_API size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *event);
 LIBBGP_API size_t libbgp_event_bus_subscriber_count(const libbgp_event_bus_t *bus);
 

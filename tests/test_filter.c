@@ -215,6 +215,58 @@ LIBBGP_TEST(filter_community_contains_exact_value)
     libbgp_pattr_unref(community);
 }
 
+LIBBGP_TEST(filter_malformed_public_attr_structs_fail_closed)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(192u, 0u, 2u, 0u, 24u));
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *community = libbgp_pattr_new(LIBBGP_PATTR_COMMUNITY);
+    libbgp_pattr_t *attrs[1];
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(community != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64512u;
+    route.attr_count = 1u;
+    route.attrs = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    as_path->data.as_path.segments =
+        (libbgp_as_path_segment_t *)calloc(1u, sizeof(*as_path->data.as_path.segments));
+    LIBBGP_ASSERT(as_path->data.as_path.segments != NULL);
+    as_path->data.as_path.segment_count = 1u;
+    as_path->data.as_path.segments[0].asn_count = 1u;
+    as_path->data.as_path.segments[0].asns = NULL;
+    attrs[0] = as_path;
+    route.attrs = attrs;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_clear(&filter);
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.community = 0x000a0001u;
+    community->data.community.count = 1u;
+    community->data.community.values = NULL;
+    attrs[0] = community;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    free_attr_payload(as_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(community);
+}
+
 LIBBGP_TEST(filter_clear_and_rule_count)
 {
     libbgp_filter_t filter;
@@ -244,6 +296,7 @@ int main(void)
         { "filter_prefix_rule_matches_included_route_prefix", filter_prefix_rule_matches_included_route_prefix },
         { "filter_as_path_and_as4_path_contains_asn", filter_as_path_and_as4_path_contains_asn },
         { "filter_community_contains_exact_value", filter_community_contains_exact_value },
+        { "filter_malformed_public_attr_structs_fail_closed", filter_malformed_public_attr_structs_fail_closed },
         { "filter_clear_and_rule_count", filter_clear_and_rule_count }
     };
 

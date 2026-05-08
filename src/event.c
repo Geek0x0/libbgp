@@ -85,14 +85,21 @@ libbgp_err_t libbgp_event_bus_init(libbgp_event_bus_t *bus)
 void libbgp_event_bus_destroy(libbgp_event_bus_t *bus)
 {
     event_bus_impl_t *impl = event_bus_impl_get(bus);
+    event_subscriber_t *subs;
 
     if (impl == NULL) {
         return;
     }
-    bgp_lock_destroy(&impl->lock);
-    bgp_free(impl->subs);
-    bgp_free(impl);
+    bgp_lock(&impl->lock);
+    subs = impl->subs;
+    impl->subs = NULL;
+    impl->count = 0u;
+    impl->cap = 0u;
     bus->impl = NULL;
+    bgp_unlock(&impl->lock);
+    bgp_lock_destroy(&impl->lock);
+    bgp_free(subs);
+    bgp_free(impl);
 }
 
 libbgp_err_t libbgp_event_bus_subscribe(
