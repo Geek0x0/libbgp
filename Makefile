@@ -24,13 +24,15 @@ endif
 CFLAGS := $(CFLAGS_BASE) $(CFLAGS_EXTRA)
 CPPFLAGS := $(CPPFLAGS_BASE)
 
-LIB_SRCS := src/alloc.c src/errcode.c src/log.c src/prefix4.c src/prefix6.c src/capability.c src/pattr.c
+LIB_SRCS := src/alloc.c src/errcode.c src/log.c src/prefix4.c src/prefix6.c src/capability.c src/pattr.c \
+	src/open.c src/keepalive.c src/notification.c src/update.c src/packet.c
 LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 TEST_SUPPORT := tests/test_main.c tests/fixtures/alloc_tracker.c
 TEST_COMMON_OBJS := $(TEST_SUPPORT:%.c=$(BUILD_DIR)/%.o)
 
-TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c tests/test_prefix.c tests/test_capability.c tests/test_pattr.c
+TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c tests/test_prefix.c tests/test_capability.c tests/test_pattr.c \
+	tests/test_open.c tests/test_notification.c tests/test_update.c tests/test_packet.c
 TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
