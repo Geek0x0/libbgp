@@ -1631,6 +1631,27 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
     return err;
 }
 
+static void fsm_rollback_failed_local_keepalive(fsm_impl_t *impl, uint64_t session_generation)
+{
+    bool same_attempt = impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
+        impl->session_generation == session_generation;
+    bool reentrant_established = impl->state == LIBBGP_FSM_ESTABLISHED &&
+        impl->session_generation == session_generation + 1u;
+
+    if (!same_attempt && !reentrant_established) {
+        return;
+    }
+    impl->state = LIBBGP_FSM_IDLE;
+    impl->peer_asn = 0u;
+    impl->peer_bgp_id = 0u;
+    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->peer_mpbgp_ipv6 = false;
+    impl->clock_initialized = false;
+    impl->passive_open_send_pending = false;
+    impl->passive_keepalive_pending = false;
+    impl->session_generation++;
+}
+
 static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pkt)
 {
     libbgp_out_handler_t *out;
@@ -1694,16 +1715,8 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
     bgp_unlock(&impl->lock);
     err = fsm_send_keepalive(out);
     bgp_lock(&impl->lock);
-    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
-        impl->session_generation == session_generation) {
-        impl->state = LIBBGP_FSM_IDLE;
-        impl->peer_asn = 0u;
-        impl->peer_bgp_id = 0u;
-        impl->negotiated_hold_time = impl->config.hold_time;
-        impl->peer_mpbgp_ipv6 = false;
-        impl->clock_initialized = false;
-        impl->passive_open_send_pending = false;
-        impl->session_generation++;
+    if (err != LIBBGP_OK) {
+        fsm_rollback_failed_local_keepalive(impl, session_generation);
     }
     bgp_unlock(&impl->lock);
     return err;
@@ -1806,17 +1819,8 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
 
 relock_after_send:
     bgp_lock(&impl->lock);
-    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
-        impl->session_generation == session_generation) {
-        impl->state = LIBBGP_FSM_IDLE;
-        impl->peer_asn = 0u;
-        impl->peer_bgp_id = 0u;
-        impl->negotiated_hold_time = impl->config.hold_time;
-        impl->peer_mpbgp_ipv6 = false;
-        impl->clock_initialized = false;
-        impl->passive_open_send_pending = false;
-        impl->passive_keepalive_pending = false;
-        impl->session_generation++;
+    if (err != LIBBGP_OK) {
+        fsm_rollback_failed_local_keepalive(impl, session_generation);
     }
     bgp_unlock(&impl->lock);
     return err;
