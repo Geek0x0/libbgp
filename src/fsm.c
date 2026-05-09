@@ -615,7 +615,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
     return err;
 }
 
-static void fsm_withdraw_journaled_routes(
+static void fsm_remove_journaled_insertions(
     const fsm_update_journal_t *journal,
     libbgp_rib4_t *rib4,
     libbgp_rib6_t *rib6,
@@ -633,7 +633,6 @@ static void fsm_withdraw_journaled_routes(
                 peer_bgp_id,
                 &journal->routes4[i - 1u].prefix,
                 journal->routes4[i - 1u].update_id);
-            (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i - 1u].replaced);
         }
     }
     if (rib6 != NULL) {
@@ -643,6 +642,28 @@ static void fsm_withdraw_journaled_routes(
                 peer_bgp_id,
                 &journal->routes6[i - 1u].prefix,
                 journal->routes6[i - 1u].update_id);
+        }
+    }
+}
+
+static void fsm_restore_journaled_replacements(
+    const fsm_update_journal_t *journal,
+    libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id)
+{
+    size_t i;
+
+    if (journal == NULL) {
+        return;
+    }
+    if (rib4 != NULL) {
+        for (i = journal->routes4_count; i > 0u; i--) {
+            (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i - 1u].replaced);
+        }
+    }
+    if (rib6 != NULL) {
+        for (i = journal->routes6_count; i > 0u; i--) {
             (void)libbgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &journal->routes6[i - 1u].replaced);
         }
     }
@@ -677,8 +698,18 @@ static void fsm_rollback_update_journal(
     libbgp_rib6_t *rib6,
     uint32_t peer_bgp_id)
 {
-    fsm_withdraw_journaled_routes(journal, rib4, rib6, peer_bgp_id);
+    fsm_remove_journaled_insertions(journal, rib4, rib6, peer_bgp_id);
+    fsm_restore_journaled_replacements(journal, rib4, rib6, peer_bgp_id);
     fsm_restore_journaled_withdrawals(journal, rib4, rib6, peer_bgp_id);
+}
+
+static void fsm_cleanup_stale_update_journal(
+    const fsm_update_journal_t *journal,
+    libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id)
+{
+    fsm_remove_journaled_insertions(journal, rib4, rib6, peer_bgp_id);
 }
 
 static void fsm_mark_rx_current(fsm_impl_t *impl)
@@ -1667,7 +1698,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     if (impl->state != LIBBGP_FSM_ESTABLISHED ||
         impl->session_generation != session_generation) {
         bgp_unlock(&impl->lock);
-        fsm_rollback_update_journal(&journal, rib4, rib6, peer_bgp_id);
+        fsm_cleanup_stale_update_journal(&journal, rib4, rib6, peer_bgp_id);
         fsm_update_journal_destroy(&journal);
         return err;
     }
