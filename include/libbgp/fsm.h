@@ -46,6 +46,8 @@ LIBBGP_API void libbgp_fsm_set_rib4(libbgp_fsm_t *fsm, libbgp_rib4_t *rib4);
 LIBBGP_API void libbgp_fsm_set_rib6(libbgp_fsm_t *fsm, libbgp_rib6_t *rib6);
 LIBBGP_API void libbgp_fsm_set_event_bus(libbgp_fsm_t *fsm, libbgp_event_bus_t *bus);
 LIBBGP_API void libbgp_fsm_set_out_handler(libbgp_fsm_t *fsm, libbgp_out_handler_t *out);
+LIBBGP_API libbgp_err_t libbgp_fsm_enter_connect(libbgp_fsm_t *fsm);
+LIBBGP_API libbgp_err_t libbgp_fsm_enter_active(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt);
