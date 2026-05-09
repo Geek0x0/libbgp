@@ -1418,9 +1418,24 @@ libbgp_err_t libbgp_fsm_init(libbgp_fsm_t *fsm, const struct libbgp_fsm_config *
 void libbgp_fsm_destroy(libbgp_fsm_t *fsm)
 {
     fsm_impl_t *impl = fsm_impl_get(fsm);
+    libbgp_rib4_t *rib4 = NULL;
+    libbgp_rib6_t *rib6 = NULL;
+    uint32_t peer_bgp_id = 0u;
+    bool discard_routes = false;
 
     if (impl == NULL) {
         return;
+    }
+    bgp_lock(&impl->lock);
+    if (impl->state == LIBBGP_FSM_ESTABLISHED && impl->peer_bgp_id != 0u) {
+        rib4 = impl->rib4;
+        rib6 = impl->rib6;
+        peer_bgp_id = impl->peer_bgp_id;
+        discard_routes = true;
+    }
+    bgp_unlock(&impl->lock);
+    if (discard_routes) {
+        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
     }
     bgp_lock_destroy(&impl->lock);
     bgp_free(impl);
@@ -1579,6 +1594,7 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
     uint32_t peer_bgp_id = 0u;
     bool notify;
     bool was_established;
+    libbgp_err_t err;
 
     if (impl == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -1589,11 +1605,12 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
     fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
     bgp_unlock(&impl->lock);
 
+    err = notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, 0u) : LIBBGP_OK;
     if (was_established) {
         fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
     }
-    return notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, 0u) : LIBBGP_OK;
+    return err;
 }
 
 static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pkt)
@@ -1850,12 +1867,12 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
                  attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6)) {
                 fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
                 bgp_unlock(&impl->lock);
-                fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
-                fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
                 send_err = fsm_send_notification(
                     out,
                     FSM_NOTIFY_UPDATE_MESSAGE_ERROR,
                     FSM_UPDATE_ERR_MALFORMED_ATTR_LIST);
+                fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+                fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
                 return send_err == LIBBGP_OK ? LIBBGP_ERR_INVALID : send_err;
             }
         }
@@ -1887,9 +1904,9 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
         bgp_unlock(&impl->lock);
         fsm_rollback_update_journal(&journal, rib4, rib6, peer_bgp_id);
+        send_err = fsm_send_notification(out, FSM_NOTIFY_UPDATE_MESSAGE_ERROR, update_err_subcode);
         fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
-        send_err = fsm_send_notification(out, FSM_NOTIFY_UPDATE_MESSAGE_ERROR, update_err_subcode);
         fsm_update_journal_destroy(&journal);
         return send_err == LIBBGP_OK ? err : send_err;
     }
