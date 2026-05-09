@@ -39,6 +39,7 @@ typedef struct fsm_impl {
     libbgp_event_bus_t *bus;
     libbgp_out_handler_t *out;
     uint64_t session_generation;
+    bool passive_open_send_pending;
     bgp_lock_t lock;
 } fsm_impl_t;
 
@@ -1402,6 +1403,7 @@ static void fsm_snapshot_teardown(
     impl->negotiated_hold_time = impl->config.hold_time;
     impl->peer_mpbgp_ipv6 = false;
     impl->clock_initialized = false;
+    impl->passive_open_send_pending = false;
     impl->session_generation++;
 }
 
@@ -1698,6 +1700,7 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
         impl->negotiated_hold_time = impl->config.hold_time;
         impl->peer_mpbgp_ipv6 = false;
         impl->clock_initialized = false;
+        impl->passive_open_send_pending = false;
         impl->session_generation++;
     }
     bgp_unlock(&impl->lock);
@@ -1750,14 +1753,17 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
     negotiated_hold_time = (local_hold == 0u || peer_hold == 0u) ? 0u :
         (local_hold < peer_hold ? local_hold : peer_hold);
     config = impl->config;
-    impl->state = LIBBGP_FSM_OPEN_SENT;
+    impl->peer_asn = peer_asn;
+    impl->peer_bgp_id = peer_bgp_id;
+    impl->negotiated_hold_time = negotiated_hold_time;
+    impl->peer_mpbgp_ipv6 = peer_mpbgp_ipv6;
+    impl->state = LIBBGP_FSM_OPEN_CONFIRM;
     impl->session_generation++;
     session_generation = impl->session_generation;
-    impl->peer_asn = 0u;
-    impl->peer_bgp_id = 0u;
-    impl->negotiated_hold_time = impl->config.hold_time;
-    impl->peer_mpbgp_ipv6 = false;
+    impl->last_rx_ms = 0u;
+    impl->last_keepalive_ms = 0u;
     impl->clock_initialized = false;
+    impl->passive_open_send_pending = true;
     out = impl->out;
     bgp_unlock(&impl->lock);
 
@@ -1766,19 +1772,10 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
         goto relock_after_send;
     }
     bgp_lock(&impl->lock);
-    still_current = impl->state == LIBBGP_FSM_OPEN_SENT &&
+    still_current = impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
         impl->session_generation == session_generation;
     if (still_current) {
-        impl->peer_asn = peer_asn;
-        impl->peer_bgp_id = peer_bgp_id;
-        impl->negotiated_hold_time = negotiated_hold_time;
-        impl->peer_mpbgp_ipv6 = peer_mpbgp_ipv6;
-        impl->state = LIBBGP_FSM_OPEN_CONFIRM;
-        impl->session_generation++;
-        impl->last_rx_ms = 0u;
-        impl->last_keepalive_ms = 0u;
-        impl->clock_initialized = false;
-        session_generation = impl->session_generation;
+        impl->passive_open_send_pending = false;
     }
     bgp_unlock(&impl->lock);
     if (!still_current) {
@@ -1789,16 +1786,7 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
 
 relock_after_send:
     bgp_lock(&impl->lock);
-    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_SENT &&
-        impl->session_generation == session_generation) {
-        impl->state = LIBBGP_FSM_IDLE;
-        impl->peer_asn = 0u;
-        impl->peer_bgp_id = 0u;
-        impl->negotiated_hold_time = impl->config.hold_time;
-        impl->peer_mpbgp_ipv6 = false;
-        impl->clock_initialized = false;
-        impl->session_generation++;
-    } else if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
+    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
         impl->session_generation == session_generation) {
         impl->state = LIBBGP_FSM_IDLE;
         impl->peer_asn = 0u;
@@ -1817,10 +1805,33 @@ static libbgp_err_t fsm_on_open_confirm(fsm_impl_t *impl, const libbgp_packet_t 
     libbgp_event_bus_t *bus = NULL;
     libbgp_out_handler_t *out = NULL;
 
+    if (pkt->type == LIBBGP_PACKET_OPEN && impl->passive_open_send_pending) {
+        if (pkt->data.open.version != 4u) {
+            fsm_snapshot_teardown(impl, &out, NULL, NULL, NULL, NULL);
+            bgp_unlock(&impl->lock);
+            (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_UNSUPPORTED_VERSION);
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        if (pkt->data.open.hold_time != 0u && pkt->data.open.hold_time < 3u) {
+            fsm_snapshot_teardown(impl, &out, NULL, NULL, NULL, NULL);
+            bgp_unlock(&impl->lock);
+            (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_UNACCEPTABLE_HOLD_TIME);
+            return LIBBGP_ERR_INVALID;
+        }
+        if (pkt->data.open.bgp_id == 0u) {
+            fsm_snapshot_teardown(impl, &out, NULL, NULL, NULL, NULL);
+            bgp_unlock(&impl->lock);
+            (void)fsm_send_notification(out, FSM_NOTIFY_OPEN_MESSAGE_ERROR, FSM_OPEN_ERR_BAD_BGP_ID);
+            return LIBBGP_ERR_INVALID;
+        }
+        bgp_unlock(&impl->lock);
+        return LIBBGP_OK;
+    }
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
         fsm_mark_rx_current(impl);
         impl->state = LIBBGP_FSM_ESTABLISHED;
         impl->session_generation++;
+        impl->passive_open_send_pending = false;
         bus = impl->bus;
         bgp_unlock(&impl->lock);
         fsm_publish_event(bus, LIBBGP_EVENT_SESSION_UP, 0u, NULL, NULL);
@@ -1829,6 +1840,7 @@ static libbgp_err_t fsm_on_open_confirm(fsm_impl_t *impl, const libbgp_packet_t 
     if (pkt->type == LIBBGP_PACKET_NOTIFICATION) {
         impl->state = LIBBGP_FSM_IDLE;
         impl->session_generation++;
+        impl->passive_open_send_pending = false;
         bgp_unlock(&impl->lock);
         return LIBBGP_OK;
     }

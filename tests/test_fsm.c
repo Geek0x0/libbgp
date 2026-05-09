@@ -338,6 +338,25 @@ static ssize_t reentrant_packet_on_keepalive_send(void *ctx, const uint8_t *buf,
     return (ssize_t)len;
 }
 
+static ssize_t reentrant_packet_on_open_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    reentrant_packet_ctx_t *reentrant = (reentrant_packet_ctx_t *)ctx;
+    libbgp_packet_t pkt;
+    size_t used = 0u;
+
+    LIBBGP_ASSERT(reentrant->calls < 8u);
+    reentrant->calls++;
+    LIBBGP_ASSERT_EQ_I64((ssize_t)len, capture_send(&reentrant->out, buf, len));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, buf, len, &used));
+    if (pkt.type == LIBBGP_PACKET_OPEN && reentrant->packet_err == 0) {
+        reentrant->packet_err = libbgp_fsm_on_packet(reentrant->fsm, reentrant->packet);
+    }
+    libbgp_packet_destroy(&pkt);
+    return (ssize_t)len;
+}
+
 static ssize_t reentrant_restart_on_keepalive_send(void *ctx, const uint8_t *buf, size_t len)
 {
     reentrant_restart_on_keepalive_ctx_t *reentrant = (reentrant_restart_on_keepalive_ctx_t *)ctx;
@@ -1722,6 +1741,34 @@ LIBBGP_TEST(fsm_passive_open_reentrant_keepalive_establishes)
     LIBBGP_ASSERT_EQ_U64(2u, reentrant.out.count);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_OPEN, reentrant.out.sent[0].type);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_KEEPALIVE, reentrant.out.sent[1].type);
+
+    libbgp_packet_destroy(&keepalive);
+    libbgp_packet_destroy(&open);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_passive_open_reentrant_keepalive_during_local_open_send_establishes)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    reentrant_packet_ctx_t reentrant;
+    libbgp_packet_t open = make_open_packet(65560u, 60u, ip4(203u, 0u, 113u, 9u), true);
+    libbgp_packet_t keepalive = make_keepalive_packet();
+
+    memset(&reentrant, 0, sizeof(reentrant));
+    reentrant.fsm = &fsm;
+    reentrant.packet = &keepalive;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out_handler));
+    set_out_send_fn(&out_handler, reentrant_packet_on_open_send, &reentrant);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &open));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, reentrant.packet_err);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, reentrant.out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_OPEN, reentrant.out.sent[0].type);
 
     libbgp_packet_destroy(&keepalive);
     libbgp_packet_destroy(&open);
@@ -4470,6 +4517,7 @@ int main(void)
         { "fsm_idle_open_keepalive_send_failure_leaves_idle", fsm_idle_open_keepalive_send_failure_leaves_idle },
         { "fsm_passive_open_reentrant_open_does_not_duplicate_negotiation", fsm_passive_open_reentrant_open_does_not_duplicate_negotiation },
         { "fsm_passive_open_reentrant_keepalive_establishes", fsm_passive_open_reentrant_keepalive_establishes },
+        { "fsm_passive_open_reentrant_keepalive_during_local_open_send_establishes", fsm_passive_open_reentrant_keepalive_during_local_open_send_establishes },
         { "fsm_passive_open_reentrant_invalid_open_prevents_stale_promotion", fsm_passive_open_reentrant_invalid_open_prevents_stale_promotion },
         { "fsm_passive_open_failed_send_does_not_rollback_reentrant_restart", fsm_passive_open_failed_send_does_not_rollback_reentrant_restart },
         { "fsm_open_sent_rejects_invalid_open_version_with_open_error", fsm_open_sent_rejects_invalid_open_version_with_open_error },
