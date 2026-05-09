@@ -1,26 +1,29 @@
-libbgp Examples
+libbgp C Examples
 ---
 
-Here's some example of using libbgp. You can compile examples with the following command:
+Build the examples with:
 
-```
-$ c++ name_of_example.cc -lbgp -o name_of_example
-```
-
-Some examples require you to link `pthread` too. Add `-lpthread` after `-lbgp` to compile those examples. For example, to compile `peer-and-print.cc`, do the following:
-
-```
-$ c++ peer-and-print.cc -lbgp -lpthread -o peer-and-print
+```sh
+make examples
 ```
 
-Then you can run the example with `./peer-and-print`. (you may need root for this specific example since this example open a TCP socket listening on a well-known port)
+The binaries are written to `build/threadsafe-$(THREADSAFE)/examples/`.
 
-The following examples are avaliable: 
+Both examples default to TCP port 1179 so they can be run without root:
 
-- `deserialize-and-serialize.cc`: Deserializing and serializing BGP message with `BgpPacket`.
-- `peer-and-print.cc`: listen on TCP `0.0.0.0:179`, wait for a peer, and print all BGP messages sent/received with `BgpFsm`. (`pthread` needed for the `ticker` thread)
-- `route-event-bus.cc`: Example of adding new routes to RIB while BGP FSM is running. Notify BGP FSM to send updates to the peer with `RouteEventBus`. This example also shows how you can implement your own `BgpOutHandler` and `BgpLogHandler`.
-- `route-filter.cc`: Example of using ingress/egress route filtering feature of BgpFsm. This example also shows how you can implement your own `BgpOutHandler` and `BgpLogHandler`.
-- `route-server.cc`: Simple BGP route server implements with libbgp. Use of `RouteEventBus` and shared `BgpRib` is demoed in this example.  This example also shows how you can implement your own `BgpLogHandler`. (`pthread` needed)
+```sh
+build/threadsafe-0/examples/peer_and_print --port 1179
+build/threadsafe-0/examples/route_server --port 1179
+```
 
-All the example codes are distributed under the  [Unlicense](https://unlicense.org) license.
+Use `--help` to see the available options. To listen on the standard BGP port,
+pass `--port 179` and run with the privileges required by your system.
+
+Available examples:
+
+- `peer_and_print.c`: accepts one TCP peer, parses incoming bytes with
+  `libbgp_sink`, feeds packets to `libbgp_fsm`, and prints packet type names.
+- `route_server.c`: accepts one TCP peer using a shared IPv4 RIB and event bus,
+  then prints session and route events produced by the FSM.
+
+The examples use only the C11 public API via `<libbgp/libbgp.h>`.

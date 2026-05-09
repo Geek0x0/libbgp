@@ -40,10 +40,14 @@ TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c tests/test_prefix.c tests/t
 TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
-DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+EXAMPLE_SRCS := examples/peer_and_print.c examples/route_server.c
+EXAMPLE_OBJS := $(EXAMPLE_SRCS:%.c=$(BUILD_DIR)/%.o)
+EXAMPLE_BINS := $(EXAMPLE_SRCS:examples/%.c=$(BUILD_DIR)/examples/%)
 
-.PHONY: all clean test install headers
-.SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS)
+DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d)
+
+.PHONY: all clean test install headers examples
+.SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB)
 
@@ -64,8 +68,14 @@ $(BUILD_DIR)/tests/%: $(BUILD_DIR)/tests/%.o $(TEST_COMMON_OBJS) $(STATIC_LIB)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(TEST_COMMON_OBJS) $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
 
+$(BUILD_DIR)/examples/%: $(BUILD_DIR)/examples/%.o $(STATIC_LIB)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
+
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do $$t; done
+
+examples: $(EXAMPLE_BINS)
 
 headers: all
 	@set -e; for h in $(PUBLIC_HEADERS); do \
