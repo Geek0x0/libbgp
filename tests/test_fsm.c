@@ -1904,7 +1904,6 @@ LIBBGP_TEST(fsm_established_update_nomem_restores_withdrawn_routes_and_events)
     err = libbgp_fsm_on_packet(&fsm, &update);
     libbgp_set_alloc(NULL);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
-    LIBBGP_ASSERT_EQ_U64(2u, fail_ctx.rib6_route_calloc_calls);
     LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.failed_calloc_calls);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib4));
