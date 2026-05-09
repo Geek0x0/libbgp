@@ -6,6 +6,7 @@
 
 #include "libbgp/types.h"
 #include "libbgp/prefix4.h"
+#include "libbgp/prefix6.h"
 #include "libbgp/update.h"
 
 typedef enum libbgp_event_type {
@@ -20,6 +21,7 @@ typedef struct libbgp_event {
     libbgp_event_type_t type;
     uint32_t source_router_id;
     const libbgp_prefix4_t *prefix4;
+    const libbgp_prefix6_t *prefix6;
     const libbgp_update_msg_t *update;
     void *user_data;
 } libbgp_event_t;
