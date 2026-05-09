@@ -543,6 +543,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     struct libbgp_fsm_config config;
     libbgp_out_handler_t *out;
     libbgp_fsm_state_t start_state;
+    uint64_t session_generation;
     libbgp_err_t err;
 
     if (impl == NULL) {
@@ -558,6 +559,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     start_state = impl->state;
     impl->state = LIBBGP_FSM_OPEN_SENT;
     impl->session_generation++;
+    session_generation = impl->session_generation;
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
     impl->negotiated_hold_time = impl->config.hold_time;
@@ -568,7 +570,8 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
 
     err = fsm_send_open(out, &config);
     bgp_lock(&impl->lock);
-    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_SENT) {
+    if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_SENT &&
+        impl->session_generation == session_generation) {
         impl->state = start_state;
         impl->session_generation++;
     }
@@ -818,20 +821,17 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     session_generation = impl->session_generation;
     bgp_unlock(&impl->lock);
     err = fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update);
-    if (err == LIBBGP_OK) {
-        bool stale;
-
-        bgp_lock(&impl->lock);
-        stale = impl->state != LIBBGP_FSM_ESTABLISHED ||
-            impl->session_generation != session_generation;
-        if (!stale && impl->clock_initialized) {
-            impl->last_rx_ms = rx_ms;
-        }
+    bgp_lock(&impl->lock);
+    if (impl->state != LIBBGP_FSM_ESTABLISHED ||
+        impl->session_generation != session_generation) {
         bgp_unlock(&impl->lock);
-        if (stale) {
-            fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
-        }
+        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        return err;
     }
+    if (err == LIBBGP_OK && impl->clock_initialized) {
+        impl->last_rx_ms = rx_ms;
+    }
+    bgp_unlock(&impl->lock);
     return err;
 }
 
