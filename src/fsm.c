@@ -658,13 +658,13 @@ static void fsm_restore_journaled_replacements(
         return;
     }
     if (rib4 != NULL) {
-        for (i = journal->routes4_count; i > 0u; i--) {
-            (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i - 1u].replaced);
+        for (i = 0u; i < journal->routes4_count; i++) {
+            (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i].replaced);
         }
     }
     if (rib6 != NULL) {
-        for (i = journal->routes6_count; i > 0u; i--) {
-            (void)libbgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &journal->routes6[i - 1u].replaced);
+        for (i = 0u; i < journal->routes6_count; i++) {
+            (void)libbgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &journal->routes6[i].replaced);
         }
     }
 }
