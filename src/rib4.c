@@ -258,6 +258,43 @@ static libbgp_err_t rib4_detach_locked(
     return LIBBGP_ERR_NOT_FOUND;
 }
 
+static libbgp_err_t rib4_detach_value_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix,
+    const libbgp_rib4_route_t *value,
+    bgp_hashmap_entry_t **out_entry)
+{
+    rib4_key_t find_key;
+    size_t idx;
+    uint64_t hash;
+    bgp_hashmap_entry_t **link;
+
+    if (out_entry != NULL) {
+        *out_entry = NULL;
+    }
+    if (impl == NULL || prefix == NULL || value == NULL || out_entry == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    find_key.prefix = *prefix;
+    hash = rib4_hash(&find_key, NULL);
+    idx = (size_t)(hash % (uint64_t)impl->routes.bucket_count);
+    link = &impl->routes.buckets[idx];
+    while (*link != NULL) {
+        bgp_hashmap_entry_t *entry = *link;
+
+        if (entry->hash == hash && rib4_key_eq(entry->key, &find_key, NULL) &&
+            entry->value == value) {
+            *link = entry->next;
+            entry->next = NULL;
+            impl->routes.len--;
+            *out_entry = entry;
+            return LIBBGP_OK;
+        }
+        link = &entry->next;
+    }
+    return LIBBGP_ERR_NOT_FOUND;
+}
+
 static libbgp_err_t rib4_attach_detached_locked(rib4_impl_t *impl, bgp_hashmap_entry_t *entry)
 {
     libbgp_rib4_route_t *route;
@@ -373,12 +410,32 @@ libbgp_err_t libbgp_rib4_insert_local(
 
 libbgp_err_t libbgp_rib4_insert(libbgp_rib4_t *rib, const libbgp_rib4_route_t *route)
 {
+    return libbgp_rib4_insert_save_replaced(rib, route, NULL, NULL, NULL);
+}
+
+libbgp_err_t libbgp_rib4_insert_save_replaced(
+    libbgp_rib4_t *rib,
+    const libbgp_rib4_route_t *route,
+    libbgp_rib4_saved_route_t *replaced,
+    bool *had_replaced,
+    uint64_t *update_id)
+{
     rib4_impl_t *impl = rib4_impl_get(rib);
     libbgp_rib4_route_t *copy = NULL;
     libbgp_rib4_route_t *old = NULL;
+    bgp_hashmap_entry_t *old_entry = NULL;
     rib4_key_t *key = NULL;
     libbgp_err_t err;
 
+    if (replaced != NULL) {
+        replaced->entry = NULL;
+    }
+    if (had_replaced != NULL) {
+        *had_replaced = false;
+    }
+    if (update_id != NULL) {
+        *update_id = 0u;
+    }
     if (impl == NULL || route == NULL) {
         return LIBBGP_ERR_INVALID;
     }
@@ -392,13 +449,27 @@ libbgp_err_t libbgp_rib4_insert(libbgp_rib4_t *rib, const libbgp_rib4_route_t *r
             bgp_free(key);
             rib4_route_free(copy);
         } else if (old != NULL) {
-            rib4_key_t old_key;
-
-            old_key.prefix = copy->prefix;
-            (void)bgp_hashmap_remove_one(&impl->routes, &old_key, old);
+            err = rib4_detach_value_locked(impl, &copy->prefix, old, &old_entry);
+            if (err == LIBBGP_ERR_NOT_FOUND) {
+                err = LIBBGP_OK;
+            } else if (err == LIBBGP_OK) {
+                if (replaced != NULL) {
+                    replaced->entry = old_entry;
+                    old_entry = NULL;
+                }
+                if (had_replaced != NULL) {
+                    *had_replaced = true;
+                }
+            }
+            if (err == LIBBGP_OK && update_id != NULL) {
+                *update_id = copy->update_id;
+            }
+        } else if (update_id != NULL) {
+            *update_id = copy->update_id;
         }
     }
     bgp_unlock(&impl->lock);
+    rib4_detached_entry_free(old_entry);
     return err;
 }
 
