@@ -17,6 +17,12 @@ typedef struct libbgp_rib6_saved_route {
 
 void libbgp_rib4_saved_route_destroy(libbgp_rib4_saved_route_t *saved);
 void libbgp_rib6_saved_route_destroy(libbgp_rib6_saved_route_t *saved);
+libbgp_err_t libbgp_rib4_saved_route_update_id(
+    const libbgp_rib4_saved_route_t *saved,
+    uint64_t *update_id);
+libbgp_err_t libbgp_rib6_saved_route_update_id(
+    const libbgp_rib6_saved_route_t *saved,
+    uint64_t *update_id);
 
 libbgp_err_t libbgp_rib4_exact_update_id(
     libbgp_rib4_t *rib,
