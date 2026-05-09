@@ -11,8 +11,8 @@ SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
 
 PUBLIC_HEADERS := $(wildcard include/libbgp/*.h)
 
-CPPFLAGS_BASE := -Iinclude
-CFLAGS_BASE := -std=c11 -Wall -Wextra -pedantic -fPIC -MMD -MP
+CPPFLAGS_BASE := -Iinclude -DLIBBGP_SHARED
+CFLAGS_BASE := -std=c11 -Wall -Wextra -pedantic -fPIC -fvisibility=hidden -MMD -MP
 CFLAGS_EXTRA ?=
 LDFLAGS_EXTRA ?=
 

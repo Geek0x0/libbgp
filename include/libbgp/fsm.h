@@ -29,6 +29,7 @@ struct libbgp_fsm_config {
     uint16_t hold_time;
     uint16_t keepalive_time;
     bool enable_4byte_asn;
+    bool enable_mpbgp_ipv6;
 };
 
 struct libbgp_fsm {
