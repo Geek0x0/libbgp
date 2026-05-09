@@ -1767,8 +1767,9 @@ LIBBGP_TEST(fsm_passive_open_reentrant_keepalive_during_local_open_send_establis
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &open));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, reentrant.packet_err);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
-    LIBBGP_ASSERT_EQ_U64(1u, reentrant.out.count);
+    LIBBGP_ASSERT_EQ_U64(2u, reentrant.out.count);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_OPEN, reentrant.out.sent[0].type);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_KEEPALIVE, reentrant.out.sent[1].type);
 
     libbgp_packet_destroy(&keepalive);
     libbgp_packet_destroy(&open);
