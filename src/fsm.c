@@ -36,6 +36,25 @@ typedef struct fsm_impl {
     bgp_lock_t lock;
 } fsm_impl_t;
 
+typedef struct fsm_applied_route4 {
+    libbgp_prefix4_t prefix;
+    uint64_t update_id;
+} fsm_applied_route4_t;
+
+typedef struct fsm_applied_route6 {
+    libbgp_prefix6_t prefix;
+    uint64_t update_id;
+} fsm_applied_route6_t;
+
+typedef struct fsm_update_journal {
+    fsm_applied_route4_t *routes4;
+    size_t routes4_count;
+    size_t routes4_cap;
+    fsm_applied_route6_t *routes6;
+    size_t routes6_count;
+    size_t routes6_cap;
+} fsm_update_journal_t;
+
 static fsm_impl_t *fsm_impl_get(const libbgp_fsm_t *fsm)
 {
     return fsm == NULL ? NULL : (fsm_impl_t *)fsm->impl;
@@ -219,6 +238,157 @@ static void fsm_discard_peer_routes(libbgp_rib4_t *rib4, libbgp_rib6_t *rib6, ui
     }
 }
 
+static bool fsm_prefix6_same(const libbgp_prefix6_t *a, const libbgp_prefix6_t *b)
+{
+    return a->len == b->len && memcmp(a->addr, b->addr, sizeof(a->addr)) == 0;
+}
+
+static void fsm_update_journal_destroy(fsm_update_journal_t *journal)
+{
+    if (journal == NULL) {
+        return;
+    }
+    bgp_free(journal->routes4);
+    bgp_free(journal->routes6);
+    memset(journal, 0, sizeof(*journal));
+}
+
+static libbgp_err_t fsm_update_journal_reserve4(fsm_update_journal_t *journal)
+{
+    fsm_applied_route4_t *next;
+    size_t cap;
+
+    if (journal->routes4_count < journal->routes4_cap) {
+        return LIBBGP_OK;
+    }
+    cap = journal->routes4_cap == 0u ? 4u : journal->routes4_cap * 2u;
+    if (cap < journal->routes4_cap || cap > SIZE_MAX / sizeof(*journal->routes4)) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    next = (fsm_applied_route4_t *)bgp_realloc(journal->routes4, cap * sizeof(*journal->routes4));
+    if (next == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    journal->routes4 = next;
+    journal->routes4_cap = cap;
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t fsm_update_journal_reserve6(fsm_update_journal_t *journal)
+{
+    fsm_applied_route6_t *next;
+    size_t cap;
+
+    if (journal->routes6_count < journal->routes6_cap) {
+        return LIBBGP_OK;
+    }
+    cap = journal->routes6_cap == 0u ? 4u : journal->routes6_cap * 2u;
+    if (cap < journal->routes6_cap || cap > SIZE_MAX / sizeof(*journal->routes6)) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    next = (fsm_applied_route6_t *)bgp_realloc(journal->routes6, cap * sizeof(*journal->routes6));
+    if (next == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    journal->routes6 = next;
+    journal->routes6_cap = cap;
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t fsm_update_journal_record4(
+    fsm_update_journal_t *journal,
+    libbgp_rib4_t *rib4,
+    uint32_t peer_bgp_id,
+    const libbgp_prefix4_t *prefix)
+{
+    const libbgp_rib4_route_t *route = NULL;
+    libbgp_err_t err;
+
+    if (journal == NULL || rib4 == NULL) {
+        return LIBBGP_OK;
+    }
+    err = libbgp_rib4_lookup_scoped(rib4, peer_bgp_id, prefix->addr, &route);
+    if (err != LIBBGP_OK) {
+        return err == LIBBGP_ERR_NOT_FOUND ? LIBBGP_OK : err;
+    }
+    if (route->prefix.addr != prefix->addr || route->prefix.len != prefix->len || route->update_id == 0u) {
+        return LIBBGP_OK;
+    }
+    err = fsm_update_journal_reserve4(journal);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    journal->routes4[journal->routes4_count].prefix = *prefix;
+    journal->routes4[journal->routes4_count].update_id = route->update_id;
+    journal->routes4_count++;
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t fsm_update_journal_record6(
+    fsm_update_journal_t *journal,
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id,
+    const libbgp_prefix6_t *prefix)
+{
+    const libbgp_rib6_route_t *route = NULL;
+    libbgp_err_t err;
+
+    if (journal == NULL || rib6 == NULL) {
+        return LIBBGP_OK;
+    }
+    err = libbgp_rib6_lookup_scoped(rib6, peer_bgp_id, prefix->addr, &route);
+    if (err != LIBBGP_OK) {
+        return err == LIBBGP_ERR_NOT_FOUND ? LIBBGP_OK : err;
+    }
+    if (!fsm_prefix6_same(&route->prefix, prefix) || route->update_id == 0u) {
+        return LIBBGP_OK;
+    }
+    err = fsm_update_journal_reserve6(journal);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    journal->routes6[journal->routes6_count].prefix = *prefix;
+    journal->routes6[journal->routes6_count].update_id = route->update_id;
+    journal->routes6_count++;
+    return LIBBGP_OK;
+}
+
+static void fsm_withdraw_journaled_routes(
+    const fsm_update_journal_t *journal,
+    libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id)
+{
+    size_t i;
+
+    if (journal == NULL) {
+        return;
+    }
+    if (rib4 != NULL) {
+        for (i = 0u; i < journal->routes4_count; i++) {
+            const libbgp_rib4_route_t *route = NULL;
+
+            if (libbgp_rib4_lookup_scoped(rib4, peer_bgp_id, journal->routes4[i].prefix.addr, &route) == LIBBGP_OK &&
+                route->prefix.addr == journal->routes4[i].prefix.addr &&
+                route->prefix.len == journal->routes4[i].prefix.len &&
+                route->update_id == journal->routes4[i].update_id) {
+                (void)libbgp_rib4_withdraw(rib4, peer_bgp_id, &journal->routes4[i].prefix);
+            }
+        }
+    }
+    if (rib6 != NULL) {
+        for (i = 0u; i < journal->routes6_count; i++) {
+            const libbgp_rib6_route_t *route = NULL;
+
+            if (libbgp_rib6_lookup_scoped(rib6, peer_bgp_id, journal->routes6[i].prefix.addr, &route) == LIBBGP_OK &&
+                fsm_prefix6_same(&route->prefix, &journal->routes6[i].prefix) &&
+                route->update_id == journal->routes6[i].update_id) {
+                (void)libbgp_rib6_withdraw(rib6, peer_bgp_id, &journal->routes6[i].prefix);
+            }
+        }
+    }
+}
+
 static void fsm_mark_rx_current(fsm_impl_t *impl)
 {
     if (impl->clock_initialized) {
@@ -367,7 +537,8 @@ static libbgp_err_t fsm_apply_update(
     libbgp_rib6_t *rib6,
     libbgp_event_bus_t *bus,
     uint32_t peer_bgp_id,
-    const libbgp_update_msg_t *update)
+    const libbgp_update_msg_t *update,
+    fsm_update_journal_t *journal)
 {
     size_t i;
     libbgp_err_t first_err = LIBBGP_OK;
@@ -397,6 +568,9 @@ static libbgp_err_t fsm_apply_update(
         if (rib4 != NULL) {
             err = libbgp_rib4_insert(rib4, &route);
         }
+        if (err == LIBBGP_OK) {
+            err = fsm_update_journal_record4(journal, rib4, peer_bgp_id, &route.prefix);
+        }
         if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
             first_err = err;
         }
@@ -421,7 +595,7 @@ static libbgp_err_t fsm_apply_update(
                 if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
                     first_err = err;
                 }
-                if (rib6 != NULL && err == LIBBGP_OK) {
+                if (err == LIBBGP_OK) {
                     fsm_publish_event6(
                         bus,
                         LIBBGP_EVENT_ROUTE_WITHDRAWN,
@@ -437,10 +611,17 @@ static libbgp_err_t fsm_apply_update(
                 if (rib6 != NULL) {
                     err = fsm_insert_route6(rib6, peer_bgp_id, update, attr, &attr->data.mp_reach_ipv6.nlri[j]);
                 }
+                if (err == LIBBGP_OK) {
+                    err = fsm_update_journal_record6(
+                        journal,
+                        rib6,
+                        peer_bgp_id,
+                        &attr->data.mp_reach_ipv6.nlri[j]);
+                }
                 if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
                     first_err = err;
                 }
-                if (rib6 != NULL && err == LIBBGP_OK) {
+                if (err == LIBBGP_OK) {
                     fsm_publish_event6(
                         bus,
                         LIBBGP_EVENT_ROUTE_ADDED,
@@ -878,6 +1059,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     uint32_t peer_bgp_id;
     uint64_t rx_ms;
     uint64_t session_generation;
+    fsm_update_journal_t journal;
     libbgp_err_t err;
 
     if (pkt->type == LIBBGP_PACKET_KEEPALIVE) {
@@ -906,19 +1088,22 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
     session_generation = impl->session_generation;
+    memset(&journal, 0, sizeof(journal));
     bgp_unlock(&impl->lock);
-    err = fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update);
+    err = fsm_apply_update(rib4, rib6, bus, peer_bgp_id, &pkt->data.update, &journal);
     bgp_lock(&impl->lock);
     if (impl->state != LIBBGP_FSM_ESTABLISHED ||
         impl->session_generation != session_generation) {
         bgp_unlock(&impl->lock);
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_withdraw_journaled_routes(&journal, rib4, rib6, peer_bgp_id);
+        fsm_update_journal_destroy(&journal);
         return err;
     }
     if (err == LIBBGP_OK && impl->clock_initialized) {
         impl->last_rx_ms = rx_ms;
     }
     bgp_unlock(&impl->lock);
+    fsm_update_journal_destroy(&journal);
     return err;
 }
 
