@@ -575,9 +575,37 @@ static libbgp_err_t fsm_validate_update_mp_attr(const libbgp_pattr_t *attr)
     return LIBBGP_OK;
 }
 
+static bool fsm_semantic_duplicate_attr(libbgp_pattr_type_t type)
+{
+    switch (type) {
+    case LIBBGP_PATTR_ORIGIN:
+    case LIBBGP_PATTR_AS_PATH:
+    case LIBBGP_PATTR_NEXT_HOP:
+    case LIBBGP_PATTR_MED:
+    case LIBBGP_PATTR_LOCAL_PREF:
+    case LIBBGP_PATTR_ATOMIC_AGGREGATE:
+    case LIBBGP_PATTR_AGGREGATOR:
+    case LIBBGP_PATTR_COMMUNITY:
+    case LIBBGP_PATTR_AS4_PATH:
+    case LIBBGP_PATTR_AS4_AGGREGATOR:
+    case LIBBGP_PATTR_MP_REACH_IPV6:
+    case LIBBGP_PATTR_MP_UNREACH_IPV6:
+        return true;
+    case LIBBGP_PATTR_UNKNOWN:
+    default:
+        return false;
+    }
+}
+
 static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update)
 {
     size_t i;
+    size_t origin_count = 0u;
+    size_t as_path_count = 0u;
+    size_t next_hop_count = 0u;
+    size_t attr_counts[(size_t)LIBBGP_PATTR_UNKNOWN + 1u];
+    bool ipv4_advertise;
+    bool ipv6_advertise = false;
     libbgp_err_t err;
 
     if (update == NULL ||
@@ -596,14 +624,42 @@ static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update)
             return LIBBGP_ERR_INVALID;
         }
     }
+    memset(attr_counts, 0, sizeof(attr_counts));
     for (i = 0u; i < update->attr_count; i++) {
+        libbgp_pattr_type_t type;
+
         if (update->attrs[i] == NULL) {
             return LIBBGP_ERR_INVALID;
+        }
+        type = update->attrs[i]->type;
+        if ((size_t)type <= (size_t)LIBBGP_PATTR_UNKNOWN) {
+            attr_counts[(size_t)type]++;
+            if (fsm_semantic_duplicate_attr(type) && attr_counts[(size_t)type] > 1u) {
+                return LIBBGP_ERR_INVALID;
+            }
+        }
+        if (type == LIBBGP_PATTR_ORIGIN) {
+            origin_count++;
+        } else if (type == LIBBGP_PATTR_AS_PATH) {
+            as_path_count++;
+        } else if (type == LIBBGP_PATTR_NEXT_HOP) {
+            next_hop_count++;
+        } else if (type == LIBBGP_PATTR_MP_REACH_IPV6 &&
+            update->attrs[i]->data.mp_reach_ipv6.nlri_count != 0u) {
+            ipv6_advertise = true;
         }
         err = fsm_validate_update_mp_attr(update->attrs[i]);
         if (err != LIBBGP_OK) {
             return err;
         }
+    }
+    ipv4_advertise = update->nlri_count != 0u;
+    if (ipv4_advertise &&
+        (origin_count != 1u || as_path_count != 1u || next_hop_count != 1u)) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (ipv6_advertise && (origin_count != 1u || as_path_count != 1u)) {
+        return LIBBGP_ERR_INVALID;
     }
     return LIBBGP_OK;
 }
