@@ -44,12 +44,14 @@ typedef struct fsm_impl {
 typedef struct fsm_applied_route4 {
     libbgp_prefix4_t prefix;
     uint64_t update_id;
+    bool restore_replaced;
     libbgp_rib4_saved_route_t replaced;
 } fsm_applied_route4_t;
 
 typedef struct fsm_applied_route6 {
     libbgp_prefix6_t prefix;
     uint64_t update_id;
+    bool restore_replaced;
     libbgp_rib6_saved_route_t replaced;
 } fsm_applied_route6_t;
 
@@ -509,6 +511,7 @@ static libbgp_err_t fsm_update_journal_record4(
     fsm_update_journal_t *journal,
     const libbgp_prefix4_t *prefix,
     uint64_t update_id,
+    bool restore_replaced,
     libbgp_rib4_saved_route_t *replaced)
 {
     libbgp_err_t err;
@@ -525,6 +528,7 @@ static libbgp_err_t fsm_update_journal_record4(
     }
     journal->routes4[journal->routes4_count].prefix = *prefix;
     journal->routes4[journal->routes4_count].update_id = update_id;
+    journal->routes4[journal->routes4_count].restore_replaced = restore_replaced;
     memset(&journal->routes4[journal->routes4_count].replaced, 0, sizeof(journal->routes4[journal->routes4_count].replaced));
     if (replaced != NULL) {
         journal->routes4[journal->routes4_count].replaced = *replaced;
@@ -538,6 +542,7 @@ static libbgp_err_t fsm_update_journal_record6(
     fsm_update_journal_t *journal,
     const libbgp_prefix6_t *prefix,
     uint64_t update_id,
+    bool restore_replaced,
     libbgp_rib6_saved_route_t *replaced)
 {
     libbgp_err_t err;
@@ -554,6 +559,7 @@ static libbgp_err_t fsm_update_journal_record6(
     }
     journal->routes6[journal->routes6_count].prefix = *prefix;
     journal->routes6[journal->routes6_count].update_id = update_id;
+    journal->routes6[journal->routes6_count].restore_replaced = restore_replaced;
     memset(&journal->routes6[journal->routes6_count].replaced, 0, sizeof(journal->routes6[journal->routes6_count].replaced));
     if (replaced != NULL) {
         journal->routes6[journal->routes6_count].replaced = *replaced;
@@ -561,6 +567,44 @@ static libbgp_err_t fsm_update_journal_record6(
     }
     journal->routes6_count++;
     return LIBBGP_OK;
+}
+
+static bool fsm_update_journal_has_route4(
+    const fsm_update_journal_t *journal,
+    const libbgp_prefix4_t *prefix,
+    uint64_t update_id)
+{
+    size_t i;
+
+    if (journal == NULL || prefix == NULL || update_id == 0u) {
+        return false;
+    }
+    for (i = 0u; i < journal->routes4_count; i++) {
+        if (journal->routes4[i].update_id == update_id &&
+            libbgp_prefix4_eq(&journal->routes4[i].prefix, prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool fsm_update_journal_has_route6(
+    const fsm_update_journal_t *journal,
+    const libbgp_prefix6_t *prefix,
+    uint64_t update_id)
+{
+    size_t i;
+
+    if (journal == NULL || prefix == NULL || update_id == 0u) {
+        return false;
+    }
+    for (i = 0u; i < journal->routes6_count; i++) {
+        if (journal->routes6[i].update_id == update_id &&
+            libbgp_prefix6_eq(&journal->routes6[i].prefix, prefix)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static libbgp_err_t fsm_update_journal_record_withdraw4(
@@ -659,12 +703,16 @@ static void fsm_restore_journaled_replacements(
     }
     if (rib4 != NULL) {
         for (i = 0u; i < journal->routes4_count; i++) {
-            (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i].replaced);
+            if (journal->routes4[i].restore_replaced) {
+                (void)libbgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &journal->routes4[i].replaced);
+            }
         }
     }
     if (rib6 != NULL) {
         for (i = 0u; i < journal->routes6_count; i++) {
-            (void)libbgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &journal->routes6[i].replaced);
+            if (journal->routes6[i].restore_replaced) {
+                (void)libbgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &journal->routes6[i].replaced);
+            }
         }
     }
 }
@@ -1075,6 +1123,8 @@ static libbgp_err_t fsm_apply_update(
     for (i = 0u; i < update->nlri_count; i++) {
         libbgp_rib4_route_t route;
         libbgp_rib4_saved_route_t replaced;
+        bool had_replaced = false;
+        bool restore_replaced = false;
         uint64_t update_id = 0u;
         err = LIBBGP_OK;
         memset(&replaced, 0, sizeof(replaced));
@@ -1088,10 +1138,18 @@ static libbgp_err_t fsm_apply_update(
         route.source_router_id = peer_bgp_id;
         fsm_fill_route_attrs(&route, update);
         if (rib4 != NULL) {
-            err = libbgp_rib4_insert_save_replaced(rib4, &route, &replaced, NULL, &update_id);
+            err = libbgp_rib4_insert_save_replaced(rib4, &route, &replaced, &had_replaced, &update_id);
+            if (err == LIBBGP_OK && had_replaced) {
+                uint64_t replaced_update_id = 0u;
+
+                err = libbgp_rib4_saved_route_update_id(&replaced, &replaced_update_id);
+                if (err == LIBBGP_OK) {
+                    restore_replaced = !fsm_update_journal_has_route4(journal, &route.prefix, replaced_update_id);
+                }
+            }
         }
         if (err == LIBBGP_OK) {
-            err = fsm_update_journal_record4(journal, &route.prefix, update_id, &replaced);
+            err = fsm_update_journal_record4(journal, &route.prefix, update_id, restore_replaced, &replaced);
         }
         if (err != LIBBGP_OK && rib4 != NULL) {
             (void)libbgp_rib4_withdraw_exact_if_update_id(rib4, peer_bgp_id, &route.prefix, update_id);
@@ -1131,6 +1189,8 @@ static libbgp_err_t fsm_apply_update(
         } else if (attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
             for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
                 libbgp_rib6_saved_route_t replaced;
+                bool had_replaced = false;
+                bool restore_replaced = false;
                 uint64_t update_id = 0u;
                 err = LIBBGP_OK;
                 memset(&replaced, 0, sizeof(replaced));
@@ -1144,7 +1204,18 @@ static libbgp_err_t fsm_apply_update(
 
                     err = fsm_make_route6(peer_bgp_id, update, attr, &attr->data.mp_reach_ipv6.nlri[j], &route);
                     if (err == LIBBGP_OK) {
-                        err = libbgp_rib6_insert_save_replaced(rib6, &route, &replaced, NULL, &update_id);
+                        err = libbgp_rib6_insert_save_replaced(rib6, &route, &replaced, &had_replaced, &update_id);
+                        if (err == LIBBGP_OK && had_replaced) {
+                            uint64_t replaced_update_id = 0u;
+
+                            err = libbgp_rib6_saved_route_update_id(&replaced, &replaced_update_id);
+                            if (err == LIBBGP_OK) {
+                                restore_replaced = !fsm_update_journal_has_route6(
+                                    journal,
+                                    &attr->data.mp_reach_ipv6.nlri[j],
+                                    replaced_update_id);
+                            }
+                        }
                         fsm_made_route6_destroy(&route);
                     }
                 }
@@ -1153,6 +1224,7 @@ static libbgp_err_t fsm_apply_update(
                         journal,
                         &attr->data.mp_reach_ipv6.nlri[j],
                         update_id,
+                        restore_replaced,
                         &replaced);
                 }
                 if (err != LIBBGP_OK && rib6 != NULL) {

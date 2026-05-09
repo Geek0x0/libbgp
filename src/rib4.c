@@ -623,6 +623,31 @@ void libbgp_rib4_saved_route_destroy(libbgp_rib4_saved_route_t *saved)
     saved->entry = NULL;
 }
 
+libbgp_err_t libbgp_rib4_saved_route_update_id(
+    const libbgp_rib4_saved_route_t *saved,
+    uint64_t *update_id)
+{
+    const bgp_hashmap_entry_t *entry;
+    const libbgp_rib4_route_t *route;
+
+    if (update_id != NULL) {
+        *update_id = 0u;
+    }
+    if (saved == NULL || update_id == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (saved->entry == NULL) {
+        return LIBBGP_ERR_NOT_FOUND;
+    }
+    entry = (const bgp_hashmap_entry_t *)saved->entry;
+    route = (const libbgp_rib4_route_t *)entry->value;
+    if (route == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    *update_id = route->update_id;
+    return LIBBGP_OK;
+}
+
 libbgp_err_t libbgp_rib4_exact_update_id(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
