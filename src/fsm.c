@@ -257,16 +257,24 @@ static void fsm_update_journal_destroy(fsm_update_journal_t *journal)
     memset(journal, 0, sizeof(*journal));
 }
 
-static libbgp_err_t fsm_update_journal_reserve4(fsm_update_journal_t *journal)
+static libbgp_err_t fsm_update_journal_reserve4_to(fsm_update_journal_t *journal, size_t needed)
 {
     fsm_applied_route4_t *next;
     size_t cap;
 
-    if (journal->routes4_count < journal->routes4_cap) {
+    if (journal == NULL || needed <= journal->routes4_cap) {
         return LIBBGP_OK;
     }
-    cap = journal->routes4_cap == 0u ? 4u : journal->routes4_cap * 2u;
-    if (cap < journal->routes4_cap || cap > SIZE_MAX / sizeof(*journal->routes4)) {
+    cap = journal->routes4_cap == 0u ? 4u : journal->routes4_cap;
+    while (cap < needed) {
+        size_t next_cap = cap * 2u;
+
+        if (next_cap < cap) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        cap = next_cap;
+    }
+    if (cap > SIZE_MAX / sizeof(*journal->routes4)) {
         return LIBBGP_ERR_NOMEM;
     }
     next = (fsm_applied_route4_t *)bgp_realloc(journal->routes4, cap * sizeof(*journal->routes4));
@@ -278,16 +286,24 @@ static libbgp_err_t fsm_update_journal_reserve4(fsm_update_journal_t *journal)
     return LIBBGP_OK;
 }
 
-static libbgp_err_t fsm_update_journal_reserve6(fsm_update_journal_t *journal)
+static libbgp_err_t fsm_update_journal_reserve6_to(fsm_update_journal_t *journal, size_t needed)
 {
     fsm_applied_route6_t *next;
     size_t cap;
 
-    if (journal->routes6_count < journal->routes6_cap) {
+    if (journal == NULL || needed <= journal->routes6_cap) {
         return LIBBGP_OK;
     }
-    cap = journal->routes6_cap == 0u ? 4u : journal->routes6_cap * 2u;
-    if (cap < journal->routes6_cap || cap > SIZE_MAX / sizeof(*journal->routes6)) {
+    cap = journal->routes6_cap == 0u ? 4u : journal->routes6_cap;
+    while (cap < needed) {
+        size_t next_cap = cap * 2u;
+
+        if (next_cap < cap) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        cap = next_cap;
+    }
+    if (cap > SIZE_MAX / sizeof(*journal->routes6)) {
         return LIBBGP_ERR_NOMEM;
     }
     next = (fsm_applied_route6_t *)bgp_realloc(journal->routes6, cap * sizeof(*journal->routes6));
@@ -297,6 +313,68 @@ static libbgp_err_t fsm_update_journal_reserve6(fsm_update_journal_t *journal)
     journal->routes6 = next;
     journal->routes6_cap = cap;
     return LIBBGP_OK;
+}
+
+static libbgp_err_t fsm_update_journal_reserve4(fsm_update_journal_t *journal)
+{
+    if (journal == NULL) {
+        return LIBBGP_OK;
+    }
+    if (journal->routes4_count == SIZE_MAX) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    return fsm_update_journal_reserve4_to(journal, journal->routes4_count + 1u);
+}
+
+static libbgp_err_t fsm_update_journal_reserve6(fsm_update_journal_t *journal)
+{
+    if (journal == NULL) {
+        return LIBBGP_OK;
+    }
+    if (journal->routes6_count == SIZE_MAX) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    return fsm_update_journal_reserve6_to(journal, journal->routes6_count + 1u);
+}
+
+static libbgp_err_t fsm_update_journal_reserve_update(
+    fsm_update_journal_t *journal,
+    libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
+    const libbgp_update_msg_t *update)
+{
+    size_t routes4_needed = 0u;
+    size_t routes6_needed = 0u;
+    size_t i;
+    libbgp_err_t err;
+
+    if (journal == NULL || update == NULL) {
+        return LIBBGP_OK;
+    }
+    if (rib4 != NULL) {
+        if (update->nlri_count > SIZE_MAX - journal->routes4_count) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        routes4_needed = journal->routes4_count + update->nlri_count;
+    }
+    if (rib6 != NULL) {
+        routes6_needed = journal->routes6_count;
+        for (i = 0u; i < update->attr_count; i++) {
+            const libbgp_pattr_t *attr = update->attrs[i];
+
+            if (attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
+                if (attr->data.mp_reach_ipv6.nlri_count > SIZE_MAX - routes6_needed) {
+                    return LIBBGP_ERR_NOMEM;
+                }
+                routes6_needed += attr->data.mp_reach_ipv6.nlri_count;
+            }
+        }
+    }
+    err = fsm_update_journal_reserve4_to(journal, routes4_needed);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    return fsm_update_journal_reserve6_to(journal, routes6_needed);
 }
 
 static libbgp_err_t fsm_update_journal_record4(
@@ -716,10 +794,13 @@ static libbgp_err_t fsm_apply_update(
     uint8_t *notify_subcode)
 {
     size_t i;
-    libbgp_err_t first_err = LIBBGP_OK;
     libbgp_err_t err;
 
     err = fsm_validate_update(update, notify_subcode);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = fsm_update_journal_reserve_update(journal, rib4, rib6, update);
     if (err != LIBBGP_OK) {
         return err;
     }
@@ -728,7 +809,7 @@ static libbgp_err_t fsm_apply_update(
         err = LIBBGP_OK;
 
         if (!fsm_update_session_current(impl, session_generation)) {
-            return first_err;
+            return LIBBGP_OK;
         }
 
         if (rib4 != NULL) {
@@ -737,12 +818,8 @@ static libbgp_err_t fsm_apply_update(
                 err = LIBBGP_OK;
             }
         }
-        if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
-            first_err = err;
-        }
-        fsm_publish_event(bus, LIBBGP_EVENT_ROUTE_WITHDRAWN, peer_bgp_id, &update->withdrawn[i], update);
-        if (!fsm_update_session_current(impl, session_generation)) {
-            return first_err;
+        if (err != LIBBGP_OK) {
+            return err;
         }
     }
     for (i = 0u; i < update->nlri_count; i++) {
@@ -750,7 +827,7 @@ static libbgp_err_t fsm_apply_update(
         err = LIBBGP_OK;
 
         if (!fsm_update_session_current(impl, session_generation)) {
-            return first_err;
+            return LIBBGP_OK;
         }
 
         memset(&route, 0, sizeof(route));
@@ -763,14 +840,8 @@ static libbgp_err_t fsm_apply_update(
         if (err == LIBBGP_OK) {
             err = fsm_update_journal_record4(journal, rib4, peer_bgp_id, &route.prefix);
         }
-        if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
-            first_err = err;
-        }
-        if (err == LIBBGP_OK) {
-            fsm_publish_event(bus, LIBBGP_EVENT_ROUTE_ADDED, peer_bgp_id, &update->nlri[i], update);
-            if (!fsm_update_session_current(impl, session_generation)) {
-                return first_err;
-            }
+        if (err != LIBBGP_OK) {
+            return err;
         }
     }
     for (i = 0u; i < update->attr_count; i++) {
@@ -782,7 +853,7 @@ static libbgp_err_t fsm_apply_update(
                 err = LIBBGP_OK;
 
                 if (!fsm_update_session_current(impl, session_generation)) {
-                    return first_err;
+                    return LIBBGP_OK;
                 }
 
                 if (rib6 != NULL) {
@@ -791,19 +862,8 @@ static libbgp_err_t fsm_apply_update(
                         err = LIBBGP_OK;
                     }
                 }
-                if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
-                    first_err = err;
-                }
-                if (err == LIBBGP_OK) {
-                    fsm_publish_event6(
-                        bus,
-                        LIBBGP_EVENT_ROUTE_WITHDRAWN,
-                        peer_bgp_id,
-                        &attr->data.mp_unreach_ipv6.withdrawn[j],
-                        update);
-                    if (!fsm_update_session_current(impl, session_generation)) {
-                        return first_err;
-                    }
+                if (err != LIBBGP_OK) {
+                    return err;
                 }
             }
         } else if (attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
@@ -811,7 +871,7 @@ static libbgp_err_t fsm_apply_update(
                 err = LIBBGP_OK;
 
                 if (!fsm_update_session_current(impl, session_generation)) {
-                    return first_err;
+                    return LIBBGP_OK;
                 }
 
                 if (rib6 != NULL) {
@@ -824,24 +884,67 @@ static libbgp_err_t fsm_apply_update(
                         peer_bgp_id,
                         &attr->data.mp_reach_ipv6.nlri[j]);
                 }
-                if (err != LIBBGP_OK && first_err == LIBBGP_OK) {
-                    first_err = err;
-                }
-                if (err == LIBBGP_OK) {
-                    fsm_publish_event6(
-                        bus,
-                        LIBBGP_EVENT_ROUTE_ADDED,
-                        peer_bgp_id,
-                        &attr->data.mp_reach_ipv6.nlri[j],
-                        update);
-                    if (!fsm_update_session_current(impl, session_generation)) {
-                        return first_err;
-                    }
+                if (err != LIBBGP_OK) {
+                    return err;
                 }
             }
         }
     }
-    return first_err;
+    for (i = 0u; i < update->withdrawn_count; i++) {
+        if (!fsm_update_session_current(impl, session_generation)) {
+            return LIBBGP_OK;
+        }
+        fsm_publish_event(bus, LIBBGP_EVENT_ROUTE_WITHDRAWN, peer_bgp_id, &update->withdrawn[i], update);
+        if (!fsm_update_session_current(impl, session_generation)) {
+            return LIBBGP_OK;
+        }
+    }
+    for (i = 0u; i < update->nlri_count; i++) {
+        if (!fsm_update_session_current(impl, session_generation)) {
+            return LIBBGP_OK;
+        }
+        fsm_publish_event(bus, LIBBGP_EVENT_ROUTE_ADDED, peer_bgp_id, &update->nlri[i], update);
+        if (!fsm_update_session_current(impl, session_generation)) {
+            return LIBBGP_OK;
+        }
+    }
+    for (i = 0u; i < update->attr_count; i++) {
+        const libbgp_pattr_t *attr = update->attrs[i];
+        size_t j;
+
+        if (attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
+            for (j = 0u; j < attr->data.mp_unreach_ipv6.withdrawn_count; j++) {
+                if (!fsm_update_session_current(impl, session_generation)) {
+                    return LIBBGP_OK;
+                }
+                fsm_publish_event6(
+                    bus,
+                    LIBBGP_EVENT_ROUTE_WITHDRAWN,
+                    peer_bgp_id,
+                    &attr->data.mp_unreach_ipv6.withdrawn[j],
+                    update);
+                if (!fsm_update_session_current(impl, session_generation)) {
+                    return LIBBGP_OK;
+                }
+            }
+        } else if (attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
+            for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
+                if (!fsm_update_session_current(impl, session_generation)) {
+                    return LIBBGP_OK;
+                }
+                fsm_publish_event6(
+                    bus,
+                    LIBBGP_EVENT_ROUTE_ADDED,
+                    peer_bgp_id,
+                    &attr->data.mp_reach_ipv6.nlri[j],
+                    update);
+                if (!fsm_update_session_current(impl, session_generation)) {
+                    return LIBBGP_OK;
+                }
+            }
+        }
+    }
+    return LIBBGP_OK;
 }
 
 static void fsm_snapshot_teardown(
@@ -1319,6 +1422,12 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         fsm_update_journal_destroy(&journal);
         return err;
     }
+    if (err != LIBBGP_OK && err != LIBBGP_ERR_INVALID) {
+        bgp_unlock(&impl->lock);
+        fsm_withdraw_journaled_routes(&journal, rib4, rib6, peer_bgp_id);
+        fsm_update_journal_destroy(&journal);
+        return err;
+    }
     if (err == LIBBGP_ERR_INVALID) {
         fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
         bgp_unlock(&impl->lock);
@@ -1348,21 +1457,17 @@ libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt)
     bgp_lock(&impl->lock);
     state = impl->state;
     if (pkt->type == LIBBGP_PACKET_NOTIFICATION) {
-        if (state == LIBBGP_FSM_ESTABLISHED) {
-            libbgp_event_bus_t *bus = NULL;
-            libbgp_rib4_t *rib4 = NULL;
-            libbgp_rib6_t *rib6 = NULL;
-            uint32_t peer_bgp_id = 0u;
+        libbgp_event_bus_t *bus = NULL;
+        libbgp_rib4_t *rib4 = NULL;
+        libbgp_rib6_t *rib6 = NULL;
+        uint32_t peer_bgp_id = 0u;
 
-            fsm_snapshot_teardown(impl, NULL, &bus, &rib4, &rib6, &peer_bgp_id);
-            bgp_unlock(&impl->lock);
+        fsm_snapshot_teardown(impl, NULL, &bus, &rib4, &rib6, &peer_bgp_id);
+        bgp_unlock(&impl->lock);
+        if (state == LIBBGP_FSM_ESTABLISHED) {
             fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
             fsm_publish_event(bus, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
-            return LIBBGP_OK;
         }
-        impl->state = LIBBGP_FSM_IDLE;
-        impl->session_generation++;
-        bgp_unlock(&impl->lock);
         return LIBBGP_OK;
     }
 
