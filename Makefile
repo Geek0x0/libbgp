@@ -25,6 +25,13 @@ endif
 CFLAGS := $(CFLAGS_BASE) $(CFLAGS_EXTRA)
 CPPFLAGS := $(CPPFLAGS_BASE)
 
+define FLAG_STAMP_CONTENT
+CC=$(CC)
+CPPFLAGS=$(CPPFLAGS)
+CFLAGS=$(CFLAGS)
+LDFLAGS_EXTRA=$(LDFLAGS_EXTRA)
+endef
+
 LIB_SRCS := src/alloc.c src/errcode.c src/log.c src/prefix4.c src/prefix6.c src/capability.c src/pattr.c \
 	src/open.c src/keepalive.c src/notification.c src/update.c src/packet.c \
 	src/hashmap.c src/rib4.c src/rib6.c src/filter.c src/event.c src/sink.c src/out_handler.c \
@@ -56,12 +63,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(FLAG_STAMP): FORCE | $(BUILD_DIR)
-	@{ \
-		printf 'CC=%s\n' '$(CC)'; \
-		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
-		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
-		printf 'LDFLAGS_EXTRA=%s\n' '$(LDFLAGS_EXTRA)'; \
-	} > $@.tmp
+	$(file >$@.tmp,$(FLAG_STAMP_CONTENT))
 	@if ! test -f $@ || ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
 
 $(BUILD_DIR)/%.o: %.c $(FLAG_STAMP)
