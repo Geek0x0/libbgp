@@ -6,6 +6,7 @@ THREADSAFE ?= 0
 BUILD_ROOT := build
 BUILD_DIR := $(BUILD_ROOT)/threadsafe-$(THREADSAFE)
 FLAG_STAMP := $(BUILD_DIR)/.flags
+FLAG_STAMP_TMP := $(BUILD_ROOT)/.flags.threadsafe-$(THREADSAFE).tmp
 LIB_NAME := bgp
 STATIC_LIB := $(BUILD_DIR)/lib$(LIB_NAME).a
 SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
@@ -24,6 +25,7 @@ endif
 
 CFLAGS := $(CFLAGS_BASE) $(CFLAGS_EXTRA)
 CPPFLAGS := $(CPPFLAGS_BASE)
+export FLAG_STAMP_CONTENT
 
 define FLAG_STAMP_CONTENT
 CC=$(CC)
@@ -63,17 +65,17 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(FLAG_STAMP): FORCE | $(BUILD_DIR)
-	$(file >$@.tmp,$(FLAG_STAMP_CONTENT))
-	@if ! test -f $@ || ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
+	@printf '%s\n' "$$FLAG_STAMP_CONTENT" > $(FLAG_STAMP_TMP); \
+	if ! test -f $@ || ! cmp -s $(FLAG_STAMP_TMP) $@; then mv $(FLAG_STAMP_TMP) $@; else rm $(FLAG_STAMP_TMP); fi
 
 $(BUILD_DIR)/%.o: %.c $(FLAG_STAMP)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(STATIC_LIB): $(BUILD_DIR) $(LIB_OBJS)
+$(STATIC_LIB): $(LIB_OBJS) | $(BUILD_DIR)
 	$(AR) rcs $@ $(LIB_OBJS)
 
-$(SHARED_LIB): $(BUILD_DIR) $(LIB_OBJS)
+$(SHARED_LIB): $(LIB_OBJS) | $(BUILD_DIR)
 	$(CC) -shared $(LIB_OBJS) $(LDFLAGS_EXTRA) -o $@
 
 $(BUILD_DIR)/tests/%: $(BUILD_DIR)/tests/%.o $(TEST_COMMON_OBJS) $(STATIC_LIB)
