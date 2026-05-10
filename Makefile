@@ -5,6 +5,7 @@ THREADSAFE ?= 0
 
 BUILD_ROOT := build
 BUILD_DIR := $(BUILD_ROOT)/threadsafe-$(THREADSAFE)
+FLAG_STAMP := $(BUILD_DIR)/.flags
 LIB_NAME := bgp
 STATIC_LIB := $(BUILD_DIR)/lib$(LIB_NAME).a
 SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
@@ -46,7 +47,7 @@ EXAMPLE_BINS := $(EXAMPLE_SRCS:examples/%.c=$(BUILD_DIR)/examples/%)
 
 DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d)
 
-.PHONY: all clean test install headers examples
+.PHONY: all clean test install headers examples FORCE
 .SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB)
@@ -54,7 +55,16 @@ all: $(STATIC_LIB) $(SHARED_LIB)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c
+$(FLAG_STAMP): FORCE | $(BUILD_DIR)
+	@{ \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'LDFLAGS_EXTRA=%s\n' '$(LDFLAGS_EXTRA)'; \
+	} > $@.tmp
+	@if ! test -f $@ || ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm $@.tmp; fi
+
+$(BUILD_DIR)/%.o: %.c $(FLAG_STAMP)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -90,5 +100,7 @@ install: all
 
 clean:
 	rm -rf $(BUILD_ROOT)
+
+FORCE:
 
 -include $(DEPS)
