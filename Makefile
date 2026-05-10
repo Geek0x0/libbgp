@@ -93,8 +93,8 @@ examples: $(EXAMPLE_BINS)
 
 headers: all
 	@set -e; for h in $(PUBLIC_HEADERS); do \
-		printf '#include "%s"\nint main(void){return 0;}\n' "$$h" > $(BUILD_DIR)/header_test.c; \
-		$(CC) -I. $(CPPFLAGS) $(CFLAGS) $(BUILD_DIR)/header_test.c -c -o $(BUILD_DIR)/header_test.o; \
+		printf '#include <%s>\nint main(void){return 0;}\n' "$${h#include/}" > $(BUILD_DIR)/header_test.c; \
+		$(CC) -Iinclude $(CPPFLAGS) $(CFLAGS) $(BUILD_DIR)/header_test.c -c -o $(BUILD_DIR)/header_test.o; \
 	done
 
 install: all
