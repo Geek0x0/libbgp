@@ -1,48 +1,78 @@
 libbgp
 ---
-`libbgp` is a BGP (Border Gateway Protocol) library written in C++. It comes with BGP message serializer/deserializer and a BGP Finite State Machine which has all the infrastructures needed (BGP RIB, Packet Sink, Route filtering) to build a BGP speaker.
+`libbgp` is a C11 BGP (Border Gateway Protocol) library. It provides C APIs
+for BGP message serialization/deserialization, packet parsing, route attributes,
+RIB storage, filtering, events, and a BGP finite state machine.
 
-`BgpPacket` ([document](https://lab.nat.moe/libbgp-doc/classlibbgp_1_1BgpPacket.html)) is a BGP message  deserialization/serialization tool.
+Public headers live under `include/libbgp/`. Applications can include the
+umbrella header:
 
-`BgpFsm` ([document](https://lab.nat.moe/libbgp-doc/classlibbgp_1_1BgpFsm.html)) is a finite state machine that handles a single BGP session. Multiple `BgpFsm`s can be created to handle multiple sessions with different peers. BGP FSM will uses `RouteEventBus` to communicate with other FSMs. `BgpFsm` holds no information about the underlying transport protocol (for BGP, the standard is to use TCP), and it is only an FSM that take streams of binary data and output, a stream of binary data.
+```c
+#include <libbgp/libbgp.h>
+```
 
-For simple usage and quick start, refer to examples. For detailed API usages, refer to document.
+For simple usage and quick start, refer to the C examples. For detailed API
+usage, refer to the generated documentation.
 
 ### Install
 
-`libbgp` uses autotools for build automation. In general, you need the following build dependencies:
+`libbgp` builds from the root `Makefile`. In general, you need the following
+build dependencies:
 
-- g++ (or any other c++ compiler)
+- a C11 compiler
 - make
-- autotools (autoconf, automake, m4)
-- autoconf-archive
-- libtool
-- Doxygen (for generating documents)
+- Doxygen (optional, for generating documentation)
 
-If you use a Debian based operating system, you should be able to install these with the following apt command:
+If you use a Debian based operating system, you should be able to install these
+with the following apt command:
 
 ```
-# apt install g++ make autoconf autoconf-archive automake m4 libtool doxygen
+# apt install gcc make doxygen
 ```
 
-Once you have the dependencies installed, use the following commands to build libbgp:
+Once you have the dependencies installed, use the following commands to build,
+test, and install libbgp:
 
 ```
-$ ./autogen.sh && ./configure && make
+$ make
+$ make test
+$ make headers
+$ make examples
 # make install
+```
+
+Set `THREADSAFE=1` to build the thread-safe variant:
+
+```
+$ make THREADSAFE=1
+$ make test THREADSAFE=1
+```
+
+Additional compiler and linker flags can be supplied with `CFLAGS_EXTRA` and
+`LDFLAGS_EXTRA`, for example when running sanitizer builds:
+
+```
+$ make test CFLAGS_EXTRA="-fsanitize=address,undefined -g" LDFLAGS_EXTRA="-fsanitize=address,undefined"
 ```
 
 ### Document
 
-libbgp document is available online at <https://lab.nat.moe/libbgp-doc>. You may also build the document by running `doxygen` command under the project root directory. (where the `Doxyfile` is located) You will find the document under `docs/` folder.
+libbgp documentation is available online at <https://lab.nat.moe/libbgp-doc>.
+You may also build the documentation by running `doxygen` under the project root
+directory, where `Doxyfile` is located. The generated output is written under
+`docs/`.
 
 ### Examples
 
-Examples are available under the `examples/` directory. You may build example programs with the following command after installing libbgp:
+Examples are available under the `examples/` directory and build with:
 
 ```
-$ c++ name_of_example.cc -lbgp -o name_of_example
+$ make examples
 ```
+
+Current examples include `examples/peer_and_print.c` and
+`examples/route_server.c`. See `examples/README.md` for run commands and
+available options.
 
 ### License
 
