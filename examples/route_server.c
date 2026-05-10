@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,6 +186,25 @@ static int listen_socket(uint16_t port)
     return fd;
 }
 
+static libbgp_err_t subscribe_event_printers(libbgp_event_bus_t *bus, libbgp_rib4_t *rib)
+{
+    libbgp_err_t err;
+
+    err = libbgp_event_bus_subscribe(bus, LIBBGP_EVENT_SESSION_UP, event_printer, rib, NULL);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = libbgp_event_bus_subscribe(bus, LIBBGP_EVENT_SESSION_DOWN, event_printer, rib, NULL);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = libbgp_event_bus_subscribe(bus, LIBBGP_EVENT_ROUTE_ADDED, event_printer, rib, NULL);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    return libbgp_event_bus_subscribe(bus, LIBBGP_EVENT_ROUTE_WITHDRAWN, event_printer, rib, NULL);
+}
+
 static int run_session(
     int client_fd,
     const struct libbgp_fsm_config *config,
@@ -299,6 +319,11 @@ int main(int argc, char **argv)
     int rc;
     int i;
 
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
+
     config.local_asn = DEFAULT_ASN;
     config.local_bgp_id = ip4_bytes(192u, 0u, 2u, 254u);
     config.hold_time = 90u;
@@ -348,10 +373,13 @@ int main(int argc, char **argv)
         libbgp_rib4_destroy(&rib);
         return 1;
     }
-    (void)libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_printer, &rib, NULL);
-    (void)libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, event_printer, &rib, NULL);
-    (void)libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, event_printer, &rib, NULL);
-    (void)libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_WITHDRAWN, event_printer, &rib, NULL);
+    rc = subscribe_event_printers(&bus, &rib);
+    if (rc != LIBBGP_OK) {
+        fprintf(stderr, "event subscribe: %s\n", libbgp_strerror((libbgp_err_t)rc));
+        libbgp_event_bus_destroy(&bus);
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
 
     listen_fd = listen_socket(port);
     if (listen_fd < 0) {

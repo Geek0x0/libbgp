@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,6 +256,11 @@ int main(int argc, char **argv)
     int listen_fd;
     int client_fd;
     int i;
+
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
 
     config.local_asn = DEFAULT_ASN;
     config.local_bgp_id = ip4_bytes(192u, 0u, 2u, 1u);
