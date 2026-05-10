@@ -26,20 +26,15 @@ static void usage(const char *prog)
     printf("Run a simple single-client BGP route-server loop with shared RIB4 and events.\n");
 }
 
-static uint32_t ip4_bytes(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+static uint32_t router_id_value(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
-    uint8_t bytes[4];
-    uint32_t value;
-
-    bytes[0] = a;
-    bytes[1] = b;
-    bytes[2] = c;
-    bytes[3] = d;
-    memcpy(&value, bytes, sizeof(value));
-    return value;
+    return ((uint32_t)a << 24u) |
+        ((uint32_t)b << 16u) |
+        ((uint32_t)c << 8u) |
+        (uint32_t)d;
 }
 
-static void print_ip4_value(uint32_t value)
+static void print_prefix4_addr(uint32_t value)
 {
     uint8_t bytes[4];
 
@@ -49,6 +44,15 @@ static void print_ip4_value(uint32_t value)
         (unsigned int)bytes[1],
         (unsigned int)bytes[2],
         (unsigned int)bytes[3]);
+}
+
+static void print_router_id(uint32_t value)
+{
+    printf("%u.%u.%u.%u",
+        (unsigned int)((value >> 24u) & 0xffu),
+        (unsigned int)((value >> 16u) & 0xffu),
+        (unsigned int)((value >> 8u) & 0xffu),
+        (unsigned int)(value & 0xffu));
 }
 
 static bool parse_u16(const char *s, uint16_t *out)
@@ -99,7 +103,7 @@ static bool parse_router_id(const char *s, uint32_t *out)
     if (a > 255u || b > 255u || c > 255u || d > 255u) {
         return false;
     }
-    *out = ip4_bytes((uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d);
+    *out = router_id_value((uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d);
     return true;
 }
 
@@ -140,11 +144,11 @@ static void event_printer(const libbgp_event_t *event, void *ctx)
     printf("event: %s", event_name(event->type));
     if (event->source_router_id != 0u) {
         printf(" from ");
-        print_ip4_value(event->source_router_id);
+        print_router_id(event->source_router_id);
     }
     if (event->prefix4 != NULL) {
         printf(" prefix ");
-        print_ip4_value(event->prefix4->addr);
+        print_prefix4_addr(event->prefix4->addr);
         printf("/%u", (unsigned int)event->prefix4->len);
     }
     if (rib != NULL) {
@@ -325,7 +329,7 @@ int main(int argc, char **argv)
     }
 
     config.local_asn = DEFAULT_ASN;
-    config.local_bgp_id = ip4_bytes(192u, 0u, 2u, 254u);
+    config.local_bgp_id = router_id_value(192u, 0u, 2u, 254u);
     config.hold_time = 90u;
     config.keepalive_time = 30u;
     config.enable_4byte_asn = true;

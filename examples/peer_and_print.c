@@ -26,17 +26,12 @@ static void usage(const char *prog)
     printf("Listen for one BGP TCP peer, print received packet types, and feed libbgp_fsm.\n");
 }
 
-static uint32_t ip4_bytes(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+static uint32_t router_id_value(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
-    uint8_t bytes[4];
-    uint32_t value;
-
-    bytes[0] = a;
-    bytes[1] = b;
-    bytes[2] = c;
-    bytes[3] = d;
-    memcpy(&value, bytes, sizeof(value));
-    return value;
+    return ((uint32_t)a << 24u) |
+        ((uint32_t)b << 16u) |
+        ((uint32_t)c << 8u) |
+        (uint32_t)d;
 }
 
 static bool parse_u16(const char *s, uint16_t *out)
@@ -87,7 +82,7 @@ static bool parse_router_id(const char *s, uint32_t *out)
     if (a > 255u || b > 255u || c > 255u || d > 255u) {
         return false;
     }
-    *out = ip4_bytes((uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d);
+    *out = router_id_value((uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d);
     return true;
 }
 
@@ -263,7 +258,7 @@ int main(int argc, char **argv)
     }
 
     config.local_asn = DEFAULT_ASN;
-    config.local_bgp_id = ip4_bytes(192u, 0u, 2u, 1u);
+    config.local_bgp_id = router_id_value(192u, 0u, 2u, 1u);
     config.hold_time = 90u;
     config.keepalive_time = 30u;
     config.enable_4byte_asn = true;
