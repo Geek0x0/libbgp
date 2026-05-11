@@ -87,8 +87,8 @@ typedef struct fsm_applied_route4 {
     libbgp_prefix4_t prefix;
     uint64_t update_id;
     bool restore_replaced;
-    bool publish_added;
-    libbgp_rib4_route_t added_route;
+    bgp_rib_change_kind_t change_kind;
+    libbgp_rib4_route_t best_route;
     bgp_rib4_saved_route_t replaced;
 } fsm_applied_route4_t;
 
@@ -97,8 +97,8 @@ typedef struct fsm_applied_route6 {
     libbgp_prefix6_t prefix;
     uint64_t update_id;
     bool restore_replaced;
-    bool publish_added;
-    libbgp_rib6_route_t added_route;
+    bgp_rib_change_kind_t change_kind;
+    libbgp_rib6_route_t best_route;
     bgp_rib6_saved_route_t replaced;
 } fsm_applied_route6_t;
 
@@ -457,11 +457,11 @@ static void fsm_update_journal_destroy(fsm_update_journal_t *journal)
         return;
     }
     for (i = 0u; i < journal->routes4_count; i++) {
-        bgp_rib4_route_snapshot_destroy(&journal->routes4[i].added_route);
+        bgp_rib4_route_snapshot_destroy(&journal->routes4[i].best_route);
         bgp_rib4_saved_route_destroy(&journal->routes4[i].replaced);
     }
     for (i = 0u; i < journal->routes6_count; i++) {
-        bgp_rib6_route_snapshot_destroy(&journal->routes6[i].added_route);
+        bgp_rib6_route_snapshot_destroy(&journal->routes6[i].best_route);
         bgp_rib6_saved_route_destroy(&journal->routes6[i].replaced);
     }
     for (i = 0u; i < journal->withdrawn4_count; i++) {
@@ -705,8 +705,7 @@ static libbgp_err_t fsm_update_journal_record4(
     uint64_t update_id,
     bool restore_replaced,
     bgp_rib4_saved_route_t *replaced,
-    libbgp_rib4_route_t *added_route,
-    bool publish_added)
+    bgp_rib4_change_t *change)
 {
     libbgp_err_t err;
     fsm_applied_route4_t *entry;
@@ -727,14 +726,17 @@ static libbgp_err_t fsm_update_journal_record4(
     entry->prefix = *prefix;
     entry->update_id = update_id;
     entry->restore_replaced = restore_replaced;
-    entry->publish_added = publish_added && added_route != NULL;
+    if (change != NULL) {
+        entry->change_kind = change->kind;
+        if ((change->kind == BGP_RIB_CHANGE_NEW_BEST ||
+             change->kind == BGP_RIB_CHANGE_REPLACEMENT_BEST) &&
+            change->best != NULL) {
+            entry->best_route = *change->best;
+        }
+    }
     if (replaced != NULL) {
         entry->replaced = *replaced;
         replaced->entry = NULL;
-    }
-    if (entry->publish_added) {
-        entry->added_route = *added_route;
-        memset(added_route, 0, sizeof(*added_route));
     }
     journal->routes4_count++;
     return LIBBGP_OK;
@@ -746,8 +748,7 @@ static libbgp_err_t fsm_update_journal_record6(
     uint64_t update_id,
     bool restore_replaced,
     bgp_rib6_saved_route_t *replaced,
-    libbgp_rib6_route_t *added_route,
-    bool publish_added)
+    bgp_rib6_change_t *change)
 {
     libbgp_err_t err;
     fsm_applied_route6_t *entry;
@@ -768,14 +769,17 @@ static libbgp_err_t fsm_update_journal_record6(
     entry->prefix = *prefix;
     entry->update_id = update_id;
     entry->restore_replaced = restore_replaced;
-    entry->publish_added = publish_added && added_route != NULL;
+    if (change != NULL) {
+        entry->change_kind = change->kind;
+        if ((change->kind == BGP_RIB_CHANGE_NEW_BEST ||
+             change->kind == BGP_RIB_CHANGE_REPLACEMENT_BEST) &&
+            change->best != NULL) {
+            entry->best_route = *change->best;
+        }
+    }
     if (replaced != NULL) {
         entry->replaced = *replaced;
         replaced->entry = NULL;
-    }
-    if (entry->publish_added) {
-        entry->added_route = *added_route;
-        memset(added_route, 0, sizeof(*added_route));
     }
     journal->routes6_count++;
     return LIBBGP_OK;
@@ -1063,26 +1067,6 @@ static bool fsm_update_session_current(fsm_impl_t *impl, uint64_t session_genera
 {
     return impl->state == LIBBGP_FSM_ESTABLISHED &&
         impl->session_generation == session_generation;
-}
-
-static bool fsm_route4_same_identity(
-    const libbgp_rib4_route_t *a,
-    const libbgp_rib4_route_t *b)
-{
-    return a != NULL && b != NULL &&
-        a->source_router_id == b->source_router_id &&
-        a->update_id == b->update_id &&
-        libbgp_prefix4_eq(&a->prefix, &b->prefix);
-}
-
-static bool fsm_route6_same_identity(
-    const libbgp_rib6_route_t *a,
-    const libbgp_rib6_route_t *b)
-{
-    return a != NULL && b != NULL &&
-        a->source_router_id == b->source_router_id &&
-        a->update_id == b->update_id &&
-        libbgp_prefix6_eq(&a->prefix, &b->prefix);
 }
 
 static size_t fsm_as_path_len_and_origin_as(const libbgp_pattr_t *attr, uint32_t *origin_as)
@@ -1784,16 +1768,17 @@ static libbgp_err_t fsm_apply_update(
         libbgp_rib4_route_t route;
         libbgp_rib4_route_t best_before;
         libbgp_rib4_route_t best_after;
+        bgp_rib4_change_t change;
         bgp_rib4_saved_route_t replaced;
         bool had_replaced = false;
         bool restore_replaced = false;
         bool before_found = false;
         bool after_found = false;
-        bool publish_added = false;
         uint64_t update_id = 0u;
         err = LIBBGP_OK;
         memset(&best_before, 0, sizeof(best_before));
         memset(&best_after, 0, sizeof(best_after));
+        memset(&change, 0, sizeof(change));
         memset(&replaced, 0, sizeof(replaced));
 
         if (!fsm_update_session_current(impl, session_generation)) {
@@ -1829,9 +1814,21 @@ static libbgp_err_t fsm_apply_update(
         }
         if (err == LIBBGP_OK && rib4 != NULL) {
             err = bgp_rib4_best_exact_clone(rib4, &route.prefix, &best_after, &after_found);
-            if (err == LIBBGP_OK && after_found &&
-                (!before_found || !fsm_route4_same_identity(&best_before, &best_after))) {
-                publish_added = true;
+            if (err == LIBBGP_OK) {
+                if (!after_found) {
+                    change.kind = BGP_RIB_CHANGE_UNREACHABLE;
+                } else if (!before_found) {
+                    change.kind = BGP_RIB_CHANGE_NEW_BEST;
+                    change.best = &best_after;
+                } else if (best_before.source_router_id == best_after.source_router_id &&
+                    best_before.update_id == best_after.update_id &&
+                    libbgp_prefix4_eq(&best_before.prefix, &best_after.prefix)) {
+                    change.kind = BGP_RIB_CHANGE_NO_BEST_CHANGE;
+                    change.best = &best_after;
+                } else {
+                    change.kind = BGP_RIB_CHANGE_REPLACEMENT_BEST;
+                    change.best = &best_after;
+                }
             }
         }
         if (err == LIBBGP_OK) {
@@ -1841,8 +1838,12 @@ static libbgp_err_t fsm_apply_update(
                 update_id,
                 restore_replaced,
                 &replaced,
-                &best_after,
-                publish_added);
+                &change);
+            if (err == LIBBGP_OK && change.best == &best_after &&
+                (change.kind == BGP_RIB_CHANGE_NEW_BEST ||
+                 change.kind == BGP_RIB_CHANGE_REPLACEMENT_BEST)) {
+                memset(&best_after, 0, sizeof(best_after));
+            }
         }
         if (err != LIBBGP_OK && rib4 != NULL) {
             (void)bgp_rib4_withdraw_exact_if_update_id(rib4, peer_bgp_id, &route.prefix, update_id);
@@ -1893,18 +1894,19 @@ static libbgp_err_t fsm_apply_update(
                 libbgp_rib6_route_t route;
                 libbgp_rib6_route_t best_before;
                 libbgp_rib6_route_t best_after;
+                bgp_rib6_change_t change;
                 bgp_rib6_saved_route_t replaced;
                 bool had_replaced = false;
                 bool restore_replaced = false;
                 bool route_made = false;
                 bool before_found = false;
                 bool after_found = false;
-                bool publish_added = false;
                 uint64_t update_id = 0u;
                 err = LIBBGP_OK;
                 memset(&route, 0, sizeof(route));
                 memset(&best_before, 0, sizeof(best_before));
                 memset(&best_after, 0, sizeof(best_after));
+                memset(&change, 0, sizeof(change));
                 memset(&replaced, 0, sizeof(replaced));
 
                 if (!fsm_update_session_current(impl, session_generation)) {
@@ -1958,9 +1960,21 @@ static libbgp_err_t fsm_apply_update(
                         &attr->data.mp_reach_ipv6.nlri[j],
                         &best_after,
                         &after_found);
-                    if (err == LIBBGP_OK && after_found &&
-                        (!before_found || !fsm_route6_same_identity(&best_before, &best_after))) {
-                        publish_added = true;
+                    if (err == LIBBGP_OK) {
+                        if (!after_found) {
+                            change.kind = BGP_RIB_CHANGE_UNREACHABLE;
+                        } else if (!before_found) {
+                            change.kind = BGP_RIB_CHANGE_NEW_BEST;
+                            change.best = &best_after;
+                        } else if (best_before.source_router_id == best_after.source_router_id &&
+                            best_before.update_id == best_after.update_id &&
+                            libbgp_prefix6_eq(&best_before.prefix, &best_after.prefix)) {
+                            change.kind = BGP_RIB_CHANGE_NO_BEST_CHANGE;
+                            change.best = &best_after;
+                        } else {
+                            change.kind = BGP_RIB_CHANGE_REPLACEMENT_BEST;
+                            change.best = &best_after;
+                        }
                     }
                 }
                 if (route_made) {
@@ -1973,8 +1987,12 @@ static libbgp_err_t fsm_apply_update(
                         update_id,
                         restore_replaced,
                         &replaced,
-                        &best_after,
-                        publish_added);
+                        &change);
+                    if (err == LIBBGP_OK && change.best == &best_after &&
+                        (change.kind == BGP_RIB_CHANGE_NEW_BEST ||
+                         change.kind == BGP_RIB_CHANGE_REPLACEMENT_BEST)) {
+                        memset(&best_after, 0, sizeof(best_after));
+                    }
                 }
                 if (err != LIBBGP_OK && rib6 != NULL) {
                     (void)bgp_rib6_withdraw_exact_if_update_id(
@@ -2117,13 +2135,15 @@ static void fsm_publish_update_events(
         for (i = 0u; i < journal->routes4_count; i++) {
             uint64_t added_publisher = 0u;
 
-            if (journal->routes4[i].seq != seq || !journal->routes4[i].publish_added) {
+            if (journal->routes4[i].seq != seq ||
+                (journal->routes4[i].change_kind != BGP_RIB_CHANGE_NEW_BEST &&
+                 journal->routes4[i].change_kind != BGP_RIB_CHANGE_REPLACEMENT_BEST)) {
                 continue;
             }
             if (!fsm_publish_snapshot_current(impl, session_generation, &added_publisher, NULL)) {
                 return;
             }
-            fsm_publish_route4_added_snapshot(bus, added_publisher, &journal->routes4[i].added_route);
+            fsm_publish_route4_added_snapshot(bus, added_publisher, &journal->routes4[i].best_route);
             if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
                 return;
             }
@@ -2165,13 +2185,15 @@ static void fsm_publish_update_events(
         for (i = 0u; i < journal->routes6_count; i++) {
             uint64_t added_publisher = 0u;
 
-            if (journal->routes6[i].seq != seq || !journal->routes6[i].publish_added) {
+            if (journal->routes6[i].seq != seq ||
+                (journal->routes6[i].change_kind != BGP_RIB_CHANGE_NEW_BEST &&
+                 journal->routes6[i].change_kind != BGP_RIB_CHANGE_REPLACEMENT_BEST)) {
                 continue;
             }
             if (!fsm_publish_snapshot_current(impl, session_generation, &added_publisher, NULL)) {
                 return;
             }
-            fsm_publish_route6_added_snapshot(bus, added_publisher, &journal->routes6[i].added_route);
+            fsm_publish_route6_added_snapshot(bus, added_publisher, &journal->routes6[i].best_route);
             if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
                 return;
             }
