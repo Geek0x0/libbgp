@@ -186,16 +186,50 @@ static libbgp_err_t rib4_route_clone(
     return LIBBGP_OK;
 }
 
+static bool rib4_neighbor_as(const libbgp_rib4_route_t *route, uint32_t *neighbor_as)
+{
+    size_t i;
+
+    if (neighbor_as != NULL) {
+        *neighbor_as = 0u;
+    }
+    if (route == NULL || route->attrs == NULL) {
+        return false;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        const libbgp_pattr_t *attr = route->attrs[i];
+        size_t j;
+
+        if (attr == NULL || attr->type != LIBBGP_PATTR_AS_PATH) {
+            continue;
+        }
+        if (attr->data.as_path.segment_count != 0u && attr->data.as_path.segments == NULL) {
+            return false;
+        }
+        for (j = 0u; j < attr->data.as_path.segment_count; j++) {
+            const libbgp_as_path_segment_t *segment = &attr->data.as_path.segments[j];
+
+            if (segment->type == 2u && segment->asn_count != 0u && segment->asns != NULL) {
+                if (neighbor_as != NULL) {
+                    *neighbor_as = segment->asns[0];
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 static bool rib4_better(const libbgp_rib4_route_t *a, const libbgp_rib4_route_t *b)
 {
     uint32_t a_lp;
     uint32_t b_lp;
+    uint32_t a_neighbor_as;
+    uint32_t b_neighbor_as;
 
     if (b == NULL) {
         return true;
-    }
-    if (a->is_ibgp != b->is_ibgp) {
-        return !a->is_ibgp;
     }
     if (a->weight != b->weight) {
         return a->weight > b->weight;
@@ -211,8 +245,12 @@ static bool rib4_better(const libbgp_rib4_route_t *a, const libbgp_rib4_route_t 
     if (a->origin != b->origin) {
         return a->origin < b->origin;
     }
-    if (a->origin_as == b->origin_as && a->med != b->med) {
+    if (a->med != b->med && rib4_neighbor_as(a, &a_neighbor_as) &&
+        rib4_neighbor_as(b, &b_neighbor_as) && a_neighbor_as == b_neighbor_as) {
         return a->med < b->med;
+    }
+    if (a->is_ibgp != b->is_ibgp) {
+        return !a->is_ibgp;
     }
     if (a->update_id != b->update_id) {
         return a->update_id < b->update_id;
@@ -471,45 +509,6 @@ static libbgp_err_t rib4_result_add_replacement(
         return err;
     }
     result->replacement_count++;
-    return LIBBGP_OK;
-}
-
-static void rib4_route_snapshot_array_clear(libbgp_rib4_route_t *routes, size_t count)
-{
-    size_t i;
-
-    for (i = 0u; i < count; i++) {
-        rib4_route_snapshot_clear(&routes[i]);
-    }
-    bgp_free(routes);
-}
-
-static libbgp_err_t rib4_route_snapshot_array_push(
-    libbgp_rib4_route_t **routes,
-    size_t *count,
-    const libbgp_rib4_route_t *route)
-{
-    libbgp_rib4_route_t *next;
-    libbgp_err_t err;
-
-    if (routes == NULL || count == NULL || route == NULL) {
-        return LIBBGP_ERR_INVALID;
-    }
-    if (*count == SIZE_MAX || *count + 1u > SIZE_MAX / sizeof(**routes)) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    next = (libbgp_rib4_route_t *)bgp_realloc(*routes, (*count + 1u) * sizeof(**routes));
-    if (next == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    *routes = next;
-    memset(&(*routes)[*count], 0, sizeof((*routes)[*count]));
-    err = rib4_route_snapshot_clone(route, &(*routes)[*count]);
-    if (err != LIBBGP_OK) {
-        rib4_route_snapshot_clear(&(*routes)[*count]);
-        return err;
-    }
-    (*count)++;
     return LIBBGP_OK;
 }
 
@@ -943,16 +942,14 @@ libbgp_err_t bgp_rib4_foreach_best_route(
     void *ctx)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
-    libbgp_rib4_route_t *snapshots = NULL;
-    size_t snapshot_count = 0u;
     size_t i;
-    libbgp_err_t err = LIBBGP_OK;
+    bool keep_going = true;
 
     if (impl == NULL || fn == NULL) {
         return LIBBGP_ERR_INVALID;
     }
     bgp_lock(&impl->lock);
-    for (i = 0u; err == LIBBGP_OK && i < impl->routes.bucket_count; i++) {
+    for (i = 0u; keep_going && i < impl->routes.bucket_count; i++) {
         bgp_hashmap_entry_t *entry;
 
         for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
@@ -961,24 +958,13 @@ libbgp_err_t bgp_rib4_foreach_best_route(
             if (rib4_best_exact_locked(impl, &route->prefix) != route) {
                 continue;
             }
-            err = rib4_route_snapshot_array_push(&snapshots, &snapshot_count, route);
-            if (err != LIBBGP_OK) {
+            keep_going = fn(route, ctx);
+            if (!keep_going) {
                 break;
             }
         }
     }
     bgp_unlock(&impl->lock);
-    if (err != LIBBGP_OK) {
-        rib4_route_snapshot_array_clear(snapshots, snapshot_count);
-        return err;
-    }
-
-    for (i = 0u; i < snapshot_count; i++) {
-        if (!fn(&snapshots[i], ctx)) {
-            break;
-        }
-    }
-    rib4_route_snapshot_array_clear(snapshots, snapshot_count);
     return LIBBGP_OK;
 }
 
