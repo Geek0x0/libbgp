@@ -3,6 +3,7 @@
 #include "libbgp/pattr.h"
 #include "libbgp/rib4.h"
 #include "libbgp/rib6.h"
+#include "../src/rib_internal.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -305,6 +306,113 @@ LIBBGP_TEST(rib4_best_route_prefers_lower_update_id)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_insert_reports_only_best_path_changes)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(198u, 51u, 100u, 0u, 24u);
+    libbgp_rib4_route_t best = route4(prefix, 1u);
+    libbgp_rib4_route_t worse = route4(prefix, 2u);
+    bgp_rib4_change_t change;
+    uint64_t update_id = 0u;
+
+    best.local_pref = 200u;
+    worse.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &best, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, change.best->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &worse, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NO_BEST_CHANGE, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, change.best->source_router_id);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_insert_reports_replacement_best_when_better_route_wins)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_rib4_route_t initial = route4(prefix, 1u);
+    libbgp_rib4_route_t better = route4(prefix, 2u);
+    bgp_rib4_change_t change;
+    uint64_t update_id = 0u;
+
+    initial.local_pref = 100u;
+    better.local_pref = 200u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &initial, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &better, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, change.best->source_router_id);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_insert_reports_same_update_id_best_replacement)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_rib4_route_t initial = route4(prefix, 1u);
+    libbgp_rib4_route_t replacement = route4(prefix, 1u);
+    bgp_rib4_change_t change;
+    uint64_t update_id = 42u;
+
+    initial.update_id = 42u;
+    replacement.update_id = 42u;
+    initial.local_pref = 100u;
+    replacement.local_pref = 200u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &initial, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+
+    update_id = 42u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &replacement, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, change.best->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(42u, change.best->update_id);
+    LIBBGP_ASSERT_EQ_U64(200u, change.best->local_pref);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_withdraw_reports_replacement_vs_unreachable)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_rib4_route_t primary = route4(prefix, 1u);
+    libbgp_rib4_route_t backup = route4(prefix, 2u);
+    bgp_rib4_change_t change;
+    uint64_t update_id = 0u;
+
+    primary.local_pref = 200u;
+    backup.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &primary, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &backup, &change, &update_id));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_track_best(&rib, 1u, &prefix, &change));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, change.best->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_track_best(&rib, 2u, &prefix, &change));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_UNREACHABLE, change.kind);
+    LIBBGP_ASSERT(change.best == NULL);
+
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib6_best_route_prefers_lower_update_id)
 {
     libbgp_rib6_t rib;
@@ -323,6 +431,75 @@ LIBBGP_TEST(rib6_best_route_prefers_lower_update_id)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &older));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &newer));
     assert_rib6_best_source(&rib, dest, older_src);
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_insert_reports_same_update_id_best_replacement)
+{
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 6u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 6u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t initial = route6(prefix, 1u, next_hop);
+    libbgp_rib6_route_t replacement = route6(prefix, 1u, next_hop);
+    bgp_rib6_change_t change;
+    uint64_t update_id = 42u;
+
+    initial.update_id = 42u;
+    replacement.update_id = 42u;
+    initial.local_pref = 100u;
+    replacement.local_pref = 200u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &initial, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+
+    update_id = 42u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &replacement, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, change.best->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(42u, change.best->update_id);
+    LIBBGP_ASSERT_EQ_U64(200u, change.best->local_pref);
+
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_insert_and_withdraw_track_best_changes)
+{
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 5u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 5u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t initial = route6(prefix, 1u, next_hop);
+    libbgp_rib6_route_t better = route6(prefix, 2u, next_hop);
+    libbgp_rib6_route_t worse = route6(prefix, 3u, next_hop);
+    bgp_rib6_change_t change;
+    uint64_t update_id = 0u;
+
+    initial.local_pref = 100u;
+    better.local_pref = 200u;
+    worse.local_pref = 50u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &initial, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &better, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, change.best->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &worse, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NO_BEST_CHANGE, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, change.best->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_withdraw_track_best(&rib, 3u, &prefix, &change));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NO_BEST_CHANGE, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, change.best->source_router_id);
+
     libbgp_rib6_destroy(&rib);
 }
 
@@ -559,7 +736,13 @@ int main(void)
         { "rib4_insert_local_rejects_duplicate_prefix", rib4_insert_local_rejects_duplicate_prefix },
         { "rib4_best_route_ordering_for_same_prefix", rib4_best_route_ordering_for_same_prefix },
         { "rib4_best_route_prefers_lower_update_id", rib4_best_route_prefers_lower_update_id },
+        { "rib4_insert_reports_only_best_path_changes", rib4_insert_reports_only_best_path_changes },
+        { "rib4_insert_reports_replacement_best_when_better_route_wins", rib4_insert_reports_replacement_best_when_better_route_wins },
+        { "rib4_insert_reports_same_update_id_best_replacement", rib4_insert_reports_same_update_id_best_replacement },
+        { "rib4_withdraw_reports_replacement_vs_unreachable", rib4_withdraw_reports_replacement_vs_unreachable },
         { "rib6_best_route_prefers_lower_update_id", rib6_best_route_prefers_lower_update_id },
+        { "rib6_insert_reports_same_update_id_best_replacement", rib6_insert_reports_same_update_id_best_replacement },
+        { "rib6_insert_and_withdraw_track_best_changes", rib6_insert_and_withdraw_track_best_changes },
         { "rib_best_route_compares_router_ids_as_network_order", rib_best_route_compares_router_ids_as_network_order },
         { "rib4_replace_withdraw_discard_and_scoped_lookup", rib4_replace_withdraw_discard_and_scoped_lookup },
         { "rib4_lookup_returns_borrowed_pointer_replaced_by_mutation", rib4_lookup_returns_borrowed_pointer_replaced_by_mutation },
