@@ -72,6 +72,50 @@ static void rib6_route_free(libbgp_rib6_route_t *route)
     bgp_free(route);
 }
 
+static void rib6_route_snapshot_clear(libbgp_rib6_route_t *route)
+{
+    size_t i;
+
+    if (route == NULL) {
+        return;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        libbgp_pattr_unref(route->attrs[i]);
+    }
+    bgp_free(route->attrs);
+    memset(route, 0, sizeof(*route));
+}
+
+static libbgp_err_t rib6_route_snapshot_clone(
+    const libbgp_rib6_route_t *src,
+    libbgp_rib6_route_t *dst)
+{
+    size_t i;
+
+    if (src == NULL || dst == NULL || (src->attr_count != 0u && src->attrs == NULL)) {
+        return LIBBGP_ERR_INVALID;
+    }
+    memset(dst, 0, sizeof(*dst));
+    *dst = *src;
+    dst->attrs = NULL;
+    if (src->attr_count == 0u) {
+        return LIBBGP_OK;
+    }
+    if (src->attr_count > SIZE_MAX / sizeof(*dst->attrs)) {
+        memset(dst, 0, sizeof(*dst));
+        return LIBBGP_ERR_NOMEM;
+    }
+    dst->attrs = (libbgp_pattr_t **)bgp_calloc(src->attr_count, sizeof(*dst->attrs));
+    if (dst->attrs == NULL) {
+        memset(dst, 0, sizeof(*dst));
+        return LIBBGP_ERR_NOMEM;
+    }
+    for (i = 0u; i < src->attr_count; i++) {
+        dst->attrs[i] = libbgp_pattr_ref(src->attrs[i]);
+    }
+    return LIBBGP_OK;
+}
+
 static void rib6_entry_free(void *key, void *value, void *ctx)
 {
     BGP_UNUSED(ctx);
@@ -175,7 +219,7 @@ static bool rib6_better(const libbgp_rib6_route_t *a, const libbgp_rib6_route_t 
         return a->med < b->med;
     }
     if (a->update_id != b->update_id) {
-        return a->update_id > b->update_id;
+        return a->update_id < b->update_id;
     }
     return bgp_router_id_cmp(a->source_router_id, b->source_router_id) < 0;
 }
@@ -357,6 +401,126 @@ static libbgp_rib6_route_t *rib6_find_locked(
         }
     }
     return NULL;
+}
+
+static libbgp_rib6_route_t *rib6_best_exact_locked(
+    rib6_impl_t *impl,
+    const libbgp_prefix6_t *prefix)
+{
+    rib6_key_t find_key;
+    size_t idx;
+    uint64_t hash;
+    bgp_hashmap_entry_t *entry;
+    libbgp_rib6_route_t *best = NULL;
+
+    if (impl == NULL || prefix == NULL) {
+        return NULL;
+    }
+    find_key.prefix = *prefix;
+    hash = rib6_hash(&find_key, NULL);
+    idx = (size_t)(hash % (uint64_t)impl->routes.bucket_count);
+    for (entry = impl->routes.buckets[idx]; entry != NULL; entry = entry->next) {
+        libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)entry->value;
+
+        if (entry->hash == hash && rib6_key_eq(entry->key, &find_key, NULL) &&
+            libbgp_prefix6_eq(&route->prefix, prefix) &&
+            (best == NULL || rib6_better(route, best))) {
+            best = route;
+        }
+    }
+    return best;
+}
+
+static libbgp_err_t rib6_prefix_array_push(
+    libbgp_prefix6_t **items,
+    size_t *count,
+    const libbgp_prefix6_t *prefix)
+{
+    libbgp_prefix6_t *next;
+
+    if (items == NULL || count == NULL || prefix == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (*count == SIZE_MAX || *count + 1u > SIZE_MAX / sizeof(**items)) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    next = (libbgp_prefix6_t *)bgp_realloc(*items, (*count + 1u) * sizeof(**items));
+    if (next == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    *items = next;
+    (*items)[*count] = *prefix;
+    (*count)++;
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t rib6_result_add_replacement(
+    bgp_rib6_discard_result_t *result,
+    const libbgp_rib6_route_t *route)
+{
+    libbgp_rib6_route_t *next;
+    libbgp_err_t err;
+
+    if (result == NULL || route == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (result->replacement_count == SIZE_MAX ||
+        result->replacement_count + 1u > SIZE_MAX / sizeof(*result->replacements)) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    next = (libbgp_rib6_route_t *)bgp_realloc(
+        result->replacements,
+        (result->replacement_count + 1u) * sizeof(*result->replacements));
+    if (next == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    result->replacements = next;
+    memset(&result->replacements[result->replacement_count], 0, sizeof(result->replacements[result->replacement_count]));
+    err = rib6_route_snapshot_clone(route, &result->replacements[result->replacement_count]);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    result->replacement_count++;
+    return LIBBGP_OK;
+}
+
+static void rib6_route_snapshot_array_clear(libbgp_rib6_route_t *routes, size_t count)
+{
+    size_t i;
+
+    for (i = 0u; i < count; i++) {
+        rib6_route_snapshot_clear(&routes[i]);
+    }
+    bgp_free(routes);
+}
+
+static libbgp_err_t rib6_route_snapshot_array_push(
+    libbgp_rib6_route_t **routes,
+    size_t *count,
+    const libbgp_rib6_route_t *route)
+{
+    libbgp_rib6_route_t *next;
+    libbgp_err_t err;
+
+    if (routes == NULL || count == NULL || route == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (*count == SIZE_MAX || *count + 1u > SIZE_MAX / sizeof(**routes)) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    next = (libbgp_rib6_route_t *)bgp_realloc(*routes, (*count + 1u) * sizeof(**routes));
+    if (next == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    *routes = next;
+    memset(&(*routes)[*count], 0, sizeof((*routes)[*count]));
+    err = rib6_route_snapshot_clone(route, &(*routes)[*count]);
+    if (err != LIBBGP_OK) {
+        rib6_route_snapshot_clear(&(*routes)[*count]);
+        return err;
+    }
+    (*count)++;
+    return LIBBGP_OK;
 }
 
 libbgp_err_t libbgp_rib6_init(libbgp_rib6_t *rib)
@@ -671,6 +835,184 @@ libbgp_err_t bgp_rib6_foreach_route(
     }
     bgp_unlock(&impl->lock);
     return LIBBGP_OK;
+}
+
+libbgp_err_t bgp_rib6_foreach_best_route(
+    const libbgp_rib6_t *rib,
+    bgp_rib6_route_iter_fn fn,
+    void *ctx)
+{
+    rib6_impl_t *impl = rib6_impl_get(rib);
+    libbgp_rib6_route_t *snapshots = NULL;
+    size_t snapshot_count = 0u;
+    size_t i;
+    libbgp_err_t err = LIBBGP_OK;
+
+    if (impl == NULL || fn == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    bgp_lock(&impl->lock);
+    for (i = 0u; err == LIBBGP_OK && i < impl->routes.bucket_count; i++) {
+        bgp_hashmap_entry_t *entry;
+
+        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+            const libbgp_rib6_route_t *route = (const libbgp_rib6_route_t *)entry->value;
+
+            if (rib6_best_exact_locked(impl, &route->prefix) != route) {
+                continue;
+            }
+            err = rib6_route_snapshot_array_push(&snapshots, &snapshot_count, route);
+            if (err != LIBBGP_OK) {
+                break;
+            }
+        }
+    }
+    bgp_unlock(&impl->lock);
+    if (err != LIBBGP_OK) {
+        rib6_route_snapshot_array_clear(snapshots, snapshot_count);
+        return err;
+    }
+
+    for (i = 0u; i < snapshot_count; i++) {
+        if (!fn(&snapshots[i], ctx)) {
+            break;
+        }
+    }
+    rib6_route_snapshot_array_clear(snapshots, snapshot_count);
+    return LIBBGP_OK;
+}
+
+void bgp_rib6_route_snapshot_destroy(libbgp_rib6_route_t *route)
+{
+    rib6_route_snapshot_clear(route);
+}
+
+void bgp_rib6_discard_result_destroy(bgp_rib6_discard_result_t *result)
+{
+    size_t i;
+
+    if (result == NULL) {
+        return;
+    }
+    for (i = 0u; i < result->replacement_count; i++) {
+        rib6_route_snapshot_clear(&result->replacements[i]);
+    }
+    bgp_free(result->withdrawn);
+    bgp_free(result->replacements);
+    memset(result, 0, sizeof(*result));
+}
+
+libbgp_err_t bgp_rib6_best_exact_clone(
+    libbgp_rib6_t *rib,
+    const libbgp_prefix6_t *prefix,
+    libbgp_rib6_route_t *out_route,
+    bool *found)
+{
+    rib6_impl_t *impl = rib6_impl_get(rib);
+    libbgp_rib6_route_t *best;
+    libbgp_err_t err = LIBBGP_OK;
+
+    if (found != NULL) {
+        *found = false;
+    }
+    if (out_route != NULL) {
+        memset(out_route, 0, sizeof(*out_route));
+    }
+    if (impl == NULL || prefix == NULL || out_route == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    bgp_lock(&impl->lock);
+    best = rib6_best_exact_locked(impl, prefix);
+    if (best != NULL) {
+        err = rib6_route_snapshot_clone(best, out_route);
+        if (err == LIBBGP_OK && found != NULL) {
+            *found = true;
+        }
+    }
+    bgp_unlock(&impl->lock);
+    return err;
+}
+
+libbgp_err_t bgp_rib6_discard_collect(
+    libbgp_rib6_t *rib,
+    uint32_t source_router_id,
+    bgp_rib6_discard_result_t *result)
+{
+    rib6_impl_t *impl = rib6_impl_get(rib);
+    libbgp_prefix6_t *active_prefixes = NULL;
+    size_t active_count = 0u;
+    bool removed;
+    size_t i;
+    libbgp_err_t err = LIBBGP_OK;
+
+    if (result != NULL) {
+        memset(result, 0, sizeof(*result));
+    }
+    if (impl == NULL || result == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+
+    bgp_lock(&impl->lock);
+    for (i = 0u; i < impl->routes.bucket_count && err == LIBBGP_OK; i++) {
+        bgp_hashmap_entry_t *entry;
+
+        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+            libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)entry->value;
+
+            if (route->source_router_id == source_router_id &&
+                rib6_best_exact_locked(impl, &route->prefix) == route) {
+                err = rib6_prefix_array_push(&active_prefixes, &active_count, &route->prefix);
+                if (err != LIBBGP_OK) {
+                    break;
+                }
+            }
+        }
+    }
+    if (err != LIBBGP_OK) {
+        bgp_unlock(&impl->lock);
+        bgp_free(active_prefixes);
+        return err;
+    }
+
+    do {
+        libbgp_rib6_route_t *match = NULL;
+        rib6_key_t key;
+
+        removed = false;
+        for (i = 0u; i < impl->routes.bucket_count && match == NULL; i++) {
+            bgp_hashmap_entry_t *entry;
+
+            for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+                libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)entry->value;
+
+                if (route->source_router_id == source_router_id) {
+                    key.prefix = route->prefix;
+                    match = route;
+                    break;
+                }
+            }
+        }
+        if (match != NULL) {
+            (void)bgp_hashmap_remove_one(&impl->routes, &key, match);
+            removed = true;
+        }
+    } while (removed);
+
+    for (i = 0u; i < active_count && err == LIBBGP_OK; i++) {
+        libbgp_rib6_route_t *replacement = rib6_best_exact_locked(impl, &active_prefixes[i]);
+
+        if (replacement == NULL) {
+            err = rib6_prefix_array_push(&result->withdrawn, &result->withdrawn_count, &active_prefixes[i]);
+        } else {
+            err = rib6_result_add_replacement(result, replacement);
+        }
+    }
+    bgp_unlock(&impl->lock);
+    bgp_free(active_prefixes);
+    if (err != LIBBGP_OK) {
+        bgp_rib6_discard_result_destroy(result);
+    }
+    return err;
 }
 
 void bgp_rib6_saved_route_destroy(bgp_rib6_saved_route_t *saved)

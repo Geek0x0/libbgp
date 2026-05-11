@@ -57,11 +57,36 @@ static libbgp_rib4_route_t route4(libbgp_prefix4_t prefix, uint32_t src)
     return route;
 }
 
+static libbgp_rib6_route_t route6(
+    libbgp_prefix6_t prefix,
+    uint32_t src,
+    const uint8_t next_hop[16])
+{
+    libbgp_rib6_route_t route;
+
+    memset(&route, 0, sizeof(route));
+    route.prefix = prefix;
+    route.source_router_id = src;
+    memcpy(route.next_hop, next_hop, sizeof(route.next_hop));
+    route.local_pref = 100u;
+    route.origin = 0u;
+    return route;
+}
+
 static void assert_rib4_best_source(const libbgp_rib4_t *rib, uint32_t dest, uint32_t src)
 {
     const libbgp_rib4_route_t *found = NULL;
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(src, found->source_router_id);
+}
+
+static void assert_rib6_best_source(const libbgp_rib6_t *rib, const uint8_t dest[16], uint32_t src)
+{
+    const libbgp_rib6_route_t *found = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(rib, dest, &found));
     LIBBGP_ASSERT(found != NULL);
     LIBBGP_ASSERT_EQ_U64(src, found->source_router_id);
 }
@@ -226,7 +251,7 @@ LIBBGP_TEST(rib4_best_route_ordering_for_same_prefix)
     challenger.as_path_len = 1u;
     challenger.med = 10u;
     challenger.origin_as = 65000u;
-    challenger.update_id = 70u;
+    challenger.update_id = 49u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &challenger));
 
     challenger = route4(prefix, 8u);
@@ -235,7 +260,7 @@ LIBBGP_TEST(rib4_best_route_ordering_for_same_prefix)
     challenger.as_path_len = 1u;
     challenger.med = 5u;
     challenger.origin_as = 65000u;
-    challenger.update_id = 80u;
+    challenger.update_id = 48u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &challenger));
     assert_rib4_best_source(&rib, dest, 8u);
 
@@ -245,7 +270,7 @@ LIBBGP_TEST(rib4_best_route_ordering_for_same_prefix)
     challenger.as_path_len = 1u;
     challenger.med = 1000u;
     challenger.origin_as = 65001u;
-    challenger.update_id = 90u;
+    challenger.update_id = 47u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &challenger));
     assert_rib4_best_source(&rib, dest, 9u);
 
@@ -255,11 +280,50 @@ LIBBGP_TEST(rib4_best_route_ordering_for_same_prefix)
     challenger.as_path_len = 1u;
     challenger.med = 1000u;
     challenger.origin_as = 65001u;
-    challenger.update_id = 90u;
+    challenger.update_id = 47u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &challenger));
     assert_rib4_best_source(&rib, dest, 9u);
 
     libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_best_route_prefers_lower_update_id)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(198u, 51u, 100u, 0u, 24u);
+    uint32_t older_src = ip4(192u, 0u, 2u, 250u);
+    uint32_t newer_src = ip4(192u, 0u, 2u, 1u);
+    libbgp_rib4_route_t older = route4(prefix, older_src);
+    libbgp_rib4_route_t newer = route4(prefix, newer_src);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    older.update_id = 10u;
+    newer.update_id = 20u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &older));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &newer));
+    assert_rib4_best_source(&rib, ip4(198u, 51u, 100u, 99u), older_src);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_best_route_prefers_lower_update_id)
+{
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 4u };
+    const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 4u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 99u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 4u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    uint32_t older_src = ip4(192u, 0u, 2u, 250u);
+    uint32_t newer_src = ip4(192u, 0u, 2u, 1u);
+    libbgp_rib6_route_t older = route6(prefix, older_src, next_hop);
+    libbgp_rib6_route_t newer = route6(prefix, newer_src, next_hop);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    older.update_id = 10u;
+    newer.update_id = 20u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &older));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &newer));
+    assert_rib6_best_source(&rib, dest, older_src);
+    libbgp_rib6_destroy(&rib);
 }
 
 LIBBGP_TEST(rib_best_route_compares_router_ids_as_network_order)
@@ -494,6 +558,8 @@ int main(void)
         { "rib4_insert_local_creates_legacy_path_attributes", rib4_insert_local_creates_legacy_path_attributes },
         { "rib4_insert_local_rejects_duplicate_prefix", rib4_insert_local_rejects_duplicate_prefix },
         { "rib4_best_route_ordering_for_same_prefix", rib4_best_route_ordering_for_same_prefix },
+        { "rib4_best_route_prefers_lower_update_id", rib4_best_route_prefers_lower_update_id },
+        { "rib6_best_route_prefers_lower_update_id", rib6_best_route_prefers_lower_update_id },
         { "rib_best_route_compares_router_ids_as_network_order", rib_best_route_compares_router_ids_as_network_order },
         { "rib4_replace_withdraw_discard_and_scoped_lookup", rib4_replace_withdraw_discard_and_scoped_lookup },
         { "rib4_lookup_returns_borrowed_pointer_replaced_by_mutation", rib4_lookup_returns_borrowed_pointer_replaced_by_mutation },
