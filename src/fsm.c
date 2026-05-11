@@ -14,6 +14,7 @@
 #define FSM_NOTIFY_HOLD_TIMER_EXPIRED 4u
 #define FSM_NOTIFY_FSM_ERROR 5u
 #define FSM_NOTIFY_CEASE 6u
+#define FSM_CEASE_ERR_ADMIN_RESET 4u
 #define FSM_CEASE_ERR_COLLISION 7u
 #define FSM_OPEN_ERR_UNSUPPORTED_VERSION 1u
 #define FSM_OPEN_ERR_BAD_PEER_AS 2u
@@ -39,7 +40,11 @@ typedef struct fsm_impl {
     uint64_t last_rx_ms;
     uint64_t last_keepalive_ms;
     bool clock_initialized;
+    bool enable_mpbgp_ipv4;
+    bool send_ipv4_routes;
+    bool send_ipv6_routes;
     bool peer_mpbgp_ipv6;
+    bool no_collision_detection;
     libbgp_rib4_t internal_rib4;
     libbgp_rib6_t internal_rib6;
     bool internal_rib4_initialized;
@@ -56,6 +61,7 @@ typedef struct fsm_impl {
     libbgp_prefix6_t peering_lan6;
     uint32_t default_nexthop4;
     uint8_t default_nexthop6[16];
+    uint8_t default_nexthop6_linklocal[16];
     bool no_nexthop_check4;
     bool force_default_nexthop4;
     bool no_nexthop_check6;
@@ -69,6 +75,8 @@ typedef struct fsm_impl {
     bool local_keepalive_pending;
     bool passive_open_send_pending;
     bool passive_keepalive_pending;
+    libbgp_fsm_state_change_fn state_change_cb;
+    void *state_change_ctx;
     bgp_lock_t lock;
 } fsm_impl_t;
 
@@ -114,6 +122,20 @@ typedef struct fsm_update_journal {
 static fsm_impl_t *fsm_impl_get(const libbgp_fsm_t *fsm)
 {
     return fsm == NULL ? NULL : (fsm_impl_t *)fsm->impl;
+}
+
+static void fsm_set_state(fsm_impl_t *impl, libbgp_fsm_state_t state)
+{
+    libbgp_fsm_state_t old_state;
+
+    if (impl == NULL || impl->state == state) {
+        return;
+    }
+    old_state = impl->state;
+    impl->state = state;
+    if (impl->state_change_cb != NULL) {
+        impl->state_change_cb(old_state, state, impl->state_change_ctx);
+    }
 }
 
 static void fsm_default_config(struct libbgp_fsm_config *config)
@@ -193,7 +215,26 @@ static bool fsm_local_open_config_valid(const struct libbgp_fsm_config *config)
     return true;
 }
 
-static libbgp_err_t fsm_send_open(libbgp_out_handler_t *out, const struct libbgp_fsm_config *config)
+static libbgp_err_t fsm_add_mpbgp_cap(libbgp_open_msg_t *open, uint16_t afi)
+{
+    libbgp_capability_t *cap;
+    libbgp_err_t err;
+
+    cap = libbgp_capability_new(LIBBGP_CAP_MP_BGP);
+    if (cap == NULL) {
+        return LIBBGP_ERR_NOMEM;
+    }
+    cap->data.mp_bgp.afi = afi;
+    cap->data.mp_bgp.safi = LIBBGP_SAFI_UNICAST;
+    err = libbgp_open_add_capability(open, cap);
+    libbgp_capability_unref(cap);
+    return err;
+}
+
+static libbgp_err_t fsm_send_open(
+    libbgp_out_handler_t *out,
+    const struct libbgp_fsm_config *config,
+    bool enable_mpbgp_ipv4)
 {
     libbgp_packet_t pkt;
     libbgp_err_t err;
@@ -223,16 +264,15 @@ static libbgp_err_t fsm_send_open(libbgp_out_handler_t *out, const struct libbgp
             return err;
         }
     }
-    if (config->enable_mpbgp_ipv6) {
-        libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_MP_BGP);
-        if (cap == NULL) {
+    if (enable_mpbgp_ipv4) {
+        err = fsm_add_mpbgp_cap(&pkt.data.open, LIBBGP_AFI_IPV4);
+        if (err != LIBBGP_OK) {
             libbgp_packet_destroy(&pkt);
-            return LIBBGP_ERR_NOMEM;
+            return err;
         }
-        cap->data.mp_bgp.afi = LIBBGP_AFI_IPV6;
-        cap->data.mp_bgp.safi = LIBBGP_SAFI_UNICAST;
-        err = libbgp_open_add_capability(&pkt.data.open, cap);
-        libbgp_capability_unref(cap);
+    }
+    if (config->enable_mpbgp_ipv6) {
+        err = fsm_add_mpbgp_cap(&pkt.data.open, LIBBGP_AFI_IPV6);
         if (err != LIBBGP_OK) {
             libbgp_packet_destroy(&pkt);
             return err;
@@ -241,6 +281,66 @@ static libbgp_err_t fsm_send_open(libbgp_out_handler_t *out, const struct libbgp
     err = fsm_send_packet(out, &pkt);
     libbgp_packet_destroy(&pkt);
     return err;
+}
+
+static bool fsm_open_has_any_mpbgp(const libbgp_open_msg_t *open)
+{
+    size_t i;
+
+    if (open == NULL) {
+        return false;
+    }
+    for (i = 0u; i < open->capability_count; i++) {
+        const libbgp_capability_t *cap = open->capabilities[i];
+
+        if (cap != NULL && cap->type == LIBBGP_CAP_MP_BGP) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void fsm_negotiate_route_families(
+    const fsm_impl_t *impl,
+    const libbgp_open_msg_t *open,
+    bool *send_ipv4_routes,
+    bool *send_ipv6_routes)
+{
+    bool local_mp4;
+    bool local_mp6;
+    bool peer_has_mpbgp;
+    bool peer_mp4;
+    bool peer_mp6;
+
+    if (send_ipv4_routes != NULL) {
+        *send_ipv4_routes = false;
+    }
+    if (send_ipv6_routes != NULL) {
+        *send_ipv6_routes = false;
+    }
+    if (impl == NULL || open == NULL) {
+        return;
+    }
+
+    local_mp4 = impl->enable_mpbgp_ipv4;
+    local_mp6 = impl->config.enable_mpbgp_ipv6;
+    peer_has_mpbgp = fsm_open_has_any_mpbgp(open);
+    peer_mp4 = libbgp_open_has_mpbgp(open, LIBBGP_AFI_IPV4, LIBBGP_SAFI_UNICAST);
+    peer_mp6 = libbgp_open_has_mpbgp(open, LIBBGP_AFI_IPV6, LIBBGP_SAFI_UNICAST);
+
+    if (peer_has_mpbgp && (local_mp4 || local_mp6)) {
+        if (send_ipv4_routes != NULL) {
+            *send_ipv4_routes = local_mp4 && peer_mp4;
+        }
+        if (send_ipv6_routes != NULL) {
+            *send_ipv6_routes = local_mp6 && peer_mp6;
+        }
+        return;
+    }
+
+    if (send_ipv4_routes != NULL) {
+        *send_ipv4_routes = !(local_mp6 && !local_mp4);
+    }
 }
 
 static void fsm_publish_event(
@@ -1087,6 +1187,7 @@ static libbgp_err_t fsm_alter_nexthop6(
     libbgp_update_msg_t *update,
     const libbgp_prefix6_t *peering_lan6,
     const uint8_t default_nexthop6[16],
+    const uint8_t default_nexthop6_linklocal[16],
     bool force_default_nexthop6,
     bool is_ibgp,
     bool ibgp_alter_nexthop)
@@ -1109,8 +1210,14 @@ static libbgp_err_t fsm_alter_nexthop6(
         if (force_default_nexthop6 ||
             !fsm_prefix6_contains_addr(peering_lan6, attr->data.mp_reach_ipv6.nexthop)) {
             memcpy(attr->data.mp_reach_ipv6.nexthop, default_nexthop6, 16u);
-            memset(&attr->data.mp_reach_ipv6.nexthop[16], 0, 16u);
-            attr->data.mp_reach_ipv6.nexthop_len = 16u;
+            if (default_nexthop6_linklocal != NULL &&
+                !fsm_zero_addr6(default_nexthop6_linklocal)) {
+                memcpy(&attr->data.mp_reach_ipv6.nexthop[16], default_nexthop6_linklocal, 16u);
+                attr->data.mp_reach_ipv6.nexthop_len = 32u;
+            } else {
+                memset(&attr->data.mp_reach_ipv6.nexthop[16], 0, 16u);
+                attr->data.mp_reach_ipv6.nexthop_len = 16u;
+            }
         }
     }
     return LIBBGP_OK;
@@ -1480,7 +1587,7 @@ static libbgp_err_t fsm_apply_update(
         update,
         impl->config.local_asn,
         impl->allow_local_as);
-    if (!ignore_advertisements && update->nlri_count != 0u) {
+    if (impl->send_ipv4_routes && !ignore_advertisements && update->nlri_count != 0u) {
         libbgp_pattr_t *next_hop = libbgp_update_find_attr(update, LIBBGP_PATTR_NEXT_HOP);
 
         if (next_hop == NULL ||
@@ -1488,7 +1595,7 @@ static libbgp_err_t fsm_apply_update(
             ignore_advertisements = true;
         }
     }
-    if (!ignore_advertisements) {
+    if (impl->send_ipv6_routes && !ignore_advertisements) {
         for (i = 0u; i < update->attr_count; i++) {
             const libbgp_pattr_t *attr = update->attrs[i];
 
@@ -1512,7 +1619,7 @@ static libbgp_err_t fsm_apply_update(
         return err;
     }
 
-    for (i = 0u; i < update->withdrawn_count; i++) {
+    for (i = 0u; impl->send_ipv4_routes && i < update->withdrawn_count; i++) {
         err = LIBBGP_OK;
 
         if (!fsm_update_session_current(impl, session_generation)) {
@@ -1529,7 +1636,7 @@ static libbgp_err_t fsm_apply_update(
             return err;
         }
     }
-    for (i = 0u; !ignore_advertisements && i < update->nlri_count; i++) {
+    for (i = 0u; impl->send_ipv4_routes && !ignore_advertisements && i < update->nlri_count; i++) {
         libbgp_rib4_route_t route;
         bgp_rib4_saved_route_t replaced;
         bool had_replaced = false;
@@ -1582,7 +1689,7 @@ static libbgp_err_t fsm_apply_update(
         const libbgp_pattr_t *attr = update->attrs[i];
         size_t j;
 
-        if (attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
+        if (impl->send_ipv6_routes && attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
             for (j = 0u; j < attr->data.mp_unreach_ipv6.withdrawn_count; j++) {
                 err = LIBBGP_OK;
 
@@ -1604,7 +1711,8 @@ static libbgp_err_t fsm_apply_update(
                     return err;
                 }
             }
-        } else if (!ignore_advertisements && attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
+        } else if (impl->send_ipv6_routes && !ignore_advertisements &&
+            attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
             for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
                 libbgp_rib6_route_t route;
                 bgp_rib6_saved_route_t replaced;
@@ -1689,14 +1797,16 @@ static void fsm_publish_update_events(
     libbgp_event_bus_t *bus,
     uint32_t peer_bgp_id,
     const libbgp_update_msg_t *update,
-    bool advertisements_ignored)
+    bool advertisements_ignored,
+    bool send_ipv4_routes,
+    bool send_ipv6_routes)
 {
     size_t i;
 
     if (update == NULL) {
         return;
     }
-    for (i = 0u; i < update->withdrawn_count; i++) {
+    for (i = 0u; send_ipv4_routes && i < update->withdrawn_count; i++) {
         bool current;
         uint64_t publisher_id;
 
@@ -1715,7 +1825,7 @@ static void fsm_publish_update_events(
             return;
         }
     }
-    for (i = 0u; !advertisements_ignored && i < update->nlri_count; i++) {
+    for (i = 0u; send_ipv4_routes && !advertisements_ignored && i < update->nlri_count; i++) {
         bool current;
         uint64_t publisher_id;
 
@@ -1738,7 +1848,7 @@ static void fsm_publish_update_events(
         const libbgp_pattr_t *attr = update->attrs[i];
         size_t j;
 
-        if (attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
+        if (send_ipv6_routes && attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
             for (j = 0u; j < attr->data.mp_unreach_ipv6.withdrawn_count; j++) {
                 bool current;
                 uint64_t publisher_id;
@@ -1764,7 +1874,8 @@ static void fsm_publish_update_events(
                     return;
                 }
             }
-        } else if (!advertisements_ignored && attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
+        } else if (send_ipv6_routes && !advertisements_ignored &&
+            attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
             for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
                 bool current;
                 uint64_t publisher_id;
@@ -1817,11 +1928,13 @@ static void fsm_snapshot_teardown(
     if (peer_bgp_id != NULL) {
         *peer_bgp_id = impl->peer_bgp_id;
     }
-    impl->state = LIBBGP_FSM_IDLE;
+    fsm_set_state(impl, LIBBGP_FSM_IDLE);
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
-    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->negotiated_hold_time = 0u;
     impl->peer_mpbgp_ipv6 = false;
+    impl->send_ipv4_routes = false;
+    impl->send_ipv6_routes = false;
     impl->clock_initialized = false;
     impl->local_keepalive_send_pending = false;
     impl->local_keepalive_pending = false;
@@ -1957,6 +2070,7 @@ static libbgp_err_t fsm_send_prepared_update(
     const libbgp_prefix6_t *peering_lan6,
     uint32_t default_nexthop4,
     const uint8_t default_nexthop6[16],
+    const uint8_t default_nexthop6_linklocal[16],
     bool force_default_nexthop4,
     bool force_default_nexthop6,
     bool ibgp_alter_nexthop)
@@ -1981,6 +2095,7 @@ static libbgp_err_t fsm_send_prepared_update(
                 &copy,
                 peering_lan6,
                 default_nexthop6,
+                default_nexthop6_linklocal,
                 force_default_nexthop6,
                 is_ibgp,
                 ibgp_alter_nexthop);
@@ -2070,6 +2185,7 @@ static libbgp_err_t fsm_send_route_event_update(
     const libbgp_prefix6_t *peering_lan6,
     uint32_t default_nexthop4,
     const uint8_t default_nexthop6[16],
+    const uint8_t default_nexthop6_linklocal[16],
     bool force_default_nexthop4,
     bool force_default_nexthop6,
     bool ibgp_alter_nexthop)
@@ -2088,6 +2204,7 @@ static libbgp_err_t fsm_send_route_event_update(
             peering_lan6,
             default_nexthop4,
             default_nexthop6,
+            default_nexthop6_linklocal,
             force_default_nexthop4,
             force_default_nexthop6,
             ibgp_alter_nexthop);
@@ -2211,12 +2328,15 @@ typedef struct fsm_established_snapshot {
     libbgp_prefix6_t peering_lan6;
     uint32_t default_nexthop4;
     uint8_t default_nexthop6[16];
+    uint8_t default_nexthop6_linklocal[16];
     uint32_t local_asn;
     uint32_t peer_asn;
     uint32_t peer_bgp_id;
     uint64_t session_generation;
     bool use_4b_asn;
     bool peer_mpbgp_ipv6;
+    bool send_ipv4_routes;
+    bool send_ipv6_routes;
     bool force_default_nexthop4;
     bool force_default_nexthop6;
     bool ibgp_alter_nexthop;
@@ -2252,12 +2372,18 @@ static void fsm_snapshot_established_locked(fsm_impl_t *impl, fsm_established_sn
     snap->peering_lan6 = impl->peering_lan6;
     snap->default_nexthop4 = impl->default_nexthop4;
     memcpy(snap->default_nexthop6, impl->default_nexthop6, sizeof(snap->default_nexthop6));
+    memcpy(
+        snap->default_nexthop6_linklocal,
+        impl->default_nexthop6_linklocal,
+        sizeof(snap->default_nexthop6_linklocal));
     snap->local_asn = impl->config.local_asn;
     snap->peer_asn = impl->peer_asn;
     snap->peer_bgp_id = impl->peer_bgp_id;
     snap->session_generation = impl->session_generation;
     snap->use_4b_asn = impl->config.enable_4byte_asn;
     snap->peer_mpbgp_ipv6 = impl->peer_mpbgp_ipv6;
+    snap->send_ipv4_routes = impl->send_ipv4_routes;
+    snap->send_ipv6_routes = impl->send_ipv6_routes;
     snap->force_default_nexthop4 = impl->force_default_nexthop4;
     snap->force_default_nexthop6 = impl->force_default_nexthop6;
     snap->ibgp_alter_nexthop = impl->ibgp_alter_nexthop;
@@ -2402,6 +2528,7 @@ static bool fsm_advertise_rib4_cb(const libbgp_rib4_route_t *route, void *ctx)
             &adv->snap.peering_lan6,
             adv->snap.default_nexthop4,
             adv->snap.default_nexthop6,
+            adv->snap.default_nexthop6_linklocal,
             adv->snap.force_default_nexthop4,
             adv->snap.force_default_nexthop6,
             adv->snap.ibgp_alter_nexthop);
@@ -2415,7 +2542,7 @@ static libbgp_err_t fsm_advertise_existing_rib4(const fsm_established_snapshot_t
     fsm_advertise_rib4_ctx_t ctx;
     libbgp_err_t err;
 
-    if (snap == NULL || !snap->active || snap->rib4 == NULL) {
+    if (snap == NULL || !snap->active || snap->rib4 == NULL || !snap->send_ipv4_routes) {
         return LIBBGP_OK;
     }
     ctx.snap = *snap;
@@ -2436,7 +2563,7 @@ static bool fsm_advertise_rib6_cb(const libbgp_rib6_route_t *route, void *ctx)
     if (adv == NULL || adv->err != LIBBGP_OK || route == NULL) {
         return false;
     }
-    if (!adv->snap.peer_mpbgp_ipv6 || route->source_router_id == adv->snap.peer_bgp_id) {
+    if (!adv->snap.send_ipv6_routes || route->source_router_id == adv->snap.peer_bgp_id) {
         return true;
     }
     is_ibgp = adv->snap.local_asn == adv->snap.peer_asn;
@@ -2460,6 +2587,7 @@ static bool fsm_advertise_rib6_cb(const libbgp_rib6_route_t *route, void *ctx)
             &adv->snap.peering_lan6,
             adv->snap.default_nexthop4,
             adv->snap.default_nexthop6,
+            adv->snap.default_nexthop6_linklocal,
             adv->snap.force_default_nexthop4,
             adv->snap.force_default_nexthop6,
             adv->snap.ibgp_alter_nexthop);
@@ -2473,7 +2601,7 @@ static libbgp_err_t fsm_advertise_existing_rib6(const fsm_established_snapshot_t
     fsm_advertise_rib6_ctx_t ctx;
     libbgp_err_t err;
 
-    if (snap == NULL || !snap->active || snap->rib6 == NULL || !snap->peer_mpbgp_ipv6) {
+    if (snap == NULL || !snap->active || snap->rib6 == NULL || !snap->send_ipv6_routes) {
         return LIBBGP_OK;
     }
     ctx.snap = *snap;
@@ -2546,6 +2674,10 @@ static void fsm_collision_event_cb(const libbgp_event_t *event, fsm_impl_t *impl
     }
     handled = (bool *)event->user_data;
     bgp_lock(&impl->lock);
+    if (impl->no_collision_detection) {
+        bgp_unlock(&impl->lock);
+        return;
+    }
     if (impl->state == LIBBGP_FSM_OPEN_CONFIRM &&
         impl->peer_bgp_id == event->source_router_id) {
         if (handled != NULL) {
@@ -2576,7 +2708,7 @@ static bool fsm_collision_reject_new_locked(
     if (out != NULL) {
         *out = NULL;
     }
-    if (impl == NULL || impl->bus == NULL) {
+    if (impl == NULL || impl->bus == NULL || impl->no_collision_detection) {
         return false;
     }
     bus = impl->bus;
@@ -2612,15 +2744,19 @@ static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx)
     libbgp_prefix6_t peering_lan6;
     uint32_t default_nexthop4 = 0u;
     uint8_t default_nexthop6[16];
+    uint8_t default_nexthop6_linklocal[16];
     bool force_default_nexthop4 = false;
     bool force_default_nexthop6 = false;
     bool ibgp_alter_nexthop = false;
+    bool send_ipv4_routes = false;
+    bool send_ipv6_routes = false;
     bool should_send = false;
     libbgp_err_t err;
 
     memset(&peering_lan4, 0, sizeof(peering_lan4));
     memset(&peering_lan6, 0, sizeof(peering_lan6));
     memset(default_nexthop6, 0, sizeof(default_nexthop6));
+    memset(default_nexthop6_linklocal, 0, sizeof(default_nexthop6_linklocal));
     if (impl == NULL || event == NULL) {
         return;
     }
@@ -2648,9 +2784,15 @@ static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx)
             peering_lan6 = impl->peering_lan6;
             default_nexthop4 = impl->default_nexthop4;
             memcpy(default_nexthop6, impl->default_nexthop6, sizeof(default_nexthop6));
+            memcpy(
+                default_nexthop6_linklocal,
+                impl->default_nexthop6_linklocal,
+                sizeof(default_nexthop6_linklocal));
             force_default_nexthop4 = impl->force_default_nexthop4;
             force_default_nexthop6 = impl->force_default_nexthop6;
             ibgp_alter_nexthop = impl->ibgp_alter_nexthop;
+            send_ipv4_routes = impl->send_ipv4_routes;
+            send_ipv6_routes = impl->send_ipv6_routes;
             session_generation = impl->session_generation;
             should_send = true;
         }
@@ -2658,6 +2800,12 @@ static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx)
     bgp_unlock(&impl->lock);
 
     if (!should_send) {
+        return;
+    }
+    if (event->prefix4 != NULL && !send_ipv4_routes) {
+        return;
+    }
+    if (event->prefix6 != NULL && !send_ipv6_routes) {
         return;
     }
     if (!fsm_out_filter4_permits(out_filter4, event, route_weight)) {
@@ -2676,6 +2824,7 @@ static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx)
         &peering_lan6,
         default_nexthop4,
         default_nexthop6,
+        default_nexthop6_linklocal,
         force_default_nexthop4,
         force_default_nexthop6,
         ibgp_alter_nexthop);
@@ -2703,7 +2852,7 @@ libbgp_err_t libbgp_fsm_init(libbgp_fsm_t *fsm, const struct libbgp_fsm_config *
         fsm_default_config(&impl->config);
     }
     impl->state = LIBBGP_FSM_IDLE;
-    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->negotiated_hold_time = 0u;
     err = libbgp_rib4_init(&impl->internal_rib4);
     if (err != LIBBGP_OK) {
         bgp_free(impl);
@@ -2920,6 +3069,22 @@ void libbgp_fsm_set_out_handler(libbgp_fsm_t *fsm, libbgp_out_handler_t *out)
     bgp_unlock(&impl->lock);
 }
 
+void libbgp_fsm_set_state_change_cb(
+    libbgp_fsm_t *fsm,
+    libbgp_fsm_state_change_fn cb,
+    void *ctx)
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+
+    if (impl == NULL) {
+        return;
+    }
+    bgp_lock(&impl->lock);
+    impl->state_change_cb = cb;
+    impl->state_change_ctx = ctx;
+    bgp_unlock(&impl->lock);
+}
+
 void libbgp_fsm_set_expected_peer_asn(libbgp_fsm_t *fsm, uint32_t peer_asn)
 {
     fsm_impl_t *impl = fsm_impl_get(fsm);
@@ -2929,6 +3094,30 @@ void libbgp_fsm_set_expected_peer_asn(libbgp_fsm_t *fsm, uint32_t peer_asn)
     }
     bgp_lock(&impl->lock);
     impl->expected_peer_asn = peer_asn;
+    bgp_unlock(&impl->lock);
+}
+
+void libbgp_fsm_set_mpbgp_ipv4(libbgp_fsm_t *fsm, bool enabled)
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+
+    if (impl == NULL) {
+        return;
+    }
+    bgp_lock(&impl->lock);
+    impl->enable_mpbgp_ipv4 = enabled;
+    bgp_unlock(&impl->lock);
+}
+
+void libbgp_fsm_set_no_collision_detection(libbgp_fsm_t *fsm, bool disabled)
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+
+    if (impl == NULL) {
+        return;
+    }
+    bgp_lock(&impl->lock);
+    impl->no_collision_detection = disabled;
     bgp_unlock(&impl->lock);
 }
 
@@ -3100,6 +3289,25 @@ void libbgp_fsm_set_default_nexthop6(libbgp_fsm_t *fsm, const uint8_t next_hop[1
     bgp_unlock(&impl->lock);
 }
 
+void libbgp_fsm_set_default_nexthop6_linklocal(libbgp_fsm_t *fsm, const uint8_t next_hop[16])
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+
+    if (impl == NULL) {
+        return;
+    }
+    bgp_lock(&impl->lock);
+    if (next_hop == NULL) {
+        memset(impl->default_nexthop6_linklocal, 0, sizeof(impl->default_nexthop6_linklocal));
+    } else {
+        memcpy(
+            impl->default_nexthop6_linklocal,
+            next_hop,
+            sizeof(impl->default_nexthop6_linklocal));
+    }
+    bgp_unlock(&impl->lock);
+}
+
 void libbgp_fsm_set_force_default_nexthop6(libbgp_fsm_t *fsm, bool forced)
 {
     fsm_impl_t *impl = fsm_impl_get(fsm);
@@ -3136,11 +3344,13 @@ static libbgp_err_t fsm_enter_pre_open_state(libbgp_fsm_t *fsm, libbgp_fsm_state
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_INVALID;
     }
-    impl->state = state;
+    fsm_set_state(impl, state);
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
-    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->negotiated_hold_time = 0u;
     impl->peer_mpbgp_ipv6 = false;
+    impl->send_ipv4_routes = false;
+    impl->send_ipv6_routes = false;
     impl->clock_initialized = false;
     impl->local_keepalive_send_pending = false;
     impl->local_keepalive_pending = false;
@@ -3168,6 +3378,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     libbgp_out_handler_t *out;
     libbgp_fsm_state_t start_state;
     uint64_t session_generation;
+    bool enable_mpbgp_ipv4;
     libbgp_err_t err;
 
     if (impl == NULL) {
@@ -3185,27 +3396,30 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
         return LIBBGP_OK;
     }
     start_state = impl->state;
-    impl->state = LIBBGP_FSM_OPEN_SENT;
+    fsm_set_state(impl, LIBBGP_FSM_OPEN_SENT);
     impl->session_generation++;
     session_generation = impl->session_generation;
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
-    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->negotiated_hold_time = 0u;
     impl->peer_mpbgp_ipv6 = false;
+    impl->send_ipv4_routes = false;
+    impl->send_ipv6_routes = false;
     impl->clock_initialized = false;
     impl->local_keepalive_send_pending = false;
     impl->local_keepalive_pending = false;
     impl->passive_open_send_pending = false;
     impl->passive_keepalive_pending = false;
     config = impl->config;
+    enable_mpbgp_ipv4 = impl->enable_mpbgp_ipv4;
     out = impl->out;
     bgp_unlock(&impl->lock);
 
-    err = fsm_send_open(out, &config);
+    err = fsm_send_open(out, &config, enable_mpbgp_ipv4);
     bgp_lock(&impl->lock);
     if (err != LIBBGP_OK && impl->state == LIBBGP_FSM_OPEN_SENT &&
         impl->session_generation == session_generation) {
-        impl->state = start_state;
+        fsm_set_state(impl, start_state);
         impl->local_keepalive_send_pending = false;
         impl->local_keepalive_pending = false;
         impl->passive_open_send_pending = false;
@@ -3216,7 +3430,7 @@ libbgp_err_t libbgp_fsm_start(libbgp_fsm_t *fsm)
     return err;
 }
 
-libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
+static libbgp_err_t fsm_reset_common(libbgp_fsm_t *fsm, bool send_notify, uint8_t cease_subcode)
 {
     fsm_impl_t *impl = fsm_impl_get(fsm);
     libbgp_out_handler_t *out;
@@ -3232,17 +3446,32 @@ libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
         return LIBBGP_ERR_INVALID;
     }
     bgp_lock(&impl->lock);
-    notify = impl->state != LIBBGP_FSM_IDLE;
+    notify = send_notify && impl->state != LIBBGP_FSM_IDLE;
     was_established = impl->state == LIBBGP_FSM_ESTABLISHED;
     fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
     bgp_unlock(&impl->lock);
 
-    err = notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, 0u) : LIBBGP_OK;
+    err = notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, cease_subcode) : LIBBGP_OK;
     if (was_established) {
         fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
     }
     return err;
+}
+
+libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm)
+{
+    return fsm_reset_common(fsm, true, 0u);
+}
+
+libbgp_err_t libbgp_fsm_reset_soft(libbgp_fsm_t *fsm)
+{
+    return fsm_reset_common(fsm, true, FSM_CEASE_ERR_ADMIN_RESET);
+}
+
+libbgp_err_t libbgp_fsm_reset_hard(libbgp_fsm_t *fsm)
+{
+    return fsm_reset_common(fsm, false, 0u);
 }
 
 static void fsm_rollback_failed_local_keepalive(fsm_impl_t *impl, uint64_t session_generation)
@@ -3255,11 +3484,13 @@ static void fsm_rollback_failed_local_keepalive(fsm_impl_t *impl, uint64_t sessi
     if (!same_attempt && !reentrant_established) {
         return;
     }
-    impl->state = LIBBGP_FSM_IDLE;
+    fsm_set_state(impl, LIBBGP_FSM_IDLE);
     impl->peer_asn = 0u;
     impl->peer_bgp_id = 0u;
-    impl->negotiated_hold_time = impl->config.hold_time;
+    impl->negotiated_hold_time = 0u;
     impl->peer_mpbgp_ipv6 = false;
+    impl->send_ipv4_routes = false;
+    impl->send_ipv6_routes = false;
     impl->clock_initialized = false;
     impl->local_keepalive_send_pending = false;
     impl->local_keepalive_pending = false;
@@ -3275,7 +3506,7 @@ static bool fsm_establish_pending_keepalive(fsm_impl_t *impl, uint64_t session_g
         !impl->local_keepalive_pending) {
         return false;
     }
-    impl->state = LIBBGP_FSM_ESTABLISHED;
+    fsm_set_state(impl, LIBBGP_FSM_ESTABLISHED);
     impl->session_generation++;
     impl->local_keepalive_send_pending = false;
     impl->local_keepalive_pending = false;
@@ -3293,7 +3524,8 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
     uint32_t peer_asn;
     uint32_t peer_bgp_id;
     uint16_t negotiated_hold_time;
-    bool peer_mpbgp_ipv6;
+    bool send_ipv4_routes;
+    bool send_ipv6_routes;
     uint64_t session_generation;
     libbgp_err_t err;
 
@@ -3336,8 +3568,7 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
         return LIBBGP_ERR_INVALID;
     }
     peer_bgp_id = pkt->data.open.bgp_id;
-    peer_mpbgp_ipv6 = impl->config.enable_mpbgp_ipv6 &&
-        libbgp_open_has_mpbgp(&pkt->data.open, LIBBGP_AFI_IPV6, LIBBGP_SAFI_UNICAST);
+    fsm_negotiate_route_families(impl, &pkt->data.open, &send_ipv4_routes, &send_ipv6_routes);
     memset(&established, 0, sizeof(established));
     if (fsm_collision_reject_new_locked(impl, peer_bgp_id, &out)) {
         bgp_unlock(&impl->lock);
@@ -3349,8 +3580,10 @@ static libbgp_err_t fsm_on_open_sent(fsm_impl_t *impl, const libbgp_packet_t *pk
     impl->peer_asn = peer_asn;
     impl->peer_bgp_id = peer_bgp_id;
     impl->negotiated_hold_time = negotiated_hold_time;
-    impl->peer_mpbgp_ipv6 = peer_mpbgp_ipv6;
-    impl->state = LIBBGP_FSM_OPEN_CONFIRM;
+    impl->peer_mpbgp_ipv6 = send_ipv6_routes;
+    impl->send_ipv4_routes = send_ipv4_routes;
+    impl->send_ipv6_routes = send_ipv6_routes;
+    fsm_set_state(impl, LIBBGP_FSM_OPEN_CONFIRM);
     impl->session_generation++;
     impl->last_rx_ms = 0u;
     impl->last_keepalive_ms = 0u;
@@ -3390,8 +3623,10 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
     uint32_t peer_bgp_id;
     uint16_t negotiated_hold_time;
     uint64_t session_generation;
-    bool peer_mpbgp_ipv6;
+    bool send_ipv4_routes;
+    bool send_ipv6_routes;
     bool still_current;
+    bool enable_mpbgp_ipv4;
     fsm_established_snapshot_t established;
     libbgp_err_t err;
 
@@ -3428,8 +3663,7 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
         return LIBBGP_ERR_INVALID;
     }
     peer_bgp_id = pkt->data.open.bgp_id;
-    peer_mpbgp_ipv6 = impl->config.enable_mpbgp_ipv6 &&
-        libbgp_open_has_mpbgp(&pkt->data.open, LIBBGP_AFI_IPV6, LIBBGP_SAFI_UNICAST);
+    fsm_negotiate_route_families(impl, &pkt->data.open, &send_ipv4_routes, &send_ipv6_routes);
     memset(&established, 0, sizeof(established));
     if (fsm_collision_reject_new_locked(impl, peer_bgp_id, &out)) {
         bgp_unlock(&impl->lock);
@@ -3439,11 +3673,14 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
     negotiated_hold_time = (local_hold == 0u || peer_hold == 0u) ? 0u :
         (local_hold < peer_hold ? local_hold : peer_hold);
     config = impl->config;
+    enable_mpbgp_ipv4 = impl->enable_mpbgp_ipv4;
     impl->peer_asn = peer_asn;
     impl->peer_bgp_id = peer_bgp_id;
     impl->negotiated_hold_time = negotiated_hold_time;
-    impl->peer_mpbgp_ipv6 = peer_mpbgp_ipv6;
-    impl->state = LIBBGP_FSM_OPEN_CONFIRM;
+    impl->peer_mpbgp_ipv6 = send_ipv6_routes;
+    impl->send_ipv4_routes = send_ipv4_routes;
+    impl->send_ipv6_routes = send_ipv6_routes;
+    fsm_set_state(impl, LIBBGP_FSM_OPEN_CONFIRM);
     impl->session_generation++;
     session_generation = impl->session_generation;
     impl->last_rx_ms = 0u;
@@ -3456,7 +3693,7 @@ static libbgp_err_t fsm_on_pre_open_open(fsm_impl_t *impl, const libbgp_packet_t
     out = impl->out;
     bgp_unlock(&impl->lock);
 
-    err = fsm_send_open(out, &config);
+    err = fsm_send_open(out, &config, enable_mpbgp_ipv4);
     if (err != LIBBGP_OK) {
         goto relock_after_send;
     }
@@ -3555,7 +3792,7 @@ static libbgp_err_t fsm_on_open_confirm(fsm_impl_t *impl, const libbgp_packet_t 
             bgp_unlock(&impl->lock);
             return LIBBGP_OK;
         }
-        impl->state = LIBBGP_FSM_ESTABLISHED;
+        fsm_set_state(impl, LIBBGP_FSM_ESTABLISHED);
         impl->session_generation++;
         impl->local_keepalive_send_pending = false;
         impl->local_keepalive_pending = false;
@@ -3566,11 +3803,7 @@ static libbgp_err_t fsm_on_open_confirm(fsm_impl_t *impl, const libbgp_packet_t 
         return fsm_run_established_actions(impl, &established);
     }
     if (pkt->type == LIBBGP_PACKET_NOTIFICATION) {
-        impl->state = LIBBGP_FSM_IDLE;
-        impl->session_generation++;
-        impl->local_keepalive_send_pending = false;
-        impl->local_keepalive_pending = false;
-        impl->passive_open_send_pending = false;
+        fsm_snapshot_teardown(impl, NULL, NULL, NULL, NULL, NULL);
         bgp_unlock(&impl->lock);
         return LIBBGP_OK;
     }
@@ -3589,6 +3822,8 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     libbgp_rib6_t *rib6;
     uint32_t peer_bgp_id;
     bool peer_mpbgp_ipv6;
+    bool send_ipv4_routes;
+    bool send_ipv6_routes;
     uint64_t rx_ms;
     uint64_t session_generation;
     fsm_update_journal_t journal;
@@ -3623,6 +3858,8 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
     peer_mpbgp_ipv6 = impl->peer_mpbgp_ipv6;
+    send_ipv4_routes = impl->send_ipv4_routes;
+    send_ipv6_routes = impl->send_ipv6_routes;
     session_generation = impl->session_generation;
     if (!peer_mpbgp_ipv6 && pkt->data.update.attrs != NULL) {
         size_t i;
@@ -3690,7 +3927,9 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
             bus,
             peer_bgp_id,
             &pkt->data.update,
-            advertisements_ignored);
+            advertisements_ignored,
+            send_ipv4_routes,
+            send_ipv6_routes);
     }
     fsm_update_journal_destroy(&journal);
     return err;
@@ -3856,4 +4095,18 @@ uint32_t libbgp_fsm_peer_bgp_id(const libbgp_fsm_t *fsm)
     peer_bgp_id = impl->peer_bgp_id;
     bgp_unlock(&impl->lock);
     return peer_bgp_id;
+}
+
+uint16_t libbgp_fsm_negotiated_hold_time(const libbgp_fsm_t *fsm)
+{
+    fsm_impl_t *impl = fsm_impl_get(fsm);
+    uint16_t hold_time;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    bgp_lock(&impl->lock);
+    hold_time = impl->negotiated_hold_time;
+    bgp_unlock(&impl->lock);
+    return hold_time;
 }

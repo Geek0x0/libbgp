@@ -74,6 +74,19 @@ Current examples include `examples/peer_and_print.c` and
 `examples/route_server.c`. See `examples/README.md` for run commands and
 available options.
 
+### C++ Compatibility Notes
+
+The C11 API preserves the core protocol behavior of the legacy C++ library,
+including MP-BGP IPv4/IPv6 route-family gating, IPv6 global plus link-local
+nexthop handling, FSM collision controls, soft/hard reset behavior, negotiated
+hold-time access, and state-change notifications.
+
+Some legacy C++ convenience APIs are intentionally represented differently in C.
+Textual prefix construction is handled by the prefix parse APIs, parser details
+are returned through parse/write result codes, and UPDATE mutation remains
+available through public message/path-attribute structs plus lower-level helper
+functions instead of one wrapper per C++ mutator.
+
 ### License
 
 MIT
