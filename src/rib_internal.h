@@ -18,8 +18,38 @@ typedef struct bgp_rib6_saved_route {
 typedef bool (*bgp_rib4_route_iter_fn)(const libbgp_rib4_route_t *route, void *ctx);
 typedef bool (*bgp_rib6_route_iter_fn)(const libbgp_rib6_route_t *route, void *ctx);
 
+typedef struct bgp_rib4_discard_result {
+    libbgp_prefix4_t *withdrawn;
+    size_t withdrawn_count;
+    libbgp_rib4_route_t *replacements;
+    size_t replacement_count;
+} bgp_rib4_discard_result_t;
+
+typedef struct bgp_rib6_discard_result {
+    libbgp_prefix6_t *withdrawn;
+    size_t withdrawn_count;
+    libbgp_rib6_route_t *replacements;
+    size_t replacement_count;
+} bgp_rib6_discard_result_t;
+
+void bgp_rib4_route_snapshot_destroy(libbgp_rib4_route_t *route);
+void bgp_rib6_route_snapshot_destroy(libbgp_rib6_route_t *route);
 void bgp_rib4_saved_route_destroy(bgp_rib4_saved_route_t *saved);
 void bgp_rib6_saved_route_destroy(bgp_rib6_saved_route_t *saved);
+void bgp_rib4_discard_result_destroy(bgp_rib4_discard_result_t *result);
+void bgp_rib6_discard_result_destroy(bgp_rib6_discard_result_t *result);
+
+libbgp_err_t bgp_rib4_best_exact_clone(
+    libbgp_rib4_t *rib,
+    const libbgp_prefix4_t *prefix,
+    libbgp_rib4_route_t *out_route,
+    bool *found);
+libbgp_err_t bgp_rib6_best_exact_clone(
+    libbgp_rib6_t *rib,
+    const libbgp_prefix6_t *prefix,
+    libbgp_rib6_route_t *out_route,
+    bool *found);
+
 libbgp_err_t bgp_rib4_saved_route_update_id(
     const bgp_rib4_saved_route_t *saved,
     uint64_t *update_id);
@@ -92,5 +122,22 @@ libbgp_err_t bgp_rib6_foreach_route(
     const libbgp_rib6_t *rib,
     bgp_rib6_route_iter_fn fn,
     void *ctx);
+libbgp_err_t bgp_rib4_foreach_best_route(
+    const libbgp_rib4_t *rib,
+    bgp_rib4_route_iter_fn fn,
+    void *ctx);
+libbgp_err_t bgp_rib6_foreach_best_route(
+    const libbgp_rib6_t *rib,
+    bgp_rib6_route_iter_fn fn,
+    void *ctx);
+
+libbgp_err_t bgp_rib4_discard_collect(
+    libbgp_rib4_t *rib,
+    uint32_t source_router_id,
+    bgp_rib4_discard_result_t *result);
+libbgp_err_t bgp_rib6_discard_collect(
+    libbgp_rib6_t *rib,
+    uint32_t source_router_id,
+    bgp_rib6_discard_result_t *result);
 
 #endif

@@ -87,6 +87,19 @@ are returned through parse/write result codes, and UPDATE mutation remains
 available through public message/path-attribute structs plus lower-level helper
 functions instead of one wrapper per C++ mutator.
 
+The legacy `BgpFsm::run(buffer, size)` auto-tick wrapper is split into explicit
+sink parsing, `libbgp_fsm_on_packet()`, and `libbgp_fsm_tick()` calls. The C API
+therefore does not need a `no_autotick` switch. Sink/output failures are returned
+as errors instead of exposing the legacy `BROKEN` state. Logging remains the
+standalone C logging API rather than per-object logger injection.
+
+`libbgp_fsm_init(fsm, NULL)` uses the legacy 120 second hold timer and 40 second
+keepalive defaults. When callers pass their own `struct libbgp_fsm_config`, the
+C API uses the field values exactly as provided; it does not merge zero-valued
+fields with legacy defaults. A zero-initialized custom config therefore keeps
+`hold_time` and `keepalive_time` at 0 unless the caller passes `NULL` or fills
+those fields explicitly.
+
 ### License
 
 MIT

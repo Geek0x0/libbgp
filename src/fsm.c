@@ -83,28 +83,45 @@ typedef struct fsm_impl {
 static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx);
 
 typedef struct fsm_applied_route4 {
+    size_t seq;
     libbgp_prefix4_t prefix;
     uint64_t update_id;
     bool restore_replaced;
+    bool publish_added;
+    libbgp_rib4_route_t added_route;
     bgp_rib4_saved_route_t replaced;
 } fsm_applied_route4_t;
 
 typedef struct fsm_applied_route6 {
+    size_t seq;
     libbgp_prefix6_t prefix;
     uint64_t update_id;
     bool restore_replaced;
+    bool publish_added;
+    libbgp_rib6_route_t added_route;
     bgp_rib6_saved_route_t replaced;
 } fsm_applied_route6_t;
 
 typedef struct fsm_withdrawn_route4 {
+    size_t seq;
+    libbgp_prefix4_t prefix;
+    bool publish_withdrawn;
+    bool publish_replacement;
+    libbgp_rib4_route_t replacement_route;
     bgp_rib4_saved_route_t saved;
 } fsm_withdrawn_route4_t;
 
 typedef struct fsm_withdrawn_route6 {
+    size_t seq;
+    libbgp_prefix6_t prefix;
+    bool publish_withdrawn;
+    bool publish_replacement;
+    libbgp_rib6_route_t replacement_route;
     bgp_rib6_saved_route_t saved;
 } fsm_withdrawn_route6_t;
 
 typedef struct fsm_update_journal {
+    size_t event_seq;
     fsm_applied_route4_t *routes4;
     size_t routes4_count;
     size_t routes4_cap;
@@ -124,6 +141,9 @@ static fsm_impl_t *fsm_impl_get(const libbgp_fsm_t *fsm)
     return fsm == NULL ? NULL : (fsm_impl_t *)fsm->impl;
 }
 
+static libbgp_err_t fsm_update_from_route4(const libbgp_rib4_route_t *route, libbgp_update_msg_t *update);
+static libbgp_err_t fsm_update_from_route6(const libbgp_rib6_route_t *route, libbgp_update_msg_t *update);
+
 static void fsm_set_state(fsm_impl_t *impl, libbgp_fsm_state_t state)
 {
     libbgp_fsm_state_t old_state;
@@ -142,8 +162,8 @@ static void fsm_default_config(struct libbgp_fsm_config *config)
 {
     config->local_asn = LIBBGP_AS_TRANS;
     config->local_bgp_id = 0u;
-    config->hold_time = 90u;
-    config->keepalive_time = 30u;
+    config->hold_time = 120u;
+    config->keepalive_time = 40u;
     config->enable_4byte_asn = true;
     config->enable_mpbgp_ipv6 = false;
 }
@@ -437,15 +457,19 @@ static void fsm_update_journal_destroy(fsm_update_journal_t *journal)
         return;
     }
     for (i = 0u; i < journal->routes4_count; i++) {
+        bgp_rib4_route_snapshot_destroy(&journal->routes4[i].added_route);
         bgp_rib4_saved_route_destroy(&journal->routes4[i].replaced);
     }
     for (i = 0u; i < journal->routes6_count; i++) {
+        bgp_rib6_route_snapshot_destroy(&journal->routes6[i].added_route);
         bgp_rib6_saved_route_destroy(&journal->routes6[i].replaced);
     }
     for (i = 0u; i < journal->withdrawn4_count; i++) {
+        bgp_rib4_route_snapshot_destroy(&journal->withdrawn4[i].replacement_route);
         bgp_rib4_saved_route_destroy(&journal->withdrawn4[i].saved);
     }
     for (i = 0u; i < journal->withdrawn6_count; i++) {
+        bgp_rib6_route_snapshot_destroy(&journal->withdrawn6[i].replacement_route);
         bgp_rib6_saved_route_destroy(&journal->withdrawn6[i].saved);
     }
     bgp_free(journal->routes4);
@@ -680,9 +704,12 @@ static libbgp_err_t fsm_update_journal_record4(
     const libbgp_prefix4_t *prefix,
     uint64_t update_id,
     bool restore_replaced,
-    bgp_rib4_saved_route_t *replaced)
+    bgp_rib4_saved_route_t *replaced,
+    libbgp_rib4_route_t *added_route,
+    bool publish_added)
 {
     libbgp_err_t err;
+    fsm_applied_route4_t *entry;
 
     if (journal == NULL) {
         return LIBBGP_OK;
@@ -694,13 +721,20 @@ static libbgp_err_t fsm_update_journal_record4(
     if (err != LIBBGP_OK) {
         return err;
     }
-    journal->routes4[journal->routes4_count].prefix = *prefix;
-    journal->routes4[journal->routes4_count].update_id = update_id;
-    journal->routes4[journal->routes4_count].restore_replaced = restore_replaced;
-    memset(&journal->routes4[journal->routes4_count].replaced, 0, sizeof(journal->routes4[journal->routes4_count].replaced));
+    entry = &journal->routes4[journal->routes4_count];
+    memset(entry, 0, sizeof(*entry));
+    entry->seq = journal->event_seq++;
+    entry->prefix = *prefix;
+    entry->update_id = update_id;
+    entry->restore_replaced = restore_replaced;
+    entry->publish_added = publish_added && added_route != NULL;
     if (replaced != NULL) {
-        journal->routes4[journal->routes4_count].replaced = *replaced;
+        entry->replaced = *replaced;
         replaced->entry = NULL;
+    }
+    if (entry->publish_added) {
+        entry->added_route = *added_route;
+        memset(added_route, 0, sizeof(*added_route));
     }
     journal->routes4_count++;
     return LIBBGP_OK;
@@ -711,9 +745,12 @@ static libbgp_err_t fsm_update_journal_record6(
     const libbgp_prefix6_t *prefix,
     uint64_t update_id,
     bool restore_replaced,
-    bgp_rib6_saved_route_t *replaced)
+    bgp_rib6_saved_route_t *replaced,
+    libbgp_rib6_route_t *added_route,
+    bool publish_added)
 {
     libbgp_err_t err;
+    fsm_applied_route6_t *entry;
 
     if (journal == NULL) {
         return LIBBGP_OK;
@@ -725,13 +762,20 @@ static libbgp_err_t fsm_update_journal_record6(
     if (err != LIBBGP_OK) {
         return err;
     }
-    journal->routes6[journal->routes6_count].prefix = *prefix;
-    journal->routes6[journal->routes6_count].update_id = update_id;
-    journal->routes6[journal->routes6_count].restore_replaced = restore_replaced;
-    memset(&journal->routes6[journal->routes6_count].replaced, 0, sizeof(journal->routes6[journal->routes6_count].replaced));
+    entry = &journal->routes6[journal->routes6_count];
+    memset(entry, 0, sizeof(*entry));
+    entry->seq = journal->event_seq++;
+    entry->prefix = *prefix;
+    entry->update_id = update_id;
+    entry->restore_replaced = restore_replaced;
+    entry->publish_added = publish_added && added_route != NULL;
     if (replaced != NULL) {
-        journal->routes6[journal->routes6_count].replaced = *replaced;
+        entry->replaced = *replaced;
         replaced->entry = NULL;
+    }
+    if (entry->publish_added) {
+        entry->added_route = *added_route;
+        memset(added_route, 0, sizeof(*added_route));
     }
     journal->routes6_count++;
     return LIBBGP_OK;
@@ -782,22 +826,62 @@ static libbgp_err_t fsm_update_journal_record_withdraw4(
     const libbgp_prefix4_t *prefix)
 {
     libbgp_err_t err;
+    libbgp_err_t snapshot_err;
+    libbgp_rib4_route_t best_before;
+    libbgp_rib4_route_t best_after;
     bool had_route = false;
+    bool before_found = false;
+    bool after_found = false;
+    bool removed_best = false;
+    uint64_t removed_update_id = 0u;
     fsm_withdrawn_route4_t *entry;
 
     if (journal == NULL || rib4 == NULL) {
         return LIBBGP_OK;
     }
+    memset(&best_before, 0, sizeof(best_before));
+    memset(&best_after, 0, sizeof(best_after));
+    err = bgp_rib4_best_exact_clone(rib4, prefix, &best_before, &before_found);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
     err = fsm_update_journal_reserve_withdrawn4(journal);
     if (err != LIBBGP_OK) {
+        bgp_rib4_route_snapshot_destroy(&best_before);
         return err;
     }
     entry = &journal->withdrawn4[journal->withdrawn4_count];
     memset(entry, 0, sizeof(*entry));
+    entry->prefix = *prefix;
     err = bgp_rib4_withdraw_exact_save(rib4, peer_bgp_id, prefix, &entry->saved, &had_route);
     if (err == LIBBGP_OK && had_route) {
+        snapshot_err = bgp_rib4_saved_route_update_id(&entry->saved, &removed_update_id);
+        if (snapshot_err == LIBBGP_OK && before_found &&
+            best_before.source_router_id == peer_bgp_id &&
+            best_before.update_id == removed_update_id) {
+            removed_best = true;
+            err = bgp_rib4_best_exact_clone(rib4, prefix, &best_after, &after_found);
+        } else if (snapshot_err != LIBBGP_OK) {
+            err = snapshot_err;
+        }
+    }
+    if (err == LIBBGP_OK && had_route) {
+        entry->seq = journal->event_seq++;
+        if (removed_best && after_found) {
+            entry->publish_replacement = true;
+            entry->replacement_route = best_after;
+            memset(&best_after, 0, sizeof(best_after));
+        } else if (removed_best) {
+            entry->publish_withdrawn = true;
+        }
         journal->withdrawn4_count++;
     }
+    if (err != LIBBGP_OK && had_route) {
+        (void)bgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &entry->saved);
+        bgp_rib4_saved_route_destroy(&entry->saved);
+    }
+    bgp_rib4_route_snapshot_destroy(&best_after);
+    bgp_rib4_route_snapshot_destroy(&best_before);
     return err;
 }
 
@@ -808,22 +892,62 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
     const libbgp_prefix6_t *prefix)
 {
     libbgp_err_t err;
+    libbgp_err_t snapshot_err;
+    libbgp_rib6_route_t best_before;
+    libbgp_rib6_route_t best_after;
     bool had_route = false;
+    bool before_found = false;
+    bool after_found = false;
+    bool removed_best = false;
+    uint64_t removed_update_id = 0u;
     fsm_withdrawn_route6_t *entry;
 
     if (journal == NULL || rib6 == NULL) {
         return LIBBGP_OK;
     }
+    memset(&best_before, 0, sizeof(best_before));
+    memset(&best_after, 0, sizeof(best_after));
+    err = bgp_rib6_best_exact_clone(rib6, prefix, &best_before, &before_found);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
     err = fsm_update_journal_reserve_withdrawn6(journal);
     if (err != LIBBGP_OK) {
+        bgp_rib6_route_snapshot_destroy(&best_before);
         return err;
     }
     entry = &journal->withdrawn6[journal->withdrawn6_count];
     memset(entry, 0, sizeof(*entry));
+    entry->prefix = *prefix;
     err = bgp_rib6_withdraw_exact_save(rib6, peer_bgp_id, prefix, &entry->saved, &had_route);
     if (err == LIBBGP_OK && had_route) {
+        snapshot_err = bgp_rib6_saved_route_update_id(&entry->saved, &removed_update_id);
+        if (snapshot_err == LIBBGP_OK && before_found &&
+            best_before.source_router_id == peer_bgp_id &&
+            best_before.update_id == removed_update_id) {
+            removed_best = true;
+            err = bgp_rib6_best_exact_clone(rib6, prefix, &best_after, &after_found);
+        } else if (snapshot_err != LIBBGP_OK) {
+            err = snapshot_err;
+        }
+    }
+    if (err == LIBBGP_OK && had_route) {
+        entry->seq = journal->event_seq++;
+        if (removed_best && after_found) {
+            entry->publish_replacement = true;
+            entry->replacement_route = best_after;
+            memset(&best_after, 0, sizeof(best_after));
+        } else if (removed_best) {
+            entry->publish_withdrawn = true;
+        }
         journal->withdrawn6_count++;
     }
+    if (err != LIBBGP_OK && had_route) {
+        (void)bgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &entry->saved);
+        bgp_rib6_saved_route_destroy(&entry->saved);
+    }
+    bgp_rib6_route_snapshot_destroy(&best_after);
+    bgp_rib6_route_snapshot_destroy(&best_before);
     return err;
 }
 
@@ -939,6 +1063,26 @@ static bool fsm_update_session_current(fsm_impl_t *impl, uint64_t session_genera
 {
     return impl->state == LIBBGP_FSM_ESTABLISHED &&
         impl->session_generation == session_generation;
+}
+
+static bool fsm_route4_same_identity(
+    const libbgp_rib4_route_t *a,
+    const libbgp_rib4_route_t *b)
+{
+    return a != NULL && b != NULL &&
+        a->source_router_id == b->source_router_id &&
+        a->update_id == b->update_id &&
+        libbgp_prefix4_eq(&a->prefix, &b->prefix);
+}
+
+static bool fsm_route6_same_identity(
+    const libbgp_rib6_route_t *a,
+    const libbgp_rib6_route_t *b)
+{
+    return a != NULL && b != NULL &&
+        a->source_router_id == b->source_router_id &&
+        a->update_id == b->update_id &&
+        libbgp_prefix6_eq(&a->prefix, &b->prefix);
 }
 
 static size_t fsm_as_path_len_and_origin_as(const libbgp_pattr_t *attr, uint32_t *origin_as)
@@ -1638,11 +1782,18 @@ static libbgp_err_t fsm_apply_update(
     }
     for (i = 0u; impl->send_ipv4_routes && !ignore_advertisements && i < update->nlri_count; i++) {
         libbgp_rib4_route_t route;
+        libbgp_rib4_route_t best_before;
+        libbgp_rib4_route_t best_after;
         bgp_rib4_saved_route_t replaced;
         bool had_replaced = false;
         bool restore_replaced = false;
+        bool before_found = false;
+        bool after_found = false;
+        bool publish_added = false;
         uint64_t update_id = 0u;
         err = LIBBGP_OK;
+        memset(&best_before, 0, sizeof(best_before));
+        memset(&best_after, 0, sizeof(best_after));
         memset(&replaced, 0, sizeof(replaced));
 
         if (!fsm_update_session_current(impl, session_generation)) {
@@ -1663,6 +1814,9 @@ static libbgp_err_t fsm_apply_update(
             continue;
         }
         if (rib4 != NULL) {
+            err = bgp_rib4_best_exact_clone(rib4, &route.prefix, &best_before, &before_found);
+        }
+        if (err == LIBBGP_OK && rib4 != NULL) {
             err = bgp_rib4_insert_save_replaced(rib4, &route, &replaced, &had_replaced, &update_id);
             if (err == LIBBGP_OK && had_replaced) {
                 uint64_t replaced_update_id = 0u;
@@ -1673,13 +1827,29 @@ static libbgp_err_t fsm_apply_update(
                 }
             }
         }
+        if (err == LIBBGP_OK && rib4 != NULL) {
+            err = bgp_rib4_best_exact_clone(rib4, &route.prefix, &best_after, &after_found);
+            if (err == LIBBGP_OK && after_found &&
+                (!before_found || !fsm_route4_same_identity(&best_before, &best_after))) {
+                publish_added = true;
+            }
+        }
         if (err == LIBBGP_OK) {
-            err = fsm_update_journal_record4(journal, &route.prefix, update_id, restore_replaced, &replaced);
+            err = fsm_update_journal_record4(
+                journal,
+                &route.prefix,
+                update_id,
+                restore_replaced,
+                &replaced,
+                &best_after,
+                publish_added);
         }
         if (err != LIBBGP_OK && rib4 != NULL) {
             (void)bgp_rib4_withdraw_exact_if_update_id(rib4, peer_bgp_id, &route.prefix, update_id);
             (void)bgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &replaced);
         }
+        bgp_rib4_route_snapshot_destroy(&best_after);
+        bgp_rib4_route_snapshot_destroy(&best_before);
         bgp_rib4_saved_route_destroy(&replaced);
         if (err != LIBBGP_OK) {
             return err;
@@ -1711,17 +1881,30 @@ static libbgp_err_t fsm_apply_update(
                     return err;
                 }
             }
-        } else if (impl->send_ipv6_routes && !ignore_advertisements &&
+        }
+    }
+    for (i = 0u; i < update->attr_count; i++) {
+        const libbgp_pattr_t *attr = update->attrs[i];
+        size_t j;
+
+        if (impl->send_ipv6_routes && !ignore_advertisements &&
             attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
             for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
                 libbgp_rib6_route_t route;
+                libbgp_rib6_route_t best_before;
+                libbgp_rib6_route_t best_after;
                 bgp_rib6_saved_route_t replaced;
                 bool had_replaced = false;
                 bool restore_replaced = false;
                 bool route_made = false;
+                bool before_found = false;
+                bool after_found = false;
+                bool publish_added = false;
                 uint64_t update_id = 0u;
                 err = LIBBGP_OK;
                 memset(&route, 0, sizeof(route));
+                memset(&best_before, 0, sizeof(best_before));
+                memset(&best_after, 0, sizeof(best_after));
                 memset(&replaced, 0, sizeof(replaced));
 
                 if (!fsm_update_session_current(impl, session_generation)) {
@@ -1749,6 +1932,13 @@ static libbgp_err_t fsm_apply_update(
                     continue;
                 }
                 if (err == LIBBGP_OK && rib6 != NULL) {
+                    err = bgp_rib6_best_exact_clone(
+                        rib6,
+                        &attr->data.mp_reach_ipv6.nlri[j],
+                        &best_before,
+                        &before_found);
+                }
+                if (err == LIBBGP_OK && rib6 != NULL) {
                     err = bgp_rib6_insert_save_replaced(rib6, &route, &replaced, &had_replaced, &update_id);
                     if (err == LIBBGP_OK && had_replaced) {
                         uint64_t replaced_update_id = 0u;
@@ -1762,6 +1952,17 @@ static libbgp_err_t fsm_apply_update(
                         }
                     }
                 }
+                if (err == LIBBGP_OK && rib6 != NULL) {
+                    err = bgp_rib6_best_exact_clone(
+                        rib6,
+                        &attr->data.mp_reach_ipv6.nlri[j],
+                        &best_after,
+                        &after_found);
+                    if (err == LIBBGP_OK && after_found &&
+                        (!before_found || !fsm_route6_same_identity(&best_before, &best_after))) {
+                        publish_added = true;
+                    }
+                }
                 if (route_made) {
                     fsm_made_route6_destroy(&route);
                 }
@@ -1771,7 +1972,9 @@ static libbgp_err_t fsm_apply_update(
                         &attr->data.mp_reach_ipv6.nlri[j],
                         update_id,
                         restore_replaced,
-                        &replaced);
+                        &replaced,
+                        &best_after,
+                        publish_added);
                 }
                 if (err != LIBBGP_OK && rib6 != NULL) {
                     (void)bgp_rib6_withdraw_exact_if_update_id(
@@ -1781,6 +1984,8 @@ static libbgp_err_t fsm_apply_update(
                         update_id);
                     (void)bgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &replaced);
                 }
+                bgp_rib6_route_snapshot_destroy(&best_after);
+                bgp_rib6_route_snapshot_destroy(&best_before);
                 bgp_rib6_saved_route_destroy(&replaced);
                 if (err != LIBBGP_OK) {
                     return err;
@@ -1791,117 +1996,238 @@ static libbgp_err_t fsm_apply_update(
     return LIBBGP_OK;
 }
 
+static bool fsm_publish_snapshot_current(
+    fsm_impl_t *impl,
+    uint64_t session_generation,
+    uint64_t *route_added_sub_id,
+    uint64_t *route_withdrawn_sub_id)
+{
+    bool current;
+
+    bgp_lock(&impl->lock);
+    current = fsm_update_session_current(impl, session_generation);
+    if (route_added_sub_id != NULL) {
+        *route_added_sub_id = impl->route_added_sub_id;
+    }
+    if (route_withdrawn_sub_id != NULL) {
+        *route_withdrawn_sub_id = impl->route_withdrawn_sub_id;
+    }
+    bgp_unlock(&impl->lock);
+    return current;
+}
+
+static void fsm_publish_route4_added_snapshot(
+    libbgp_event_bus_t *bus,
+    uint64_t publisher_id,
+    const libbgp_rib4_route_t *route)
+{
+    libbgp_update_msg_t update;
+    libbgp_err_t err;
+
+    if (route == NULL) {
+        return;
+    }
+    err = fsm_update_from_route4(route, &update);
+    if (err != LIBBGP_OK) {
+        return;
+    }
+    fsm_publish_event(
+        bus,
+        publisher_id,
+        LIBBGP_EVENT_ROUTE_ADDED,
+        route->source_router_id,
+        &route->prefix,
+        &update);
+    libbgp_update_destroy(&update);
+}
+
+static void fsm_publish_route6_added_snapshot(
+    libbgp_event_bus_t *bus,
+    uint64_t publisher_id,
+    const libbgp_rib6_route_t *route)
+{
+    libbgp_update_msg_t update;
+    libbgp_err_t err;
+
+    if (route == NULL) {
+        return;
+    }
+    err = fsm_update_from_route6(route, &update);
+    if (err != LIBBGP_OK) {
+        return;
+    }
+    fsm_publish_event6(
+        bus,
+        publisher_id,
+        LIBBGP_EVENT_ROUTE_ADDED,
+        route->source_router_id,
+        &route->prefix,
+        &update);
+    libbgp_update_destroy(&update);
+}
+
 static void fsm_publish_update_events(
     fsm_impl_t *impl,
     uint64_t session_generation,
     libbgp_event_bus_t *bus,
     uint32_t peer_bgp_id,
-    const libbgp_update_msg_t *update,
-    bool advertisements_ignored,
-    bool send_ipv4_routes,
-    bool send_ipv6_routes)
+    const fsm_update_journal_t *journal)
 {
+    size_t seq;
     size_t i;
 
-    if (update == NULL) {
+    if (journal == NULL) {
         return;
     }
-    for (i = 0u; send_ipv4_routes && i < update->withdrawn_count; i++) {
-        bool current;
-        uint64_t publisher_id;
+    for (seq = 0u; seq < journal->event_seq; seq++) {
+        for (i = 0u; i < journal->withdrawn4_count; i++) {
+            uint64_t added_publisher = 0u;
+            uint64_t withdrawn_publisher = 0u;
 
-        bgp_lock(&impl->lock);
-        current = fsm_update_session_current(impl, session_generation);
-        publisher_id = impl->route_withdrawn_sub_id;
-        bgp_unlock(&impl->lock);
-        if (!current) {
-            return;
-        }
-        fsm_publish_event(bus, publisher_id, LIBBGP_EVENT_ROUTE_WITHDRAWN, peer_bgp_id, &update->withdrawn[i], update);
-        bgp_lock(&impl->lock);
-        current = fsm_update_session_current(impl, session_generation);
-        bgp_unlock(&impl->lock);
-        if (!current) {
-            return;
-        }
-    }
-    for (i = 0u; send_ipv4_routes && !advertisements_ignored && i < update->nlri_count; i++) {
-        bool current;
-        uint64_t publisher_id;
-
-        bgp_lock(&impl->lock);
-        current = fsm_update_session_current(impl, session_generation);
-        publisher_id = impl->route_added_sub_id;
-        bgp_unlock(&impl->lock);
-        if (!current) {
-            return;
-        }
-        fsm_publish_event(bus, publisher_id, LIBBGP_EVENT_ROUTE_ADDED, peer_bgp_id, &update->nlri[i], update);
-        bgp_lock(&impl->lock);
-        current = fsm_update_session_current(impl, session_generation);
-        bgp_unlock(&impl->lock);
-        if (!current) {
-            return;
-        }
-    }
-    for (i = 0u; i < update->attr_count; i++) {
-        const libbgp_pattr_t *attr = update->attrs[i];
-        size_t j;
-
-        if (send_ipv6_routes && attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6) {
-            for (j = 0u; j < attr->data.mp_unreach_ipv6.withdrawn_count; j++) {
-                bool current;
-                uint64_t publisher_id;
-
-                bgp_lock(&impl->lock);
-                current = fsm_update_session_current(impl, session_generation);
-                publisher_id = impl->route_withdrawn_sub_id;
-                bgp_unlock(&impl->lock);
-                if (!current) {
-                    return;
-                }
-                fsm_publish_event6(
+            if (journal->withdrawn4[i].seq != seq ||
+                (!journal->withdrawn4[i].publish_replacement &&
+                 !journal->withdrawn4[i].publish_withdrawn)) {
+                continue;
+            }
+            if (!fsm_publish_snapshot_current(
+                    impl,
+                    session_generation,
+                    &added_publisher,
+                    &withdrawn_publisher)) {
+                return;
+            }
+            if (journal->withdrawn4[i].publish_replacement) {
+                fsm_publish_route4_added_snapshot(
                     bus,
-                    publisher_id,
+                    added_publisher,
+                    &journal->withdrawn4[i].replacement_route);
+            } else {
+                fsm_publish_event(
+                    bus,
+                    withdrawn_publisher,
                     LIBBGP_EVENT_ROUTE_WITHDRAWN,
                     peer_bgp_id,
-                    &attr->data.mp_unreach_ipv6.withdrawn[j],
-                    update);
-                bgp_lock(&impl->lock);
-                current = fsm_update_session_current(impl, session_generation);
-                bgp_unlock(&impl->lock);
-                if (!current) {
-                    return;
-                }
+                    &journal->withdrawn4[i].prefix,
+                    NULL);
             }
-        } else if (send_ipv6_routes && !advertisements_ignored &&
-            attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
-            for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
-                bool current;
-                uint64_t publisher_id;
-
-                bgp_lock(&impl->lock);
-                current = fsm_update_session_current(impl, session_generation);
-                publisher_id = impl->route_added_sub_id;
-                bgp_unlock(&impl->lock);
-                if (!current) {
-                    return;
-                }
-                fsm_publish_event6(
-                    bus,
-                    publisher_id,
-                    LIBBGP_EVENT_ROUTE_ADDED,
-                    peer_bgp_id,
-                    &attr->data.mp_reach_ipv6.nlri[j],
-                    update);
-                bgp_lock(&impl->lock);
-                current = fsm_update_session_current(impl, session_generation);
-                bgp_unlock(&impl->lock);
-                if (!current) {
-                    return;
-                }
+            if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
+                return;
             }
         }
+        for (i = 0u; i < journal->routes4_count; i++) {
+            uint64_t added_publisher = 0u;
+
+            if (journal->routes4[i].seq != seq || !journal->routes4[i].publish_added) {
+                continue;
+            }
+            if (!fsm_publish_snapshot_current(impl, session_generation, &added_publisher, NULL)) {
+                return;
+            }
+            fsm_publish_route4_added_snapshot(bus, added_publisher, &journal->routes4[i].added_route);
+            if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
+                return;
+            }
+        }
+        for (i = 0u; i < journal->withdrawn6_count; i++) {
+            uint64_t added_publisher = 0u;
+            uint64_t withdrawn_publisher = 0u;
+
+            if (journal->withdrawn6[i].seq != seq ||
+                (!journal->withdrawn6[i].publish_replacement &&
+                 !journal->withdrawn6[i].publish_withdrawn)) {
+                continue;
+            }
+            if (!fsm_publish_snapshot_current(
+                    impl,
+                    session_generation,
+                    &added_publisher,
+                    &withdrawn_publisher)) {
+                return;
+            }
+            if (journal->withdrawn6[i].publish_replacement) {
+                fsm_publish_route6_added_snapshot(
+                    bus,
+                    added_publisher,
+                    &journal->withdrawn6[i].replacement_route);
+            } else {
+                fsm_publish_event6(
+                    bus,
+                    withdrawn_publisher,
+                    LIBBGP_EVENT_ROUTE_WITHDRAWN,
+                    peer_bgp_id,
+                    &journal->withdrawn6[i].prefix,
+                    NULL);
+            }
+            if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
+                return;
+            }
+        }
+        for (i = 0u; i < journal->routes6_count; i++) {
+            uint64_t added_publisher = 0u;
+
+            if (journal->routes6[i].seq != seq || !journal->routes6[i].publish_added) {
+                continue;
+            }
+            if (!fsm_publish_snapshot_current(impl, session_generation, &added_publisher, NULL)) {
+                return;
+            }
+            fsm_publish_route6_added_snapshot(bus, added_publisher, &journal->routes6[i].added_route);
+            if (!fsm_publish_snapshot_current(impl, session_generation, NULL, NULL)) {
+                return;
+            }
+        }
+    }
+}
+
+static void fsm_discard_peer_routes_publish(
+    libbgp_event_bus_t *bus,
+    libbgp_rib4_t *rib4,
+    libbgp_rib6_t *rib6,
+    uint32_t peer_bgp_id)
+{
+    bgp_rib4_discard_result_t result4;
+    bgp_rib6_discard_result_t result6;
+    size_t i;
+
+    memset(&result4, 0, sizeof(result4));
+    memset(&result6, 0, sizeof(result6));
+    if (rib4 != NULL) {
+        if (bgp_rib4_discard_collect(rib4, peer_bgp_id, &result4) == LIBBGP_OK) {
+            for (i = 0u; i < result4.withdrawn_count; i++) {
+                fsm_publish_event(
+                    bus,
+                    0u,
+                    LIBBGP_EVENT_ROUTE_WITHDRAWN,
+                    peer_bgp_id,
+                    &result4.withdrawn[i],
+                    NULL);
+            }
+            for (i = 0u; i < result4.replacement_count; i++) {
+                fsm_publish_route4_added_snapshot(bus, 0u, &result4.replacements[i]);
+            }
+        } else {
+            (void)libbgp_rib4_discard(rib4, peer_bgp_id);
+        }
+        bgp_rib4_discard_result_destroy(&result4);
+    }
+    if (rib6 != NULL) {
+        if (bgp_rib6_discard_collect(rib6, peer_bgp_id, &result6) == LIBBGP_OK) {
+            for (i = 0u; i < result6.withdrawn_count; i++) {
+                fsm_publish_event6(
+                    bus,
+                    0u,
+                    LIBBGP_EVENT_ROUTE_WITHDRAWN,
+                    peer_bgp_id,
+                    &result6.withdrawn[i],
+                    NULL);
+            }
+            for (i = 0u; i < result6.replacement_count; i++) {
+                fsm_publish_route6_added_snapshot(bus, 0u, &result6.replacements[i]);
+            }
+        } else {
+            (void)libbgp_rib6_discard(rib6, peer_bgp_id);
+        }
+        bgp_rib6_discard_result_destroy(&result6);
     }
 }
 
@@ -2060,6 +2386,33 @@ static libbgp_err_t fsm_clone_update(const libbgp_update_msg_t *src, libbgp_upda
     return LIBBGP_OK;
 }
 
+static void fsm_update_drop_non_transitive(libbgp_update_msg_t *update)
+{
+    size_t i;
+    size_t out = 0u;
+
+    if (update == NULL || update->attrs == NULL) {
+        return;
+    }
+    for (i = 0u; i < update->attr_count; i++) {
+        libbgp_pattr_t *attr = update->attrs[i];
+        bool keep;
+
+        if (attr == NULL) {
+            continue;
+        }
+        keep = (attr->flags & LIBBGP_PATTR_FLAG_TRANSITIVE) != 0u ||
+            attr->type == LIBBGP_PATTR_MP_REACH_IPV6 ||
+            attr->type == LIBBGP_PATTR_MP_UNREACH_IPV6;
+        if (keep) {
+            update->attrs[out++] = attr;
+        } else {
+            libbgp_pattr_unref(attr);
+        }
+    }
+    update->attr_count = out;
+}
+
 static libbgp_err_t fsm_send_prepared_update(
     libbgp_out_handler_t *out,
     const libbgp_update_msg_t *update,
@@ -2083,6 +2436,7 @@ static libbgp_err_t fsm_send_prepared_update(
         return err;
     }
     if (fsm_update_has_advertisements(&copy)) {
+        fsm_update_drop_non_transitive(&copy);
         err = fsm_alter_nexthop4(
             &copy,
             peering_lan4,
@@ -2343,14 +2697,29 @@ typedef struct fsm_established_snapshot {
 } fsm_established_snapshot_t;
 
 typedef struct fsm_advertise_rib4_ctx {
+    fsm_impl_t *impl;
     fsm_established_snapshot_t snap;
     libbgp_err_t err;
 } fsm_advertise_rib4_ctx_t;
 
 typedef struct fsm_advertise_rib6_ctx {
+    fsm_impl_t *impl;
     fsm_established_snapshot_t snap;
     libbgp_err_t err;
 } fsm_advertise_rib6_ctx_t;
+
+static bool fsm_established_snapshot_current(fsm_impl_t *impl, uint64_t session_generation)
+{
+    bool current;
+
+    if (impl == NULL) {
+        return false;
+    }
+    bgp_lock(&impl->lock);
+    current = fsm_update_session_current(impl, session_generation);
+    bgp_unlock(&impl->lock);
+    return current;
+}
 
 static void fsm_snapshot_established_locked(fsm_impl_t *impl, fsm_established_snapshot_t *snap)
 {
@@ -2504,6 +2873,9 @@ static bool fsm_advertise_rib4_cb(const libbgp_rib4_route_t *route, void *ctx)
     if (adv == NULL || adv->err != LIBBGP_OK || route == NULL) {
         return false;
     }
+    if (!fsm_established_snapshot_current(adv->impl, adv->snap.session_generation)) {
+        return false;
+    }
     if (route->source_router_id == adv->snap.peer_bgp_id) {
         return true;
     }
@@ -2534,10 +2906,13 @@ static bool fsm_advertise_rib4_cb(const libbgp_rib4_route_t *route, void *ctx)
             adv->snap.ibgp_alter_nexthop);
         libbgp_update_destroy(&update);
     }
-    return adv->err == LIBBGP_OK;
+    return adv->err == LIBBGP_OK &&
+        fsm_established_snapshot_current(adv->impl, adv->snap.session_generation);
 }
 
-static libbgp_err_t fsm_advertise_existing_rib4(const fsm_established_snapshot_t *snap)
+static libbgp_err_t fsm_advertise_existing_rib4(
+    fsm_impl_t *impl,
+    const fsm_established_snapshot_t *snap)
 {
     fsm_advertise_rib4_ctx_t ctx;
     libbgp_err_t err;
@@ -2545,9 +2920,10 @@ static libbgp_err_t fsm_advertise_existing_rib4(const fsm_established_snapshot_t
     if (snap == NULL || !snap->active || snap->rib4 == NULL || !snap->send_ipv4_routes) {
         return LIBBGP_OK;
     }
+    ctx.impl = impl;
     ctx.snap = *snap;
     ctx.err = LIBBGP_OK;
-    err = bgp_rib4_foreach_route(snap->rib4, fsm_advertise_rib4_cb, &ctx);
+    err = bgp_rib4_foreach_best_route(snap->rib4, fsm_advertise_rib4_cb, &ctx);
     if (err != LIBBGP_OK) {
         return err;
     }
@@ -2561,6 +2937,9 @@ static bool fsm_advertise_rib6_cb(const libbgp_rib6_route_t *route, void *ctx)
     bool is_ibgp;
 
     if (adv == NULL || adv->err != LIBBGP_OK || route == NULL) {
+        return false;
+    }
+    if (!fsm_established_snapshot_current(adv->impl, adv->snap.session_generation)) {
         return false;
     }
     if (!adv->snap.send_ipv6_routes || route->source_router_id == adv->snap.peer_bgp_id) {
@@ -2593,10 +2972,13 @@ static bool fsm_advertise_rib6_cb(const libbgp_rib6_route_t *route, void *ctx)
             adv->snap.ibgp_alter_nexthop);
         libbgp_update_destroy(&update);
     }
-    return adv->err == LIBBGP_OK;
+    return adv->err == LIBBGP_OK &&
+        fsm_established_snapshot_current(adv->impl, adv->snap.session_generation);
 }
 
-static libbgp_err_t fsm_advertise_existing_rib6(const fsm_established_snapshot_t *snap)
+static libbgp_err_t fsm_advertise_existing_rib6(
+    fsm_impl_t *impl,
+    const fsm_established_snapshot_t *snap)
 {
     fsm_advertise_rib6_ctx_t ctx;
     libbgp_err_t err;
@@ -2604,9 +2986,10 @@ static libbgp_err_t fsm_advertise_existing_rib6(const fsm_established_snapshot_t
     if (snap == NULL || !snap->active || snap->rib6 == NULL || !snap->send_ipv6_routes) {
         return LIBBGP_OK;
     }
+    ctx.impl = impl;
     ctx.snap = *snap;
     ctx.err = LIBBGP_OK;
-    err = bgp_rib6_foreach_route(snap->rib6, fsm_advertise_rib6_cb, &ctx);
+    err = bgp_rib6_foreach_best_route(snap->rib6, fsm_advertise_rib6_cb, &ctx);
     if (err != LIBBGP_OK) {
         return err;
     }
@@ -2629,7 +3012,7 @@ static void fsm_teardown_current_established(fsm_impl_t *impl, uint64_t session_
     }
     bgp_unlock(&impl->lock);
     if (torn_down) {
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
     }
 }
@@ -2644,12 +3027,15 @@ static libbgp_err_t fsm_run_established_actions(
     if (snap == NULL || !snap->active) {
         return LIBBGP_OK;
     }
-    err = fsm_advertise_existing_rib4(snap);
+    err = fsm_advertise_existing_rib4(impl, snap);
     if (err != LIBBGP_OK) {
         fsm_teardown_current_established(impl, snap->session_generation);
         return err;
     }
-    err = fsm_advertise_existing_rib6(snap);
+    if (!fsm_established_snapshot_current(impl, snap->session_generation)) {
+        return LIBBGP_OK;
+    }
+    err = fsm_advertise_existing_rib6(impl, snap);
     if (err != LIBBGP_OK) {
         fsm_teardown_current_established(impl, snap->session_generation);
         return err;
@@ -3440,6 +3826,7 @@ static libbgp_err_t fsm_reset_common(libbgp_fsm_t *fsm, bool send_notify, uint8_
     uint32_t peer_bgp_id = 0u;
     bool notify;
     bool was_established;
+    bool publish_routes_before_notify;
     libbgp_err_t err;
 
     if (impl == NULL) {
@@ -3451,9 +3838,15 @@ static libbgp_err_t fsm_reset_common(libbgp_fsm_t *fsm, bool send_notify, uint8_
     fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
     bgp_unlock(&impl->lock);
 
+    publish_routes_before_notify = was_established && notify && cease_subcode == 0u;
+    if (publish_routes_before_notify) {
+        fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
+    }
     err = notify ? fsm_send_notification(out, FSM_NOTIFY_CEASE, cease_subcode) : LIBBGP_OK;
     if (was_established) {
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        if (!publish_routes_before_notify) {
+            fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
+        }
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
     }
     return err;
@@ -3822,8 +4215,6 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     libbgp_rib6_t *rib6;
     uint32_t peer_bgp_id;
     bool peer_mpbgp_ipv6;
-    bool send_ipv4_routes;
-    bool send_ipv6_routes;
     uint64_t rx_ms;
     uint64_t session_generation;
     fsm_update_journal_t journal;
@@ -3840,7 +4231,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     if (pkt->type == LIBBGP_PACKET_NOTIFICATION) {
         fsm_snapshot_teardown(impl, NULL, &bus, &rib4, &rib6, &peer_bgp_id);
         bgp_unlock(&impl->lock);
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         return LIBBGP_OK;
     }
@@ -3848,7 +4239,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         fsm_snapshot_teardown(impl, &out, &bus, &rib4, &rib6, &peer_bgp_id);
         bgp_unlock(&impl->lock);
         (void)fsm_send_notification(out, FSM_NOTIFY_FSM_ERROR, FSM_ERR_ESTABLISHED);
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         return LIBBGP_ERR_BAD_TYPE;
     }
@@ -3858,8 +4249,6 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
     bus = impl->bus;
     peer_bgp_id = impl->peer_bgp_id;
     peer_mpbgp_ipv6 = impl->peer_mpbgp_ipv6;
-    send_ipv4_routes = impl->send_ipv4_routes;
-    send_ipv6_routes = impl->send_ipv6_routes;
     session_generation = impl->session_generation;
     if (!peer_mpbgp_ipv6 && pkt->data.update.attrs != NULL) {
         size_t i;
@@ -3876,7 +4265,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
                     out,
                     FSM_NOTIFY_UPDATE_MESSAGE_ERROR,
                     FSM_UPDATE_ERR_MALFORMED_ATTR_LIST);
-                fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+                fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
                 fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
                 return send_err == LIBBGP_OK ? LIBBGP_ERR_INVALID : send_err;
             }
@@ -3911,7 +4300,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
         bgp_unlock(&impl->lock);
         fsm_rollback_update_journal(&journal, rib4, rib6, peer_bgp_id);
         send_err = fsm_send_notification(out, FSM_NOTIFY_UPDATE_MESSAGE_ERROR, update_err_subcode);
-        fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+        fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
         fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         fsm_update_journal_destroy(&journal);
         return send_err == LIBBGP_OK ? err : send_err;
@@ -3926,10 +4315,7 @@ static libbgp_err_t fsm_on_established(fsm_impl_t *impl, const libbgp_packet_t *
             session_generation,
             bus,
             peer_bgp_id,
-            &pkt->data.update,
-            advertisements_ignored,
-            send_ipv4_routes,
-            send_ipv6_routes);
+            &journal);
     }
     fsm_update_journal_destroy(&journal);
     return err;
@@ -3954,7 +4340,7 @@ libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt)
         fsm_snapshot_teardown(impl, NULL, &bus, &rib4, &rib6, &peer_bgp_id);
         bgp_unlock(&impl->lock);
         if (state == LIBBGP_FSM_ESTABLISHED) {
-            fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+            fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
             fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         }
         return LIBBGP_OK;
@@ -4023,7 +4409,7 @@ libbgp_err_t libbgp_fsm_tick(libbgp_fsm_t *fsm, uint64_t now_ms)
         bgp_unlock(&impl->lock);
         (void)fsm_send_notification(out, FSM_NOTIFY_HOLD_TIMER_EXPIRED, 0u);
         if (was_established) {
-            fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+            fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
             fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
         }
         return LIBBGP_OK;
@@ -4059,7 +4445,7 @@ libbgp_err_t libbgp_fsm_tick(libbgp_fsm_t *fsm, uint64_t now_ms)
             }
             bgp_unlock(&impl->lock);
             if (was_established) {
-                fsm_discard_peer_routes(rib4, rib6, peer_bgp_id);
+                fsm_discard_peer_routes_publish(bus, rib4, rib6, peer_bgp_id);
                 fsm_publish_event(bus, 0u, LIBBGP_EVENT_SESSION_DOWN, 0u, NULL, NULL);
             }
         }
