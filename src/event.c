@@ -196,7 +196,10 @@ libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id)
     return LIBBGP_ERR_NOT_FOUND;
 }
 
-size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *event)
+size_t libbgp_event_bus_publish_from(
+    libbgp_event_bus_t *bus,
+    uint64_t publisher_id,
+    const libbgp_event_t *event)
 {
     event_bus_impl_t *impl;
     event_snapshot_t *snapshot = NULL;
@@ -211,7 +214,8 @@ size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *e
         return 0u;
     }
     for (i = 0u; i < impl->count; i++) {
-        if (impl->subs[i].type == event->type) {
+        if (impl->subs[i].type == event->type &&
+            (publisher_id == 0u || impl->subs[i].id != publisher_id)) {
             match_count++;
         }
     }
@@ -227,7 +231,8 @@ size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *e
         }
         match_count = 0u;
         for (i = 0u; i < impl->count; i++) {
-            if (impl->subs[i].type == event->type) {
+            if (impl->subs[i].type == event->type &&
+                (publisher_id == 0u || impl->subs[i].id != publisher_id)) {
                 snapshot[match_count].cb = impl->subs[i].cb;
                 snapshot[match_count].ctx = impl->subs[i].ctx;
                 match_count++;
@@ -241,6 +246,11 @@ size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *e
     }
     bgp_free(snapshot);
     return match_count;
+}
+
+size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *event)
+{
+    return libbgp_event_bus_publish_from(bus, 0u, event);
 }
 
 size_t libbgp_event_bus_subscriber_count(const libbgp_event_bus_t *bus)

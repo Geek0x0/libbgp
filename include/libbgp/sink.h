@@ -1,6 +1,7 @@
 #ifndef LIBBGP_SINK_H
 #define LIBBGP_SINK_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -12,6 +13,7 @@ struct libbgp_sink {
 };
 
 LIBBGP_API libbgp_err_t libbgp_sink_init(libbgp_sink_t *sink);
+LIBBGP_API libbgp_err_t libbgp_sink_init_as4(libbgp_sink_t *sink, bool use_4b_asn);
 LIBBGP_API void libbgp_sink_destroy(libbgp_sink_t *sink);
 LIBBGP_API libbgp_err_t libbgp_sink_feed(libbgp_sink_t *sink, const uint8_t *data, size_t len);
 LIBBGP_API size_t libbgp_sink_packet_count(const libbgp_sink_t *sink);

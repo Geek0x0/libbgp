@@ -1,6 +1,7 @@
 #ifndef LIBBGP_PACKET_H
 #define LIBBGP_PACKET_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -36,6 +37,13 @@ LIBBGP_API libbgp_err_t libbgp_packet_parse(
     libbgp_packet_t *pkt,
     const uint8_t *buf,
     size_t len,
+    size_t *consumed);
+
+LIBBGP_API libbgp_err_t libbgp_packet_parse_as4(
+    libbgp_packet_t *pkt,
+    const uint8_t *buf,
+    size_t len,
+    bool use_4b_asn,
     size_t *consumed);
 
 LIBBGP_API libbgp_err_t libbgp_packet_write(

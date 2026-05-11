@@ -146,6 +146,8 @@ static libbgp_err_t open_parse_optional(
             if (err != LIBBGP_OK) {
                 return err;
             }
+        } else {
+            return LIBBGP_ERR_BAD_TYPE;
         }
         pos += param_len;
     }

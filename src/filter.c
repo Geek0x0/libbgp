@@ -99,6 +99,38 @@ static bool as_path_contains(const libbgp_pattr_t *attr, uint32_t asn)
     return false;
 }
 
+static bool as_path_origin_asn(const libbgp_pattr_t *attr, uint32_t *origin_asn)
+{
+    bool found = false;
+    size_t i;
+
+    if (origin_asn != NULL) {
+        *origin_asn = 0u;
+    }
+    if (attr == NULL ||
+        (attr->type != LIBBGP_PATTR_AS_PATH && attr->type != LIBBGP_PATTR_AS4_PATH)) {
+        return false;
+    }
+    if (attr->data.as_path.segment_count != 0u && attr->data.as_path.segments == NULL) {
+        return false;
+    }
+    for (i = 0u; i < attr->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *segment = &attr->data.as_path.segments[i];
+
+        if (segment->type != 2u || segment->asn_count == 0u) {
+            continue;
+        }
+        if (segment->asns == NULL) {
+            return false;
+        }
+        if (origin_asn != NULL) {
+            *origin_asn = segment->asns[segment->asn_count - 1u];
+        }
+        found = true;
+    }
+    return found;
+}
+
 static bool community_contains(const libbgp_pattr_t *attr, uint32_t community)
 {
     size_t i;
@@ -147,15 +179,157 @@ static bool route_has_community(const libbgp_rib4_route_t *route, uint32_t commu
     return false;
 }
 
+static bool route_origin_asn(const libbgp_rib4_route_t *route, uint32_t *origin_asn)
+{
+    size_t i;
+
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        if (as_path_origin_asn(route->attrs[i], origin_asn)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool route6_has_asn(const libbgp_rib6_route_t *route, uint32_t asn)
+{
+    size_t i;
+
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        if (as_path_contains(route->attrs[i], asn)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool route6_has_community(const libbgp_rib6_route_t *route, uint32_t community)
+{
+    size_t i;
+
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        if (community_contains(route->attrs[i], community)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool route6_origin_asn(const libbgp_rib6_route_t *route, uint32_t *origin_asn)
+{
+    size_t i;
+
+    if (route->attr_count != 0u && route->attrs == NULL) {
+        return false;
+    }
+    for (i = 0u; i < route->attr_count; i++) {
+        if (as_path_origin_asn(route->attrs[i], origin_asn)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool prefix4_more_specific(const libbgp_prefix4_t *rule, const libbgp_prefix4_t *route)
+{
+    return route->len > rule->len && libbgp_prefix4_includes(rule, route);
+}
+
+static bool prefix4_less_specific(const libbgp_prefix4_t *rule, const libbgp_prefix4_t *route)
+{
+    return route->len < rule->len && libbgp_prefix4_includes(route, rule);
+}
+
+static bool prefix6_more_specific(const libbgp_prefix6_t *rule, const libbgp_prefix6_t *route)
+{
+    return route->len > rule->len && libbgp_prefix6_includes(rule, route);
+}
+
+static bool prefix6_less_specific(const libbgp_prefix6_t *rule, const libbgp_prefix6_t *route)
+{
+    return route->len < rule->len && libbgp_prefix6_includes(route, rule);
+}
+
 static bool filter_rule_matches(const libbgp_filter_rule_t *rule, const libbgp_rib4_route_t *route)
 {
     switch (rule->match_type) {
     case LIBBGP_FILTER_MATCH_PREFIX4:
+    case LIBBGP_FILTER_MATCH_PREFIX4_MORE_OR_EQUAL:
         return libbgp_prefix4_includes(&rule->match.prefix4, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX4_EXACT:
+        return libbgp_prefix4_eq(&rule->match.prefix4, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX4_MORE_SPECIFIC:
+        return prefix4_more_specific(&rule->match.prefix4, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX4_LESS_SPECIFIC:
+        return prefix4_less_specific(&rule->match.prefix4, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX4_LESS_OR_EQUAL:
+        return libbgp_prefix4_includes(&route->prefix, &rule->match.prefix4);
     case LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS:
         return route_has_asn(route, rule->match.asn);
+    case LIBBGP_FILTER_MATCH_AS_PATH_NOT_CONTAINS:
+        return !route_has_asn(route, rule->match.asn);
+    case LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN: {
+        uint32_t origin_asn = 0u;
+
+        return route_origin_asn(route, &origin_asn) && origin_asn == rule->match.asn;
+    }
+    case LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN: {
+        uint32_t origin_asn = 0u;
+
+        return route_origin_asn(route, &origin_asn) && origin_asn != rule->match.asn;
+    }
     case LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS:
         return route_has_community(route, rule->match.community);
+    case LIBBGP_FILTER_MATCH_COMMUNITY_NOT_CONTAINS:
+        return !route_has_community(route, rule->match.community);
+    case LIBBGP_FILTER_MATCH_ANY:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool filter_rule_matches6(const libbgp_filter_rule_t *rule, const libbgp_rib6_route_t *route)
+{
+    switch (rule->match_type) {
+    case LIBBGP_FILTER_MATCH_PREFIX6:
+    case LIBBGP_FILTER_MATCH_PREFIX6_MORE_OR_EQUAL:
+        return libbgp_prefix6_includes(&rule->match.prefix6, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX6_EXACT:
+        return libbgp_prefix6_eq(&rule->match.prefix6, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX6_MORE_SPECIFIC:
+        return prefix6_more_specific(&rule->match.prefix6, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX6_LESS_SPECIFIC:
+        return prefix6_less_specific(&rule->match.prefix6, &route->prefix);
+    case LIBBGP_FILTER_MATCH_PREFIX6_LESS_OR_EQUAL:
+        return libbgp_prefix6_includes(&route->prefix, &rule->match.prefix6);
+    case LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS:
+        return route6_has_asn(route, rule->match.asn);
+    case LIBBGP_FILTER_MATCH_AS_PATH_NOT_CONTAINS:
+        return !route6_has_asn(route, rule->match.asn);
+    case LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN: {
+        uint32_t origin_asn = 0u;
+
+        return route6_origin_asn(route, &origin_asn) && origin_asn == rule->match.asn;
+    }
+    case LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN: {
+        uint32_t origin_asn = 0u;
+
+        return route6_origin_asn(route, &origin_asn) && origin_asn != rule->match.asn;
+    }
+    case LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS:
+        return route6_has_community(route, rule->match.community);
+    case LIBBGP_FILTER_MATCH_COMMUNITY_NOT_CONTAINS:
+        return !route6_has_community(route, rule->match.community);
     case LIBBGP_FILTER_MATCH_ANY:
         return true;
     default:
@@ -254,9 +428,39 @@ libbgp_filter_decision_t libbgp_filter_apply_route(
     if (impl == NULL) {
         return default_decision;
     }
-    for (i = 0u; i < impl->count; i++) {
-        if (filter_rule_matches(&impl->rules[i], route)) {
-            decision = impl->rules[i].decision;
+    for (i = impl->count; i > 0u; i--) {
+        const libbgp_filter_rule_t *rule = &impl->rules[i - 1u];
+
+        if (filter_rule_matches(rule, route)) {
+            decision = rule->decision;
+            break;
+        }
+    }
+    bgp_unlock(&impl->lock);
+    return decision;
+}
+
+libbgp_filter_decision_t libbgp_filter_apply_route6(
+    const libbgp_filter_t *filter,
+    const libbgp_rib6_route_t *route,
+    libbgp_filter_decision_t default_decision)
+{
+    filter_impl_t *impl;
+    libbgp_filter_decision_t decision = default_decision;
+    size_t i;
+
+    if (route == NULL) {
+        return default_decision;
+    }
+    impl = filter_impl_lock_const(filter);
+    if (impl == NULL) {
+        return default_decision;
+    }
+    for (i = impl->count; i > 0u; i--) {
+        const libbgp_filter_rule_t *rule = &impl->rules[i - 1u];
+
+        if (filter_rule_matches6(rule, route)) {
+            decision = rule->decision;
             break;
         }
     }
