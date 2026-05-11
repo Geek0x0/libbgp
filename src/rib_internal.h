@@ -7,78 +7,90 @@
 #include "libbgp/rib4.h"
 #include "libbgp/rib6.h"
 
-typedef struct libbgp_rib4_saved_route {
+typedef struct bgp_rib4_saved_route {
     void *entry;
-} libbgp_rib4_saved_route_t;
+} bgp_rib4_saved_route_t;
 
-typedef struct libbgp_rib6_saved_route {
+typedef struct bgp_rib6_saved_route {
     void *entry;
-} libbgp_rib6_saved_route_t;
+} bgp_rib6_saved_route_t;
 
-void libbgp_rib4_saved_route_destroy(libbgp_rib4_saved_route_t *saved);
-void libbgp_rib6_saved_route_destroy(libbgp_rib6_saved_route_t *saved);
-libbgp_err_t libbgp_rib4_saved_route_update_id(
-    const libbgp_rib4_saved_route_t *saved,
+typedef bool (*bgp_rib4_route_iter_fn)(const libbgp_rib4_route_t *route, void *ctx);
+typedef bool (*bgp_rib6_route_iter_fn)(const libbgp_rib6_route_t *route, void *ctx);
+
+void bgp_rib4_saved_route_destroy(bgp_rib4_saved_route_t *saved);
+void bgp_rib6_saved_route_destroy(bgp_rib6_saved_route_t *saved);
+libbgp_err_t bgp_rib4_saved_route_update_id(
+    const bgp_rib4_saved_route_t *saved,
     uint64_t *update_id);
-libbgp_err_t libbgp_rib6_saved_route_update_id(
-    const libbgp_rib6_saved_route_t *saved,
+libbgp_err_t bgp_rib6_saved_route_update_id(
+    const bgp_rib6_saved_route_t *saved,
     uint64_t *update_id);
 
-libbgp_err_t libbgp_rib4_exact_update_id(
+libbgp_err_t bgp_rib4_exact_update_id(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
     uint64_t *update_id);
-libbgp_err_t libbgp_rib6_exact_update_id(
+libbgp_err_t bgp_rib6_exact_update_id(
     libbgp_rib6_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix6_t *prefix,
     uint64_t *update_id);
 
-libbgp_err_t libbgp_rib4_insert_save_replaced(
+libbgp_err_t bgp_rib4_insert_save_replaced(
     libbgp_rib4_t *rib,
     const libbgp_rib4_route_t *route,
-    libbgp_rib4_saved_route_t *replaced,
+    bgp_rib4_saved_route_t *replaced,
     bool *had_replaced,
     uint64_t *update_id);
-libbgp_err_t libbgp_rib6_insert_save_replaced(
+libbgp_err_t bgp_rib6_insert_save_replaced(
     libbgp_rib6_t *rib,
     const libbgp_rib6_route_t *route,
-    libbgp_rib6_saved_route_t *replaced,
+    bgp_rib6_saved_route_t *replaced,
     bool *had_replaced,
     uint64_t *update_id);
 
-libbgp_err_t libbgp_rib4_withdraw_exact_if_update_id(
+libbgp_err_t bgp_rib4_withdraw_exact_if_update_id(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
     uint64_t update_id);
-libbgp_err_t libbgp_rib6_withdraw_exact_if_update_id(
+libbgp_err_t bgp_rib6_withdraw_exact_if_update_id(
     libbgp_rib6_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix6_t *prefix,
     uint64_t update_id);
 
-libbgp_err_t libbgp_rib4_withdraw_exact_save(
+libbgp_err_t bgp_rib4_withdraw_exact_save(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
-    libbgp_rib4_saved_route_t *saved,
+    bgp_rib4_saved_route_t *saved,
     bool *had_route);
-libbgp_err_t libbgp_rib6_withdraw_exact_save(
+libbgp_err_t bgp_rib6_withdraw_exact_save(
     libbgp_rib6_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix6_t *prefix,
-    libbgp_rib6_saved_route_t *saved,
+    bgp_rib6_saved_route_t *saved,
     bool *had_route);
 
-libbgp_err_t libbgp_rib4_restore_saved_if_absent(
+libbgp_err_t bgp_rib4_restore_saved_if_absent(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
-    libbgp_rib4_saved_route_t *saved);
-libbgp_err_t libbgp_rib6_restore_saved_if_absent(
+    bgp_rib4_saved_route_t *saved);
+libbgp_err_t bgp_rib6_restore_saved_if_absent(
     libbgp_rib6_t *rib,
     uint32_t source_router_id,
-    libbgp_rib6_saved_route_t *saved);
+    bgp_rib6_saved_route_t *saved);
+
+libbgp_err_t bgp_rib4_foreach_route(
+    const libbgp_rib4_t *rib,
+    bgp_rib4_route_iter_fn fn,
+    void *ctx);
+libbgp_err_t bgp_rib6_foreach_route(
+    const libbgp_rib6_t *rib,
+    bgp_rib6_route_iter_fn fn,
+    void *ctx);
 
 #endif

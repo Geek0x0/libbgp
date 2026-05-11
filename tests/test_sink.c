@@ -136,6 +136,38 @@ LIBBGP_TEST(sink_pop_moves_dynamic_packet_into_zeroed_output)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_as4_context_parses_four_octet_as_path)
+{
+    const uint8_t update4b[] = {
+        0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu,
+        0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu,
+        0x00u, 0x24u, 0x02u,
+        0x00u, 0x00u,
+        0x00u, 0x0du,
+        0x40u, 0x02u, 0x0au, 0x02u, 0x02u,
+        0x00u, 0x00u, 0xfdu, 0xe8u,
+        0x00u, 0x01u, 0x00u, 0x02u
+    };
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+    libbgp_pattr_t *as_path;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init_as4(&sink, true));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, update4b, sizeof(update4b)));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_UPDATE, pkt.type);
+    as_path = libbgp_update_find_attr(&pkt.data.update, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as_path->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(65538u, as_path->data.as_path.segments[0].asns[1]);
+
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -145,7 +177,8 @@ int main(void)
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
         { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer },
-        { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output }
+        { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output },
+        { "sink_as4_context_parses_four_octet_as_path", sink_as4_context_parses_four_octet_as_path }
     };
 
     return libbgp_run_tests("sink", tests, LIBBGP_ARRAY_LEN(tests));

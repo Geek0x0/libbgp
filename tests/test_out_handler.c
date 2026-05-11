@@ -17,27 +17,27 @@ typedef struct reentrant_ctx {
     int called;
 } reentrant_ctx_t;
 
-static ssize_t test_send(void *ctx, const uint8_t *buf, size_t len)
+static libbgp_io_result_t test_send(void *ctx, const uint8_t *buf, size_t len)
 {
     io_ctx_t *io = (io_ctx_t *)ctx;
 
     io->send_called++;
     LIBBGP_ASSERT_EQ_U64((uintptr_t)io->expected_send, (uintptr_t)buf);
     LIBBGP_ASSERT_EQ_U64(io->send_len, len);
-    return (ssize_t)len;
+    return (libbgp_io_result_t)len;
 }
 
-static ssize_t test_recv(void *ctx, uint8_t *buf, size_t len)
+static libbgp_io_result_t test_recv(void *ctx, uint8_t *buf, size_t len)
 {
     io_ctx_t *io = (io_ctx_t *)ctx;
     size_t copy_len = io->recv_len < len ? io->recv_len : len;
 
     io->recv_called++;
     memcpy(buf, io->recv_data, copy_len);
-    return (ssize_t)copy_len;
+    return (libbgp_io_result_t)copy_len;
 }
 
-static ssize_t negative_send(void *ctx, const uint8_t *buf, size_t len)
+static libbgp_io_result_t negative_send(void *ctx, const uint8_t *buf, size_t len)
 {
     (void)ctx;
     (void)buf;
@@ -45,7 +45,7 @@ static ssize_t negative_send(void *ctx, const uint8_t *buf, size_t len)
     return -1;
 }
 
-static ssize_t negative_recv(void *ctx, uint8_t *buf, size_t len)
+static libbgp_io_result_t negative_recv(void *ctx, uint8_t *buf, size_t len)
 {
     (void)ctx;
     (void)buf;
@@ -53,14 +53,14 @@ static ssize_t negative_recv(void *ctx, uint8_t *buf, size_t len)
     return -1;
 }
 
-static ssize_t reentrant_send(void *ctx, const uint8_t *buf, size_t len)
+static libbgp_io_result_t reentrant_send(void *ctx, const uint8_t *buf, size_t len)
 {
     reentrant_ctx_t *reentrant = (reentrant_ctx_t *)ctx;
 
     (void)buf;
     reentrant->called++;
     libbgp_out_handler_set_fd(reentrant->handler, -1);
-    return (ssize_t)len;
+    return (libbgp_io_result_t)len;
 }
 
 LIBBGP_TEST(out_handler_custom_callbacks)

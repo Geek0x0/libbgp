@@ -70,10 +70,11 @@ static libbgp_packet_type_t packet_type_from_raw(uint8_t raw_type)
     }
 }
 
-libbgp_err_t libbgp_packet_parse(
+libbgp_err_t libbgp_packet_parse_as4(
     libbgp_packet_t *pkt,
     const uint8_t *buf,
     size_t len,
+    bool use_4b_asn,
     size_t *consumed)
 {
     libbgp_packet_t tmp;
@@ -110,7 +111,7 @@ libbgp_err_t libbgp_packet_parse(
         break;
     case LIBBGP_PACKET_UPDATE:
         libbgp_update_init(&tmp.data.update);
-        err = libbgp_update_parse(&tmp.data.update, body, body_len, &used);
+        err = libbgp_update_parse_as4(&tmp.data.update, body, body_len, use_4b_asn, &used);
         break;
     case LIBBGP_PACKET_NOTIFICATION:
         libbgp_notification_init(&tmp.data.notification);
@@ -148,6 +149,15 @@ libbgp_err_t libbgp_packet_parse(
         *consumed = wire_len;
     }
     return LIBBGP_OK;
+}
+
+libbgp_err_t libbgp_packet_parse(
+    libbgp_packet_t *pkt,
+    const uint8_t *buf,
+    size_t len,
+    size_t *consumed)
+{
+    return libbgp_packet_parse_as4(pkt, buf, len, false, consumed);
 }
 
 static libbgp_err_t packet_write_body(

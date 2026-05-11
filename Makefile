@@ -10,6 +10,8 @@ FLAG_STAMP_TMP := $(BUILD_ROOT)/.flags.threadsafe-$(THREADSAFE).tmp
 LIB_NAME := bgp
 STATIC_LIB := $(BUILD_DIR)/lib$(LIB_NAME).a
 SHARED_LIB := $(BUILD_DIR)/lib$(LIB_NAME).so
+STATIC_LIB_ALIAS := $(BUILD_ROOT)/lib$(LIB_NAME).a
+SHARED_LIB_ALIAS := $(BUILD_ROOT)/lib$(LIB_NAME).so
 
 PUBLIC_HEADERS := $(wildcard include/libbgp/*.h)
 
@@ -56,10 +58,13 @@ EXAMPLE_BINS := $(EXAMPLE_SRCS:examples/%.c=$(BUILD_DIR)/examples/%)
 
 DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d)
 
-.PHONY: all clean test install headers examples FORCE
+.PHONY: all clean test install headers examples symbol-check verify release-check FORCE
 .SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS)
 
-all: $(STATIC_LIB) $(SHARED_LIB)
+all: $(STATIC_LIB) $(SHARED_LIB) $(STATIC_LIB_ALIAS) $(SHARED_LIB_ALIAS)
+
+$(BUILD_ROOT):
+	mkdir -p $(BUILD_ROOT)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -78,6 +83,12 @@ $(STATIC_LIB): $(LIB_OBJS) | $(BUILD_DIR)
 $(SHARED_LIB): $(LIB_OBJS) | $(BUILD_DIR)
 	$(CC) -shared $(LIB_OBJS) $(LDFLAGS_EXTRA) -o $@
 
+$(STATIC_LIB_ALIAS): $(STATIC_LIB) | $(BUILD_ROOT)
+	cp $< $@
+
+$(SHARED_LIB_ALIAS): $(SHARED_LIB) | $(BUILD_ROOT)
+	cp $< $@
+
 $(BUILD_DIR)/tests/%: $(BUILD_DIR)/tests/%.o $(TEST_COMMON_OBJS) $(STATIC_LIB)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(TEST_COMMON_OBJS) $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
@@ -90,6 +101,29 @@ test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do $$t; done
 
 examples: $(EXAMPLE_BINS)
+
+symbol-check: all
+	@bad_static="$$(nm -g $(STATIC_LIB) | awk '$$2 ~ /^[TDB]$$/ && $$3 !~ /^(libbgp_|bgp_)/ {print}')"; \
+	bad_private_static="$$(nm -g $(STATIC_LIB) | awk '$$2 ~ /^[TDB]$$/ && $$3 ~ /^libbgp_rib[46]_(saved_route|insert_save|withdraw_exact|restore_saved|exact_update)/ {print}')"; \
+	bad_shared="$$(nm -D --defined-only $(SHARED_LIB) | awk '$$2 ~ /^[TDB]$$/ && $$3 !~ /^libbgp_/ {print}')"; \
+	if test -n "$$bad_static" || test -n "$$bad_private_static" || test -n "$$bad_shared"; then \
+		if test -n "$$bad_static"; then printf '%s\n%s\n' "Unexpected static symbols:" "$$bad_static"; fi; \
+		if test -n "$$bad_private_static"; then printf '%s\n%s\n' "Private RIB helpers use public prefix:" "$$bad_private_static"; fi; \
+		if test -n "$$bad_shared"; then printf '%s\n%s\n' "Unexpected shared symbols:" "$$bad_shared"; fi; \
+		exit 1; \
+	fi
+
+verify:
+	$(MAKE) clean
+	$(MAKE) all
+	$(MAKE) headers
+	$(MAKE) test
+	$(MAKE) THREADSAFE=1 test
+	$(MAKE) CFLAGS_EXTRA="-fsanitize=address,undefined -g" LDFLAGS_EXTRA="-fsanitize=address,undefined" test
+	$(MAKE) examples
+	$(MAKE) symbol-check
+
+release-check: verify
 
 headers: all
 	@set -e; for h in $(PUBLIC_HEADERS); do \

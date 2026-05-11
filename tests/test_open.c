@@ -108,6 +108,7 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
 {
     const uint8_t short_body[] = { 4u, 0u, 1u };
     const uint8_t bad_opt_len[] = { 4u, 0u, 1u, 0u, 90u, 1u, 2u, 3u, 4u, 2u, 99u };
+    const uint8_t unknown_opt_param[] = { 4u, 0u, 1u, 0u, 90u, 1u, 2u, 3u, 4u, 3u, 99u, 1u, 0u };
     uint8_t out[9];
     size_t marker = 99u;
     libbgp_open_msg_t msg;
@@ -117,6 +118,7 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, NULL, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, short_body, sizeof(short_body), &marker));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, bad_opt_len, sizeof(bad_opt_len), &marker));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_TYPE, libbgp_open_parse(&msg, unknown_opt_param, sizeof(unknown_opt_param), &marker));
     LIBBGP_ASSERT_EQ_U64(99u, marker);
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_write(NULL, out, sizeof(out), &marker));

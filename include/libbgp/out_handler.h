@@ -3,12 +3,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>
 
 #include "libbgp/types.h"
 
-typedef ssize_t (*libbgp_io_send_fn)(void *ctx, const uint8_t *buf, size_t len);
-typedef ssize_t (*libbgp_io_recv_fn)(void *ctx, uint8_t *buf, size_t len);
+/* Signed byte count returned by custom I/O callbacks; negative means failure. */
+typedef ptrdiff_t libbgp_io_result_t;
+typedef libbgp_io_result_t (*libbgp_io_send_fn)(void *ctx, const uint8_t *buf, size_t len);
+typedef libbgp_io_result_t (*libbgp_io_recv_fn)(void *ctx, uint8_t *buf, size_t len);
 
 typedef struct libbgp_io_ops {
     libbgp_io_send_fn send_fn;

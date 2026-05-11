@@ -394,10 +394,25 @@ libbgp_err_t libbgp_rib4_insert_local(
     int32_t weight)
 {
     libbgp_rib4_route_t route;
+    libbgp_pattr_t *attrs[3] = { NULL, NULL, NULL };
+    libbgp_err_t err;
 
     if (prefix == NULL) {
         return LIBBGP_ERR_INVALID;
     }
+    attrs[0] = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    attrs[1] = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    attrs[2] = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+    if (attrs[0] == NULL || attrs[1] == NULL || attrs[2] == NULL) {
+        libbgp_pattr_unref(attrs[0]);
+        libbgp_pattr_unref(attrs[1]);
+        libbgp_pattr_unref(attrs[2]);
+        return LIBBGP_ERR_NOMEM;
+    }
+    attrs[0]->data.origin.origin = 0u;
+    attrs[1]->data.as_path.is_4b = true;
+    attrs[2]->data.next_hop.next_hop = next_hop;
+
     memset(&route, 0, sizeof(route));
     route.prefix = *prefix;
     route.next_hop = next_hop;
@@ -405,18 +420,24 @@ libbgp_err_t libbgp_rib4_insert_local(
     route.local_pref = 100u;
     route.origin = 0u;
     route.is_ibgp = false;
-    return libbgp_rib4_insert(rib, &route);
+    route.attrs = attrs;
+    route.attr_count = 3u;
+    err = libbgp_rib4_insert(rib, &route);
+    libbgp_pattr_unref(attrs[0]);
+    libbgp_pattr_unref(attrs[1]);
+    libbgp_pattr_unref(attrs[2]);
+    return err;
 }
 
 libbgp_err_t libbgp_rib4_insert(libbgp_rib4_t *rib, const libbgp_rib4_route_t *route)
 {
-    return libbgp_rib4_insert_save_replaced(rib, route, NULL, NULL, NULL);
+    return bgp_rib4_insert_save_replaced(rib, route, NULL, NULL, NULL);
 }
 
-libbgp_err_t libbgp_rib4_insert_save_replaced(
+libbgp_err_t bgp_rib4_insert_save_replaced(
     libbgp_rib4_t *rib,
     const libbgp_rib4_route_t *route,
-    libbgp_rib4_saved_route_t *replaced,
+    bgp_rib4_saved_route_t *replaced,
     bool *had_replaced,
     uint64_t *update_id)
 {
@@ -441,9 +462,14 @@ libbgp_err_t libbgp_rib4_insert_save_replaced(
     }
 
     bgp_lock(&impl->lock);
-    err = rib4_route_clone(impl, route, &copy, &key);
+    old = rib4_find_locked(impl, route->source_router_id, &route->prefix);
+    if (route->source_router_id == 0u && old != NULL &&
+        replaced == NULL && had_replaced == NULL && update_id == NULL) {
+        err = LIBBGP_ERR_EXISTS;
+    } else {
+        err = rib4_route_clone(impl, route, &copy, &key);
+    }
     if (err == LIBBGP_OK) {
-        old = rib4_find_locked(impl, copy->source_router_id, &copy->prefix);
         err = bgp_hashmap_insert(&impl->routes, key, copy);
         if (err != LIBBGP_OK) {
             bgp_free(key);
@@ -614,7 +640,34 @@ size_t libbgp_rib4_route_count(const libbgp_rib4_t *rib)
     return count;
 }
 
-void libbgp_rib4_saved_route_destroy(libbgp_rib4_saved_route_t *saved)
+libbgp_err_t bgp_rib4_foreach_route(
+    const libbgp_rib4_t *rib,
+    bgp_rib4_route_iter_fn fn,
+    void *ctx)
+{
+    rib4_impl_t *impl = rib4_impl_get(rib);
+    bool keep_going = true;
+    size_t i;
+
+    if (impl == NULL || fn == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    bgp_lock(&impl->lock);
+    for (i = 0u; keep_going && i < impl->routes.bucket_count; i++) {
+        bgp_hashmap_entry_t *entry;
+
+        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+            keep_going = fn((const libbgp_rib4_route_t *)entry->value, ctx);
+            if (!keep_going) {
+                break;
+            }
+        }
+    }
+    bgp_unlock(&impl->lock);
+    return LIBBGP_OK;
+}
+
+void bgp_rib4_saved_route_destroy(bgp_rib4_saved_route_t *saved)
 {
     if (saved == NULL || saved->entry == NULL) {
         return;
@@ -623,8 +676,8 @@ void libbgp_rib4_saved_route_destroy(libbgp_rib4_saved_route_t *saved)
     saved->entry = NULL;
 }
 
-libbgp_err_t libbgp_rib4_saved_route_update_id(
-    const libbgp_rib4_saved_route_t *saved,
+libbgp_err_t bgp_rib4_saved_route_update_id(
+    const bgp_rib4_saved_route_t *saved,
     uint64_t *update_id)
 {
     const bgp_hashmap_entry_t *entry;
@@ -648,7 +701,7 @@ libbgp_err_t libbgp_rib4_saved_route_update_id(
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_rib4_exact_update_id(
+libbgp_err_t bgp_rib4_exact_update_id(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
@@ -673,7 +726,7 @@ libbgp_err_t libbgp_rib4_exact_update_id(
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_rib4_withdraw_exact_if_update_id(
+libbgp_err_t bgp_rib4_withdraw_exact_if_update_id(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
@@ -697,11 +750,11 @@ libbgp_err_t libbgp_rib4_withdraw_exact_if_update_id(
     return err;
 }
 
-libbgp_err_t libbgp_rib4_withdraw_exact_save(
+libbgp_err_t bgp_rib4_withdraw_exact_save(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
-    libbgp_rib4_saved_route_t *saved,
+    bgp_rib4_saved_route_t *saved,
     bool *had_route)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
@@ -733,10 +786,10 @@ libbgp_err_t libbgp_rib4_withdraw_exact_save(
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_rib4_restore_saved_if_absent(
+libbgp_err_t bgp_rib4_restore_saved_if_absent(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
-    libbgp_rib4_saved_route_t *saved)
+    bgp_rib4_saved_route_t *saved)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
     bgp_hashmap_entry_t *entry;

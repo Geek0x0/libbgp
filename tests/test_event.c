@@ -87,6 +87,43 @@ LIBBGP_TEST(event_publish_exact_type_invokes_callbacks_in_order)
     libbgp_event_bus_destroy(&bus);
 }
 
+LIBBGP_TEST(event_publish_from_skips_publisher_subscription)
+{
+    libbgp_event_bus_t bus;
+    callback_record_t record;
+    callback_ctx_t ctx1;
+    callback_ctx_t ctx2;
+    libbgp_event_t event;
+    uint64_t id1 = 0u;
+    uint64_t id2 = 0u;
+
+    memset(&record, 0, sizeof(record));
+    ctx1.record = &record;
+    ctx1.marker = 11;
+    ctx2.record = &record;
+    ctx2.marker = 22;
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx1, &id1));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx2, &id2));
+
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish_from(&bus, id1, &event));
+    LIBBGP_ASSERT_EQ_U64(1u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(22, record.order[0]);
+
+    memset(&record, 0, sizeof(record));
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_event_bus_publish_from(&bus, 0u, &event));
+    LIBBGP_ASSERT_EQ_U64(2u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(11, record.order[0]);
+    LIBBGP_ASSERT_EQ_I64(22, record.order[1]);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
 LIBBGP_TEST(event_publish_different_type_does_not_notify)
 {
     libbgp_event_bus_t bus;
@@ -207,6 +244,7 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "event_subscribe_returns_ids_and_counts_subscribers", event_subscribe_returns_ids_and_counts_subscribers },
         { "event_publish_exact_type_invokes_callbacks_in_order", event_publish_exact_type_invokes_callbacks_in_order },
+        { "event_publish_from_skips_publisher_subscription", event_publish_from_skips_publisher_subscription },
         { "event_publish_different_type_does_not_notify", event_publish_different_type_does_not_notify },
         { "event_custom_subscriber_only_receives_custom_events", event_custom_subscriber_only_receives_custom_events },
         { "event_unsubscribe_removes_subscriber_and_reports_absent_id", event_unsubscribe_removes_subscriber_and_reports_absent_id },

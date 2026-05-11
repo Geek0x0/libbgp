@@ -80,6 +80,38 @@ LIBBGP_TEST(packet_parse_accepts_unsupported_open_version)
     libbgp_packet_destroy(&pkt);
 }
 
+LIBBGP_TEST(packet_parse_as4_uses_four_octet_update_context)
+{
+    const uint8_t update4b[] = {
+        0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu,
+        0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu,
+        0x00u, 0x24u, 0x02u,
+        0x00u, 0x00u,
+        0x00u, 0x0du,
+        0x40u, 0x02u, 0x0au, 0x02u, 0x02u,
+        0x00u, 0x00u, 0xfdu, 0xe8u,
+        0x00u, 0x01u, 0x00u, 0x02u
+    };
+    uint8_t out[sizeof(update4b)];
+    size_t used = 0u;
+    size_t out_len = 0u;
+    libbgp_packet_t pkt;
+    libbgp_pattr_t *as_path;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse_as4(&pkt, update4b, sizeof(update4b), true, &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(update4b), used);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_UPDATE, pkt.type);
+    as_path = libbgp_update_find_attr(&pkt.data.update, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as_path->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(65538u, as_path->data.as_path.segments[0].asns[1]);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(update4b), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(update4b, out, sizeof(update4b));
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(packet_rejects_marker_length_and_keepalive_body)
 {
     uint8_t bad_marker[LIBBGP_FIXTURE_KEEPALIVE_LEN];
@@ -195,6 +227,7 @@ int main(void)
         { "keepalive_body_parse_write_and_packet_fixture", keepalive_body_parse_write_and_packet_fixture },
         { "packet_parse_write_known_fixtures", packet_parse_write_known_fixtures },
         { "packet_parse_accepts_unsupported_open_version", packet_parse_accepts_unsupported_open_version },
+        { "packet_parse_as4_uses_four_octet_update_context", packet_parse_as4_uses_four_octet_update_context },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
         { "packet_unknown_type_preserves_raw_body_and_write_small_output", packet_unknown_type_preserves_raw_body_and_write_small_output },
         { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },

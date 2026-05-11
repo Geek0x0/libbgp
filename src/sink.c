@@ -24,6 +24,7 @@ typedef struct sink_impl {
     libbgp_packet_t *packets;
     size_t packet_count;
     size_t packet_cap;
+    bool use_4b_asn;
     bgp_lock_t lock;
 } sink_impl_t;
 
@@ -164,7 +165,7 @@ static libbgp_err_t sink_process_locked(sink_impl_t *impl)
         }
         libbgp_packet_init(&pkt);
         consumed = 0u;
-        err = libbgp_packet_parse(&pkt, impl->buf, (size_t)wire_len, &consumed);
+        err = libbgp_packet_parse_as4(&pkt, impl->buf, (size_t)wire_len, impl->use_4b_asn, &consumed);
         if (err != LIBBGP_OK) {
             libbgp_packet_destroy(&pkt);
             sink_drop_buffer_prefix(impl, (size_t)wire_len);
@@ -183,7 +184,7 @@ static libbgp_err_t sink_process_locked(sink_impl_t *impl)
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_sink_init(libbgp_sink_t *sink)
+libbgp_err_t libbgp_sink_init_as4(libbgp_sink_t *sink, bool use_4b_asn)
 {
     sink_impl_t *impl;
 
@@ -195,11 +196,17 @@ libbgp_err_t libbgp_sink_init(libbgp_sink_t *sink)
     if (impl == NULL) {
         return LIBBGP_ERR_NOMEM;
     }
+    impl->use_4b_asn = use_4b_asn;
     bgp_lock_init(&impl->lock);
     sink_acquire_global();
     sink->impl = impl;
     sink_release_global();
     return LIBBGP_OK;
+}
+
+libbgp_err_t libbgp_sink_init(libbgp_sink_t *sink)
+{
+    return libbgp_sink_init_as4(sink, false);
 }
 
 void libbgp_sink_destroy(libbgp_sink_t *sink)

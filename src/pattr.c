@@ -1,6 +1,8 @@
 #include "libbgp/pattr.h"
 
 #include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "internal.h"
@@ -163,15 +165,33 @@ static bool pattr_known_flags_valid(libbgp_pattr_type_t type, uint8_t flags)
         LIBBGP_PATTR_FLAG_TRANSITIVE |
         LIBBGP_PATTR_FLAG_PARTIAL |
         LIBBGP_PATTR_FLAG_EXTENDED_LENGTH;
-    uint8_t base = (uint8_t)(flags & (uint8_t)~LIBBGP_PATTR_FLAG_EXTENDED_LENGTH);
+    uint8_t base = (uint8_t)(flags &
+        (uint8_t)~(LIBBGP_PATTR_FLAG_EXTENDED_LENGTH | LIBBGP_PATTR_FLAG_PARTIAL));
+    uint8_t defaults;
 
-    if (type == LIBBGP_PATTR_UNKNOWN) {
-        return true;
-    }
     if ((flags & (uint8_t)~allowed) != 0u) {
         return false;
     }
-    return base == pattr_default_flags(type);
+    if (type == LIBBGP_PATTR_UNKNOWN) {
+        if ((flags & LIBBGP_PATTR_FLAG_OPTIONAL) == 0u) {
+            return false;
+        }
+        if ((flags & LIBBGP_PATTR_FLAG_PARTIAL) != 0u &&
+            (flags & LIBBGP_PATTR_FLAG_TRANSITIVE) == 0u) {
+            return false;
+        }
+        return true;
+    }
+    defaults = pattr_default_flags(type);
+    if (base != defaults) {
+        return false;
+    }
+    if ((flags & LIBBGP_PATTR_FLAG_PARTIAL) != 0u &&
+        (defaults & (LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_TRANSITIVE)) !=
+            (LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_TRANSITIVE)) {
+        return false;
+    }
+    return true;
 }
 
 static void pattr_free_data(libbgp_pattr_t *attr)
@@ -533,10 +553,11 @@ static libbgp_err_t parse_mp_reach_ipv6(
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_pattr_parse(
+libbgp_err_t libbgp_pattr_parse_as4(
     libbgp_pattr_t *attr,
     const uint8_t *buf,
     size_t len,
+    bool use_4b_asn,
     size_t *consumed)
 {
     libbgp_pattr_t tmp;
@@ -587,7 +608,7 @@ libbgp_err_t libbgp_pattr_parse(
         }
         break;
     case LIBBGP_PATTR_AS_PATH:
-        err = parse_as_path(&tmp, value, value_len, false);
+        err = parse_as_path(&tmp, value, value_len, use_4b_asn);
         break;
     case LIBBGP_PATTR_NEXT_HOP:
         if (value_len != 4u) {
@@ -616,8 +637,12 @@ libbgp_err_t libbgp_pattr_parse(
         }
         break;
     case LIBBGP_PATTR_AGGREGATOR:
-        if (value_len != 6u) {
+        if (value_len != (use_4b_asn ? 8u : 6u)) {
             err = LIBBGP_ERR_BAD_LEN;
+        } else if (use_4b_asn) {
+            tmp.data.aggregator.asn = bgp_get_be32(value);
+            tmp.data.aggregator.router_id = bgp_get_be32(value + 4u);
+            tmp.data.aggregator.is_4b = true;
         } else {
             tmp.data.aggregator.asn = bgp_get_be16(value);
             tmp.data.aggregator.router_id = bgp_get_be32(value + 2u);
@@ -667,6 +692,15 @@ libbgp_err_t libbgp_pattr_parse(
     return LIBBGP_OK;
 }
 
+libbgp_err_t libbgp_pattr_parse(
+    libbgp_pattr_t *attr,
+    const uint8_t *buf,
+    size_t len,
+    size_t *consumed)
+{
+    return libbgp_pattr_parse_as4(attr, buf, len, false, consumed);
+}
+
 static libbgp_err_t add_size(size_t *acc, size_t add)
 {
     if (*acc > SIZE_MAX - add) {
@@ -695,8 +729,7 @@ static libbgp_err_t pattr_value_len(const libbgp_pattr_t *attr, size_t *value_le
         break;
     case LIBBGP_PATTR_AS_PATH:
     case LIBBGP_PATTR_AS4_PATH:
-        if ((attr->type == LIBBGP_PATTR_AS_PATH && attr->data.as_path.is_4b) ||
-            (attr->type == LIBBGP_PATTR_AS4_PATH && !attr->data.as_path.is_4b)) {
+        if (attr->type == LIBBGP_PATTR_AS4_PATH && !attr->data.as_path.is_4b) {
             return LIBBGP_ERR_BAD_LEN;
         }
         if (attr->data.as_path.segment_count != 0u &&
@@ -728,8 +761,8 @@ static libbgp_err_t pattr_value_len(const libbgp_pattr_t *attr, size_t *value_le
         len = 0u;
         break;
     case LIBBGP_PATTR_AGGREGATOR:
-        len = 6u;
-        if (attr->data.aggregator.asn > 65535u) {
+        len = attr->data.aggregator.is_4b ? 8u : 6u;
+        if (!attr->data.aggregator.is_4b && attr->data.aggregator.asn > 65535u) {
             return LIBBGP_ERR_BAD_LEN;
         }
         break;
@@ -873,8 +906,13 @@ static libbgp_err_t write_value(const libbgp_pattr_t *attr, uint8_t *buf, size_t
     case LIBBGP_PATTR_ATOMIC_AGGREGATE:
         break;
     case LIBBGP_PATTR_AGGREGATOR:
-        bgp_put_be16(buf, (uint16_t)attr->data.aggregator.asn);
-        bgp_put_be32(buf + 2u, attr->data.aggregator.router_id);
+        if (attr->data.aggregator.is_4b) {
+            bgp_put_be32(buf, attr->data.aggregator.asn);
+            bgp_put_be32(buf + 4u, attr->data.aggregator.router_id);
+        } else {
+            bgp_put_be16(buf, (uint16_t)attr->data.aggregator.asn);
+            bgp_put_be32(buf + 2u, attr->data.aggregator.router_id);
+        }
         break;
     case LIBBGP_PATTR_COMMUNITY:
         for (i = 0u; i < attr->data.community.count; i++) {
@@ -971,5 +1009,221 @@ libbgp_err_t libbgp_pattr_write(
         *out_len = header_len + value_len;
     }
 
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t pattr_format_append(char *buf, size_t buf_len, size_t *pos, const char *fmt, ...)
+{
+    char dummy[1];
+    va_list ap;
+    int wrote;
+
+    if (pos == NULL || fmt == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    va_start(ap, fmt);
+    if (buf != NULL && *pos < buf_len) {
+        wrote = vsnprintf(buf + *pos, buf_len - *pos, fmt, ap);
+    } else {
+        wrote = vsnprintf(dummy, 0u, fmt, ap);
+    }
+    va_end(ap);
+    if (wrote < 0) {
+        return LIBBGP_ERR_INVALID;
+    }
+    *pos += (size_t)wrote;
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t pattr_format_as_path(const libbgp_pattr_t *attr, char *buf, size_t buf_len, size_t *pos)
+{
+    size_t i;
+    libbgp_err_t err;
+
+    err = pattr_format_append(
+        buf,
+        buf_len,
+        pos,
+        " is_4b=%u segments=%zu",
+        attr->data.as_path.is_4b ? 1u : 0u,
+        attr->data.as_path.segment_count);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    if (attr->data.as_path.segment_count != 0u && attr->data.as_path.segments == NULL) {
+        return pattr_format_append(buf, buf_len, pos, " malformed");
+    }
+    for (i = 0u; i < attr->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *segment = &attr->data.as_path.segments[i];
+        size_t j;
+
+        err = pattr_format_append(buf, buf_len, pos, " segment[%zu]={type=%u asns=[", i, segment->type);
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+        if (segment->asn_count != 0u && segment->asns == NULL) {
+            err = pattr_format_append(buf, buf_len, pos, "malformed");
+        } else {
+            for (j = 0u; j < segment->asn_count; j++) {
+                err = pattr_format_append(
+                    buf,
+                    buf_len,
+                    pos,
+                    "%s%u",
+                    j == 0u ? "" : ",",
+                    segment->asns[j]);
+                if (err != LIBBGP_OK) {
+                    return err;
+                }
+            }
+        }
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+        err = pattr_format_append(buf, buf_len, pos, "]}");
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+    }
+    return LIBBGP_OK;
+}
+
+static libbgp_err_t pattr_format_u32_list(
+    char *buf,
+    size_t buf_len,
+    size_t *pos,
+    const uint32_t *values,
+    size_t count)
+{
+    size_t i;
+    libbgp_err_t err;
+
+    if (count != 0u && values == NULL) {
+        return pattr_format_append(buf, buf_len, pos, " malformed");
+    }
+    err = pattr_format_append(buf, buf_len, pos, " values=[");
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    for (i = 0u; i < count; i++) {
+        err = pattr_format_append(buf, buf_len, pos, "%s%u", i == 0u ? "" : ",", values[i]);
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+    }
+    return pattr_format_append(buf, buf_len, pos, "]");
+}
+
+libbgp_err_t libbgp_pattr_format(
+    const libbgp_pattr_t *attr,
+    char *buf,
+    size_t buf_len,
+    size_t *out_len)
+{
+    size_t pos = 0u;
+    libbgp_err_t err;
+
+    if (out_len != NULL) {
+        *out_len = 0u;
+    }
+    if (attr == NULL || (buf == NULL && buf_len != 0u)) {
+        return LIBBGP_ERR_INVALID;
+    }
+    err = pattr_format_append(
+        buf,
+        buf_len,
+        &pos,
+        "%s flags=0x%02x code=%u",
+        libbgp_pattr_type_name(attr->type),
+        attr->flags,
+        attr->type_code);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    switch (attr->type) {
+    case LIBBGP_PATTR_ORIGIN:
+        err = pattr_format_append(buf, buf_len, &pos, " origin=%u", attr->data.origin.origin);
+        break;
+    case LIBBGP_PATTR_AS_PATH:
+    case LIBBGP_PATTR_AS4_PATH:
+        err = pattr_format_as_path(attr, buf, buf_len, &pos);
+        break;
+    case LIBBGP_PATTR_NEXT_HOP:
+        err = pattr_format_append(buf, buf_len, &pos, " next_hop=0x%08x", attr->data.next_hop.next_hop);
+        break;
+    case LIBBGP_PATTR_MED:
+        err = pattr_format_append(buf, buf_len, &pos, " med=%u", attr->data.med.value);
+        break;
+    case LIBBGP_PATTR_LOCAL_PREF:
+        err = pattr_format_append(buf, buf_len, &pos, " local_pref=%u", attr->data.local_pref.value);
+        break;
+    case LIBBGP_PATTR_ATOMIC_AGGREGATE:
+        err = pattr_format_append(buf, buf_len, &pos, " atomic=1");
+        break;
+    case LIBBGP_PATTR_AGGREGATOR:
+    case LIBBGP_PATTR_AS4_AGGREGATOR:
+        err = pattr_format_append(
+            buf,
+            buf_len,
+            &pos,
+            " asn=%u router_id=0x%08x is_4b=%u",
+            attr->data.aggregator.asn,
+            attr->data.aggregator.router_id,
+            attr->data.aggregator.is_4b ? 1u : 0u);
+        break;
+    case LIBBGP_PATTR_COMMUNITY:
+        err = pattr_format_append(buf, buf_len, &pos, " count=%zu", attr->data.community.count);
+        if (err == LIBBGP_OK) {
+            err = pattr_format_u32_list(
+                buf,
+                buf_len,
+                &pos,
+                attr->data.community.values,
+                attr->data.community.count);
+        }
+        break;
+    case LIBBGP_PATTR_MP_REACH_IPV6:
+        err = pattr_format_append(
+            buf,
+            buf_len,
+            &pos,
+            " nexthop_len=%zu nlri_count=%zu",
+            attr->data.mp_reach_ipv6.nexthop_len,
+            attr->data.mp_reach_ipv6.nlri_count);
+        if (err == LIBBGP_OK &&
+            attr->data.mp_reach_ipv6.nlri_count != 0u &&
+            attr->data.mp_reach_ipv6.nlri == NULL) {
+            err = pattr_format_append(buf, buf_len, &pos, " malformed");
+        }
+        break;
+    case LIBBGP_PATTR_MP_UNREACH_IPV6:
+        err = pattr_format_append(
+            buf,
+            buf_len,
+            &pos,
+            " withdrawn_count=%zu",
+            attr->data.mp_unreach_ipv6.withdrawn_count);
+        if (err == LIBBGP_OK &&
+            attr->data.mp_unreach_ipv6.withdrawn_count != 0u &&
+            attr->data.mp_unreach_ipv6.withdrawn == NULL) {
+            err = pattr_format_append(buf, buf_len, &pos, " malformed");
+        }
+        break;
+    case LIBBGP_PATTR_UNKNOWN:
+        err = pattr_format_append(buf, buf_len, &pos, " len=%zu", attr->data.unknown.len);
+        break;
+    default:
+        err = pattr_format_append(buf, buf_len, &pos, " invalid=1");
+        break;
+    }
+    if (out_len != NULL) {
+        *out_len = pos;
+    }
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    if (buf == NULL || buf_len == 0u || pos >= buf_len) {
+        return LIBBGP_ERR_BUFFER;
+    }
     return LIBBGP_OK;
 }

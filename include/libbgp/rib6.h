@@ -23,6 +23,8 @@ typedef struct libbgp_rib6_route {
     uint32_t source_router_id;
     /* IPv6 next hop stored as 16 network-byte-order bytes. */
     uint8_t next_hop[16];
+    /* Optional IPv6 link-local next hop; all zero when absent. */
+    uint8_t next_hop_linklocal[16];
     int32_t weight;
     bool is_ibgp;
     uint32_t local_pref;

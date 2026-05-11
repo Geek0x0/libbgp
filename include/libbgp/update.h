@@ -1,6 +1,7 @@
 #ifndef LIBBGP_UPDATE_H
 #define LIBBGP_UPDATE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -23,11 +24,24 @@ LIBBGP_API libbgp_err_t libbgp_update_add_withdrawn(libbgp_update_msg_t *msg, co
 LIBBGP_API libbgp_err_t libbgp_update_add_attr(libbgp_update_msg_t *msg, libbgp_pattr_t *attr);
 LIBBGP_API libbgp_err_t libbgp_update_add_nlri(libbgp_update_msg_t *msg, const libbgp_prefix4_t *p);
 LIBBGP_API libbgp_pattr_t *libbgp_update_find_attr(const libbgp_update_msg_t *msg, libbgp_pattr_type_t type);
+LIBBGP_API libbgp_err_t libbgp_update_validate(const libbgp_update_msg_t *msg);
+LIBBGP_API libbgp_err_t libbgp_update_prepend_asn(libbgp_update_msg_t *msg, uint32_t asn, bool use_4b_asn);
+LIBBGP_API libbgp_err_t libbgp_update_restore_as_path(libbgp_update_msg_t *msg);
+LIBBGP_API libbgp_err_t libbgp_update_downgrade_as_path(libbgp_update_msg_t *msg);
+LIBBGP_API libbgp_err_t libbgp_update_restore_aggregator(libbgp_update_msg_t *msg);
+LIBBGP_API libbgp_err_t libbgp_update_downgrade_aggregator(libbgp_update_msg_t *msg);
 
 LIBBGP_API libbgp_err_t libbgp_update_parse(
     libbgp_update_msg_t *msg,
     const uint8_t *buf,
     size_t len,
+    size_t *consumed);
+
+LIBBGP_API libbgp_err_t libbgp_update_parse_as4(
+    libbgp_update_msg_t *msg,
+    const uint8_t *buf,
+    size_t len,
+    bool use_4b_asn,
     size_t *consumed);
 
 LIBBGP_API libbgp_err_t libbgp_update_write(

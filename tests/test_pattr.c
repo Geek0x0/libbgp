@@ -132,6 +132,19 @@ static void assert_roundtrip(libbgp_pattr_t *attr, const uint8_t *wire, size_t w
     LIBBGP_ASSERT_BYTES_EQ(wire, out, wire_len);
 }
 
+static void assert_roundtrip_as4(libbgp_pattr_t *attr, const uint8_t *wire, size_t wire_len)
+{
+    uint8_t out[512];
+    size_t used = 0u;
+    size_t out_len = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse_as4(attr, wire, wire_len, true, &used));
+    LIBBGP_ASSERT_EQ_U64(wire_len, used);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(attr, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(wire_len, out_len);
+    LIBBGP_ASSERT_BYTES_EQ(wire, out, wire_len);
+}
+
 LIBBGP_TEST(pattr_parse_write_fixed_scalar_attributes)
 {
     const uint8_t origin[] = { 0x40u, 1u, 1u, 2u };
@@ -171,6 +184,10 @@ LIBBGP_TEST(pattr_parse_rejects_malformed_known_flags)
     const uint8_t origin_optional[] = { 0x80u, 1u, 1u, 0u };
     const uint8_t origin_unrelated_bit[] = { 0x41u, 1u, 1u, 0u };
     const uint8_t med_transitive[] = { 0x40u, 4u, 4u, 0u, 0u, 0u, 1u };
+    const uint8_t med_partial[] = { 0xa0u, 4u, 4u, 0u, 0u, 0u, 1u };
+    const uint8_t community_partial[] = {
+        0xe0u, 8u, 4u, 0u, 0u, 0u, 1u
+    };
     const uint8_t mp_reach_transitive[] = {
         0xc0u, 14u, 21u,
         0u, 2u, 1u, 16u,
@@ -178,16 +195,23 @@ LIBBGP_TEST(pattr_parse_rejects_malformed_known_flags)
         0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
         0u
     };
-    const uint8_t unknown_arbitrary_flags[] = { 0x8fu, 99u, 1u, 0xaau };
+    const uint8_t unknown_well_known[] = { 0x40u, 99u, 1u, 0xaau };
+    const uint8_t unknown_optional[] = { 0x80u, 99u, 1u, 0xaau };
+    const uint8_t unknown_unrelated_bit[] = { 0x8fu, 99u, 1u, 0xaau };
     libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
 
     LIBBGP_ASSERT(attr != NULL);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, origin_optional, sizeof(origin_optional), NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, origin_unrelated_bit, sizeof(origin_unrelated_bit), NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, med_transitive, sizeof(med_transitive), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, med_partial, sizeof(med_partial), NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, mp_reach_transitive, sizeof(mp_reach_transitive), NULL));
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse(attr, unknown_arbitrary_flags, sizeof(unknown_arbitrary_flags), NULL));
-    LIBBGP_ASSERT_EQ_U64(0x8fu, attr->flags);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, unknown_well_known, sizeof(unknown_well_known), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, unknown_unrelated_bit, sizeof(unknown_unrelated_bit), NULL));
+    assert_roundtrip(attr, unknown_optional, sizeof(unknown_optional));
+    LIBBGP_ASSERT_EQ_U64(0x80u, attr->flags);
+    assert_roundtrip(attr, community_partial, sizeof(community_partial));
+    LIBBGP_ASSERT_EQ_U64(0xe0u, attr->flags);
 
     libbgp_pattr_unref(attr);
 }
@@ -196,6 +220,9 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
 {
     const uint8_t aggregator[] = {
         0xc0u, 7u, 6u, 0xfdu, 0xe8u, 192u, 0u, 2u, 9u
+    };
+    const uint8_t aggregator_4b[] = {
+        0xc0u, 7u, 8u, 0u, 1u, 0u, 1u, 192u, 0u, 2u, 9u
     };
     const uint8_t as4_aggregator[] = {
         0xc0u, 18u, 8u, 0u, 1u, 0u, 1u, 198u, 51u, 100u, 1u
@@ -209,6 +236,10 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     };
     const uint8_t as4_path[] = {
         0xc0u, 17u, 10u, 2u, 2u,
+        0u, 1u, 0u, 1u, 0u, 1u, 0u, 2u
+    };
+    const uint8_t as_path_4b[] = {
+        0x40u, 2u, 10u, 2u, 2u,
         0u, 1u, 0u, 1u, 0u, 1u, 0u, 2u
     };
     const uint8_t short_as_path[] = { 0x40u, 2u, 4u, 2u, 2u, 0u, 1u };
@@ -225,6 +256,9 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     assert_roundtrip(attr, aggregator, sizeof(aggregator));
     LIBBGP_ASSERT_EQ_U64(65000u, attr->data.aggregator.asn);
     LIBBGP_ASSERT(!attr->data.aggregator.is_4b);
+    assert_roundtrip_as4(attr, aggregator_4b, sizeof(aggregator_4b));
+    LIBBGP_ASSERT_EQ_U64(65537u, attr->data.aggregator.asn);
+    LIBBGP_ASSERT(attr->data.aggregator.is_4b);
     assert_roundtrip(attr, as4_aggregator, sizeof(as4_aggregator));
     LIBBGP_ASSERT_EQ_U64(65537u, attr->data.aggregator.asn);
     LIBBGP_ASSERT(attr->data.aggregator.is_4b);
@@ -236,6 +270,10 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     LIBBGP_ASSERT(!attr->data.as_path.is_4b);
     LIBBGP_ASSERT_EQ_U64(65000u, attr->data.as_path.segments[0].asns[0]);
     assert_roundtrip(attr, as4_path, sizeof(as4_path));
+    LIBBGP_ASSERT(attr->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(65538u, attr->data.as_path.segments[0].asns[1]);
+    assert_roundtrip_as4(attr, as_path_4b, sizeof(as_path_4b));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_AS_PATH, attr->type);
     LIBBGP_ASSERT(attr->data.as_path.is_4b);
     LIBBGP_ASSERT_EQ_U64(65538u, attr->data.as_path.segments[0].asns[1]);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, short_as_path, sizeof(short_as_path), NULL));
@@ -303,7 +341,11 @@ LIBBGP_TEST(pattr_write_rejects_type_code_and_as_width_mismatch)
     as_path->data.as_path.segment_count = 1u;
     as_path->data.as_path.segments = &segment;
     as_path->data.as_path.is_4b = true;
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(as_path, out, sizeof(out), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(as_path, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(9u, out_len);
+    LIBBGP_ASSERT_EQ_U64(0x40u, out[0]);
+    LIBBGP_ASSERT_EQ_U64(2u, out[1]);
+    LIBBGP_ASSERT_EQ_U64(6u, out[2]);
     as_path->data.as_path.segments = NULL;
     as_path->data.as_path.segment_count = 0u;
 
@@ -316,9 +358,11 @@ LIBBGP_TEST(pattr_write_rejects_type_code_and_as_width_mismatch)
 
     unknown->flags = 0x8fu;
     unknown->type_code = 200u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(unknown, out, sizeof(out), &out_len));
+    unknown->flags = 0x80u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(unknown, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(3u, out_len);
-    LIBBGP_ASSERT_EQ_U64(0x8fu, out[0]);
+    LIBBGP_ASSERT_EQ_U64(0x80u, out[0]);
 
     libbgp_pattr_unref(unknown);
     libbgp_pattr_unref(as4_path);
@@ -395,6 +439,79 @@ LIBBGP_TEST(pattr_parse_write_unknown_extended_and_zero_length)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_format_provides_debug_strings)
+{
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *next_hop = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    libbgp_as_path_segment_t *segment;
+    uint32_t *asns;
+    libbgp_prefix6_t *prefix6;
+    char buf[256];
+    char tiny[8];
+    size_t out_len = 0u;
+
+    LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(next_hop != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+
+    origin->data.origin.origin = 1u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(origin, buf, sizeof(buf), &out_len));
+    LIBBGP_ASSERT(strstr(buf, "ORIGIN") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "origin=1") != NULL);
+    LIBBGP_ASSERT_EQ_U64(strlen(buf), out_len);
+
+    segment = (libbgp_as_path_segment_t *)calloc(1u, sizeof(*segment));
+    asns = (uint32_t *)calloc(2u, sizeof(*asns));
+    LIBBGP_ASSERT(segment != NULL);
+    LIBBGP_ASSERT(asns != NULL);
+    asns[0] = 64512u;
+    asns[1] = 64513u;
+    segment->type = 2u;
+    segment->asn_count = 2u;
+    segment->asns = asns;
+    as_path->data.as_path.segment_count = 1u;
+    as_path->data.as_path.segments = segment;
+    as_path->data.as_path.is_4b = true;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(as_path, buf, sizeof(buf), &out_len));
+    LIBBGP_ASSERT(strstr(buf, "AS_PATH") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "64512") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "64513") != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_pattr_format(as_path, tiny, sizeof(tiny), &out_len));
+    LIBBGP_ASSERT(out_len >= sizeof(tiny));
+
+    next_hop->data.next_hop.next_hop = 0xc0000201u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(next_hop, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "NEXT_HOP") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "0xc0000201") != NULL);
+
+    prefix6 = (libbgp_prefix6_t *)calloc(1u, sizeof(*prefix6));
+    LIBBGP_ASSERT(prefix6 != NULL);
+    prefix6->addr[0] = 0x20u;
+    prefix6->addr[1] = 0x01u;
+    prefix6->addr[2] = 0x0du;
+    prefix6->addr[3] = 0xb8u;
+    prefix6->len = 32u;
+    mp_reach->data.mp_reach_ipv6.nexthop[0] = 0x20u;
+    mp_reach->data.mp_reach_ipv6.nexthop[1] = 0x01u;
+    mp_reach->data.mp_reach_ipv6.nexthop_len = 16u;
+    mp_reach->data.mp_reach_ipv6.nlri = prefix6;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 1u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(mp_reach, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "MP_REACH_IPV6") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "nexthop_len=16") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "nlri_count=1") != NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_format(NULL, buf, sizeof(buf), NULL));
+
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(next_hop);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(origin);
+}
+
 LIBBGP_TEST(pattr_parse_write_error_edges_and_nomem_preserves_old_state)
 {
     const uint8_t valid_unknown[] = { 0x80u, 99u, 2u, 1u, 2u };
@@ -452,6 +569,7 @@ int main(void)
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_parse_write_mp_reach_and_unreach_ipv6", pattr_parse_write_mp_reach_and_unreach_ipv6 },
         { "pattr_parse_write_unknown_extended_and_zero_length", pattr_parse_write_unknown_extended_and_zero_length },
+        { "pattr_format_provides_debug_strings", pattr_format_provides_debug_strings },
         { "pattr_parse_write_error_edges_and_nomem_preserves_old_state", pattr_parse_write_error_edges_and_nomem_preserves_old_state }
     };
 

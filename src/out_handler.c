@@ -121,7 +121,7 @@ libbgp_err_t libbgp_out_handler_send(libbgp_out_handler_t *handler, const uint8_
     libbgp_io_ops_t ops;
     bool has_ops;
     int fd;
-    ssize_t ret;
+    libbgp_io_result_t ret;
 
     if (len == 0u) {
         if (sent != NULL) {
@@ -167,7 +167,7 @@ libbgp_err_t libbgp_out_handler_recv(libbgp_out_handler_t *handler, uint8_t *buf
     libbgp_io_ops_t ops;
     bool has_ops;
     int fd;
-    ssize_t ret;
+    libbgp_io_result_t ret;
 
     if (len == 0u) {
         if (received != NULL) {

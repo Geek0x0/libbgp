@@ -14,6 +14,7 @@ typedef enum libbgp_event_type {
     LIBBGP_EVENT_ROUTE_WITHDRAWN = 2,
     LIBBGP_EVENT_SESSION_UP = 3,
     LIBBGP_EVENT_SESSION_DOWN = 4,
+    LIBBGP_EVENT_COLLISION = 5,
     LIBBGP_EVENT_CUSTOM = 255
 } libbgp_event_type_t;
 
@@ -47,6 +48,14 @@ LIBBGP_API libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, ui
  * captured by that publish.
  */
 LIBBGP_API size_t libbgp_event_bus_publish(libbgp_event_bus_t *bus, const libbgp_event_t *event);
+/*
+ * Publish while excluding the subscriber with publisher_id. Pass 0 when the
+ * publisher is not subscribed or should receive its own event.
+ */
+LIBBGP_API size_t libbgp_event_bus_publish_from(
+    libbgp_event_bus_t *bus,
+    uint64_t publisher_id,
+    const libbgp_event_t *event);
 LIBBGP_API size_t libbgp_event_bus_subscriber_count(const libbgp_event_bus_t *bus);
 
 #endif

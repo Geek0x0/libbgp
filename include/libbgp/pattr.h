@@ -102,9 +102,22 @@ LIBBGP_API libbgp_err_t libbgp_pattr_parse(
     size_t len,
     size_t *consumed);
 
+LIBBGP_API libbgp_err_t libbgp_pattr_parse_as4(
+    libbgp_pattr_t *attr,
+    const uint8_t *buf,
+    size_t len,
+    bool use_4b_asn,
+    size_t *consumed);
+
 LIBBGP_API libbgp_err_t libbgp_pattr_write(
     const libbgp_pattr_t *attr,
     uint8_t *buf,
+    size_t buf_len,
+    size_t *out_len);
+
+LIBBGP_API libbgp_err_t libbgp_pattr_format(
+    const libbgp_pattr_t *attr,
+    char *buf,
     size_t buf_len,
     size_t *out_len);
 
