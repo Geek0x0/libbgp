@@ -598,6 +598,146 @@ libbgp_err_t libbgp_rib4_insert(libbgp_rib4_t *rib, const libbgp_rib4_route_t *r
     return bgp_rib4_insert_save_replaced(rib, route, NULL, NULL, NULL);
 }
 
+static void rib4_change_set(
+    bgp_rib4_change_t *change,
+    bgp_rib_change_kind_t kind,
+    const libbgp_rib4_route_t *best)
+{
+    change->kind = kind;
+    change->best = best;
+}
+
+static libbgp_err_t rib4_insert_save_replaced_locked(
+    rib4_impl_t *impl,
+    const libbgp_rib4_route_t *route,
+    bgp_rib4_saved_route_t *replaced,
+    bool *had_replaced,
+    uint64_t *update_id,
+    bgp_hashmap_entry_t **old_entry)
+{
+    libbgp_rib4_route_t *copy = NULL;
+    libbgp_rib4_route_t *old = NULL;
+    rib4_key_t *key = NULL;
+    libbgp_err_t err;
+
+    if (old_entry != NULL) {
+        *old_entry = NULL;
+    }
+    old = rib4_find_locked(impl, route->source_router_id, &route->prefix);
+    if (route->source_router_id == 0u && old != NULL &&
+        replaced == NULL && had_replaced == NULL && update_id == NULL) {
+        err = LIBBGP_ERR_EXISTS;
+    } else {
+        err = rib4_route_clone(impl, route, &copy, &key);
+    }
+    if (err == LIBBGP_OK) {
+        err = bgp_hashmap_insert(&impl->routes, key, copy);
+        if (err != LIBBGP_OK) {
+            bgp_free(key);
+            rib4_route_free(copy);
+        } else if (old != NULL) {
+            err = rib4_detach_value_locked(impl, &copy->prefix, old, old_entry);
+            if (err == LIBBGP_ERR_NOT_FOUND) {
+                err = LIBBGP_OK;
+            } else if (err == LIBBGP_OK) {
+                if (replaced != NULL) {
+                    replaced->entry = *old_entry;
+                    *old_entry = NULL;
+                }
+                if (had_replaced != NULL) {
+                    *had_replaced = true;
+                }
+            }
+            if (err == LIBBGP_OK && update_id != NULL) {
+                *update_id = copy->update_id;
+            }
+        } else if (update_id != NULL) {
+            *update_id = copy->update_id;
+        }
+    }
+    return err;
+}
+
+libbgp_err_t bgp_rib4_insert_track_best(
+    libbgp_rib4_t *rib,
+    const libbgp_rib4_route_t *route,
+    bgp_rib4_change_t *change,
+    uint64_t *update_id)
+{
+    rib4_impl_t *impl = rib4_impl_get(rib);
+    const libbgp_rib4_route_t *before = NULL;
+    const libbgp_rib4_route_t *after = NULL;
+    bgp_hashmap_entry_t *old_entry = NULL;
+    bgp_rib_change_kind_t kind;
+    libbgp_err_t err;
+
+    if (change != NULL) {
+        rib4_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, NULL);
+    }
+    if (impl == NULL || route == NULL || change == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+
+    bgp_lock(&impl->lock);
+    before = rib4_best_exact_locked(impl, &route->prefix);
+    err = rib4_insert_save_replaced_locked(impl, route, NULL, NULL, update_id, &old_entry);
+    if (err == LIBBGP_OK) {
+        after = rib4_best_exact_locked(impl, &route->prefix);
+        if (after == NULL) {
+            err = LIBBGP_ERR_NOT_FOUND;
+        } else if (before == NULL) {
+            kind = BGP_RIB_CHANGE_NEW_BEST;
+        } else if (before == after) {
+            kind = BGP_RIB_CHANGE_NO_BEST_CHANGE;
+        } else {
+            kind = BGP_RIB_CHANGE_REPLACEMENT_BEST;
+        }
+        if (err == LIBBGP_OK) {
+            rib4_change_set(change, kind, after);
+        }
+    }
+    bgp_unlock(&impl->lock);
+    rib4_detached_entry_free(old_entry);
+    return err;
+}
+
+libbgp_err_t bgp_rib4_withdraw_track_best(
+    libbgp_rib4_t *rib,
+    uint32_t source_router_id,
+    const libbgp_prefix4_t *prefix,
+    bgp_rib4_change_t *change)
+{
+    rib4_impl_t *impl = rib4_impl_get(rib);
+    const libbgp_rib4_route_t *before = NULL;
+    const libbgp_rib4_route_t *after = NULL;
+    bool withdrew_best = false;
+    libbgp_err_t err;
+
+    if (change != NULL) {
+        rib4_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, NULL);
+    }
+    if (impl == NULL || prefix == NULL || change == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+
+    bgp_lock(&impl->lock);
+    before = rib4_best_exact_locked(impl, prefix);
+    withdrew_best = before != NULL && before->source_router_id == source_router_id;
+    err = rib4_withdraw_locked(impl, source_router_id, prefix);
+    if (err == LIBBGP_OK) {
+        after = rib4_best_exact_locked(impl, prefix);
+        if (!withdrew_best) {
+            rib4_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, after);
+        } else if (after == NULL) {
+            rib4_change_set(change, BGP_RIB_CHANGE_UNREACHABLE, NULL);
+        } else {
+            rib4_change_set(change, BGP_RIB_CHANGE_REPLACEMENT_BEST, after);
+        }
+    }
+    bgp_unlock(&impl->lock);
+    return err;
+}
+
 libbgp_err_t bgp_rib4_insert_save_replaced(
     libbgp_rib4_t *rib,
     const libbgp_rib4_route_t *route,
@@ -606,10 +746,7 @@ libbgp_err_t bgp_rib4_insert_save_replaced(
     uint64_t *update_id)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
-    libbgp_rib4_route_t *copy = NULL;
-    libbgp_rib4_route_t *old = NULL;
     bgp_hashmap_entry_t *old_entry = NULL;
-    rib4_key_t *key = NULL;
     libbgp_err_t err;
 
     if (replaced != NULL) {
@@ -626,38 +763,7 @@ libbgp_err_t bgp_rib4_insert_save_replaced(
     }
 
     bgp_lock(&impl->lock);
-    old = rib4_find_locked(impl, route->source_router_id, &route->prefix);
-    if (route->source_router_id == 0u && old != NULL &&
-        replaced == NULL && had_replaced == NULL && update_id == NULL) {
-        err = LIBBGP_ERR_EXISTS;
-    } else {
-        err = rib4_route_clone(impl, route, &copy, &key);
-    }
-    if (err == LIBBGP_OK) {
-        err = bgp_hashmap_insert(&impl->routes, key, copy);
-        if (err != LIBBGP_OK) {
-            bgp_free(key);
-            rib4_route_free(copy);
-        } else if (old != NULL) {
-            err = rib4_detach_value_locked(impl, &copy->prefix, old, &old_entry);
-            if (err == LIBBGP_ERR_NOT_FOUND) {
-                err = LIBBGP_OK;
-            } else if (err == LIBBGP_OK) {
-                if (replaced != NULL) {
-                    replaced->entry = old_entry;
-                    old_entry = NULL;
-                }
-                if (had_replaced != NULL) {
-                    *had_replaced = true;
-                }
-            }
-            if (err == LIBBGP_OK && update_id != NULL) {
-                *update_id = copy->update_id;
-            }
-        } else if (update_id != NULL) {
-            *update_id = copy->update_id;
-        }
-    }
+    err = rib4_insert_save_replaced_locked(impl, route, replaced, had_replaced, update_id, &old_entry);
     bgp_unlock(&impl->lock);
     rib4_detached_entry_free(old_entry);
     return err;
