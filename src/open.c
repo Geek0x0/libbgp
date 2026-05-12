@@ -53,6 +53,22 @@ libbgp_err_t libbgp_open_add_capability(libbgp_open_msg_t *msg, libbgp_capabilit
     return LIBBGP_OK;
 }
 
+bool libbgp_open_has_4b_asn(const libbgp_open_msg_t *msg)
+{
+    size_t i;
+
+    if (msg == NULL) {
+        return false;
+    }
+    for (i = 0u; i < msg->capability_count; i++) {
+        const libbgp_capability_t *cap = msg->capabilities[i];
+        if (cap != NULL && cap->type == LIBBGP_CAP_4B_ASN) {
+            return true;
+        }
+    }
+    return false;
+}
+
 uint32_t libbgp_open_get_4b_asn(const libbgp_open_msg_t *msg)
 {
     size_t i;

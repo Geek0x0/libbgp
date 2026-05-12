@@ -512,6 +512,28 @@ LIBBGP_TEST(pattr_format_provides_debug_strings)
     libbgp_pattr_unref(origin);
 }
 
+LIBBGP_TEST(pattr_forwarded_unknown_optional_transitive_sets_partial)
+{
+    const uint8_t raw[] = { 0xc0u, 99u, 2u, 0x12u, 0x34u };
+    uint8_t out[16];
+    size_t used = 0u;
+    size_t out_len = 0u;
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse(attr, raw, sizeof(raw), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(raw), used);
+    LIBBGP_ASSERT_EQ_U64(0u, attr->flags & LIBBGP_PATTR_FLAG_PARTIAL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_prepare_for_ebgp_forward(attr));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(attr, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(raw), out_len);
+    LIBBGP_ASSERT_EQ_U64(0xe0u, out[0]);
+    LIBBGP_ASSERT_EQ_U64(99u, out[1]);
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_parse_write_error_edges_and_nomem_preserves_old_state)
 {
     const uint8_t valid_unknown[] = { 0x80u, 99u, 2u, 1u, 2u };
@@ -569,6 +591,7 @@ int main(void)
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_parse_write_mp_reach_and_unreach_ipv6", pattr_parse_write_mp_reach_and_unreach_ipv6 },
         { "pattr_parse_write_unknown_extended_and_zero_length", pattr_parse_write_unknown_extended_and_zero_length },
+        { "pattr_forwarded_unknown_optional_transitive_sets_partial", pattr_forwarded_unknown_optional_transitive_sets_partial },
         { "pattr_format_provides_debug_strings", pattr_format_provides_debug_strings },
         { "pattr_parse_write_error_edges_and_nomem_preserves_old_state", pattr_parse_write_error_edges_and_nomem_preserves_old_state }
     };

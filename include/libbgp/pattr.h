@@ -115,6 +115,8 @@ LIBBGP_API libbgp_err_t libbgp_pattr_write(
     size_t buf_len,
     size_t *out_len);
 
+LIBBGP_API libbgp_err_t libbgp_pattr_prepare_for_ebgp_forward(libbgp_pattr_t *attr);
+
 LIBBGP_API libbgp_err_t libbgp_pattr_format(
     const libbgp_pattr_t *attr,
     char *buf,

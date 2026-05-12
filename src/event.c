@@ -21,11 +21,14 @@ typedef struct event_subscriber {
     libbgp_event_type_t type;
     libbgp_event_cb cb;
     void *ctx;
+    bgp_event_ctx_retain_fn retain;
+    bgp_event_ctx_release_fn release;
 } event_subscriber_t;
 
 typedef struct event_snapshot {
     libbgp_event_cb cb;
     void *ctx;
+    bgp_event_ctx_release_fn release;
 } event_snapshot_t;
 
 typedef struct event_bus_impl {
@@ -95,6 +98,13 @@ static uint64_t event_next_id(event_bus_impl_t *impl)
     return impl->next_id;
 }
 
+static void event_subscriber_release(event_subscriber_t *sub)
+{
+    if (sub != NULL && sub->release != NULL) {
+        sub->release(sub->ctx);
+    }
+}
+
 libbgp_err_t libbgp_event_bus_init(libbgp_event_bus_t *bus)
 {
     event_bus_impl_t *impl;
@@ -118,6 +128,7 @@ void libbgp_event_bus_destroy(libbgp_event_bus_t *bus)
 {
     event_bus_impl_t *impl;
     event_subscriber_t *subs;
+    size_t count;
 
     event_acquire_global();
     impl = event_bus_impl_get(bus);
@@ -130,13 +141,65 @@ void libbgp_event_bus_destroy(libbgp_event_bus_t *bus)
     event_release_global();
 
     subs = impl->subs;
+    count = impl->count;
     impl->subs = NULL;
     impl->count = 0u;
     impl->cap = 0u;
     bgp_unlock(&impl->lock);
+    while (subs != NULL && count != 0u) {
+        count--;
+        event_subscriber_release(&subs[count]);
+    }
     bgp_lock_destroy(&impl->lock);
     bgp_free(subs);
     bgp_free(impl);
+}
+
+libbgp_err_t bgp_event_bus_subscribe_retained(
+    libbgp_event_bus_t *bus,
+    libbgp_event_type_t type,
+    libbgp_event_cb cb,
+    void *ctx,
+    bgp_event_ctx_retain_fn retain,
+    bgp_event_ctx_release_fn release,
+    uint64_t *out_id)
+{
+    event_bus_impl_t *impl;
+    uint64_t id;
+
+    if (cb == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    if (retain != NULL && !retain(ctx)) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    impl = event_bus_impl_lock(bus);
+    if (impl == NULL) {
+        if (release != NULL) {
+            release(ctx);
+        }
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    if (!event_reserve(impl, impl->count + 1u)) {
+        bgp_unlock(&impl->lock);
+        if (release != NULL) {
+            release(ctx);
+        }
+        return LIBBGP_ERR_NOMEM;
+    }
+    id = event_next_id(impl);
+    impl->subs[impl->count].id = id;
+    impl->subs[impl->count].type = type;
+    impl->subs[impl->count].cb = cb;
+    impl->subs[impl->count].ctx = ctx;
+    impl->subs[impl->count].retain = retain;
+    impl->subs[impl->count].release = release;
+    impl->count++;
+    bgp_unlock(&impl->lock);
+    if (out_id != NULL) {
+        *out_id = id;
+    }
+    return LIBBGP_OK;
 }
 
 libbgp_err_t libbgp_event_bus_subscribe(
@@ -146,31 +209,7 @@ libbgp_err_t libbgp_event_bus_subscribe(
     void *ctx,
     uint64_t *out_id)
 {
-    event_bus_impl_t *impl;
-    uint64_t id;
-
-    if (cb == NULL) {
-        return LIBBGP_ERR_BAD_LEN;
-    }
-    impl = event_bus_impl_lock(bus);
-    if (impl == NULL) {
-        return LIBBGP_ERR_BAD_LEN;
-    }
-    if (!event_reserve(impl, impl->count + 1u)) {
-        bgp_unlock(&impl->lock);
-        return LIBBGP_ERR_NOMEM;
-    }
-    id = event_next_id(impl);
-    impl->subs[impl->count].id = id;
-    impl->subs[impl->count].type = type;
-    impl->subs[impl->count].cb = cb;
-    impl->subs[impl->count].ctx = ctx;
-    impl->count++;
-    bgp_unlock(&impl->lock);
-    if (out_id != NULL) {
-        *out_id = id;
-    }
-    return LIBBGP_OK;
+    return bgp_event_bus_subscribe_retained(bus, type, cb, ctx, NULL, NULL, out_id);
 }
 
 libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id)
@@ -183,12 +222,15 @@ libbgp_err_t libbgp_event_bus_unsubscribe(libbgp_event_bus_t *bus, uint64_t id)
     }
     for (i = 0u; i < impl->count; i++) {
         if (impl->subs[i].id == id) {
+            event_subscriber_t sub = impl->subs[i];
+
             if (i + 1u < impl->count) {
                 memmove(&impl->subs[i], &impl->subs[i + 1u],
                     (impl->count - i - 1u) * sizeof(*impl->subs));
             }
             impl->count--;
             bgp_unlock(&impl->lock);
+            event_subscriber_release(&sub);
             return LIBBGP_OK;
         }
     }
@@ -233,8 +275,12 @@ size_t libbgp_event_bus_publish_from(
         for (i = 0u; i < impl->count; i++) {
             if (impl->subs[i].type == event->type &&
                 (publisher_id == 0u || impl->subs[i].id != publisher_id)) {
+                if (impl->subs[i].retain != NULL && !impl->subs[i].retain(impl->subs[i].ctx)) {
+                    continue;
+                }
                 snapshot[match_count].cb = impl->subs[i].cb;
                 snapshot[match_count].ctx = impl->subs[i].ctx;
+                snapshot[match_count].release = impl->subs[i].release;
                 match_count++;
             }
         }
@@ -243,6 +289,9 @@ size_t libbgp_event_bus_publish_from(
 
     for (i = 0u; i < match_count; i++) {
         snapshot[i].cb(event, snapshot[i].ctx);
+        if (snapshot[i].release != NULL) {
+            snapshot[i].release(snapshot[i].ctx);
+        }
     }
     bgp_free(snapshot);
     return match_count;

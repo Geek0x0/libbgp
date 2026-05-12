@@ -85,6 +85,11 @@ LIBBGP_API libbgp_err_t libbgp_fsm_stop(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_reset_soft(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_reset_hard(libbgp_fsm_t *fsm);
 LIBBGP_API libbgp_err_t libbgp_fsm_on_packet(libbgp_fsm_t *fsm, const libbgp_packet_t *pkt);
+/*
+ * Parses and handles exactly one complete BGP message. Extra or partial trailing
+ * bytes are a message length error and may send a NOTIFICATION before teardown.
+ */
+LIBBGP_API libbgp_err_t libbgp_fsm_on_raw_packet(libbgp_fsm_t *fsm, const uint8_t *buf, size_t len);
 LIBBGP_API libbgp_err_t libbgp_fsm_tick(libbgp_fsm_t *fsm, uint64_t now_ms);
 LIBBGP_API uint32_t libbgp_fsm_peer_asn(const libbgp_fsm_t *fsm);
 LIBBGP_API uint32_t libbgp_fsm_peer_bgp_id(const libbgp_fsm_t *fsm);

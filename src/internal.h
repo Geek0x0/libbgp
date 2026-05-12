@@ -5,8 +5,36 @@
 #include <string.h>
 #include "libbgp/types.h"
 #include "libbgp/alloc.h"
+#include "libbgp/event.h"
+#include "libbgp/packet.h"
 
 #define BGP_UNUSED(x) ((void)(x))
+
+typedef bool (*bgp_event_ctx_retain_fn)(void *ctx);
+typedef void (*bgp_event_ctx_release_fn)(void *ctx);
+
+typedef struct bgp_parse_error_detail {
+    libbgp_err_t err;
+    uint8_t notify_code;
+    uint8_t notify_subcode;
+} bgp_parse_error_detail_t;
+
+libbgp_err_t bgp_event_bus_subscribe_retained(
+    libbgp_event_bus_t *bus,
+    libbgp_event_type_t type,
+    libbgp_event_cb cb,
+    void *ctx,
+    bgp_event_ctx_retain_fn retain,
+    bgp_event_ctx_release_fn release,
+    uint64_t *out_id);
+
+libbgp_err_t bgp_packet_parse_as4_detail(
+    libbgp_packet_t *pkt,
+    const uint8_t *buf,
+    size_t len,
+    bool use_4b_asn,
+    size_t *consumed,
+    bgp_parse_error_detail_t *detail);
 
 #define bgp_malloc(sz)      libbgp_malloc((sz))
 #define bgp_calloc(n, sz)   libbgp_calloc((n), (sz))

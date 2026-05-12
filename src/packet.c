@@ -70,12 +70,51 @@ static libbgp_packet_type_t packet_type_from_raw(uint8_t raw_type)
     }
 }
 
-libbgp_err_t libbgp_packet_parse_as4(
+static void packet_parse_detail_set(
+    bgp_parse_error_detail_t *detail,
+    libbgp_err_t err,
+    uint8_t notify_code,
+    uint8_t notify_subcode)
+{
+    if (detail == NULL) {
+        return;
+    }
+    detail->err = err;
+    detail->notify_code = notify_code;
+    detail->notify_subcode = notify_subcode;
+}
+
+static void packet_parse_map_body_error(
+    bgp_parse_error_detail_t *detail,
+    libbgp_packet_type_t type,
+    libbgp_err_t err)
+{
+    uint8_t code = 0u;
+    uint8_t subcode = 0u;
+
+    if (err == LIBBGP_ERR_NOMEM) {
+        packet_parse_detail_set(detail, err, 0u, 0u);
+        return;
+    }
+    if (type == LIBBGP_PACKET_UPDATE) {
+        code = 3u;
+        subcode = err == LIBBGP_ERR_INVALID ? 3u : 1u;
+    } else if (type == LIBBGP_PACKET_OPEN) {
+        code = 2u;
+    } else if (type == LIBBGP_PACKET_NOTIFICATION || type == LIBBGP_PACKET_KEEPALIVE) {
+        code = 1u;
+        subcode = 2u;
+    }
+    packet_parse_detail_set(detail, err, code, subcode);
+}
+
+libbgp_err_t bgp_packet_parse_as4_detail(
     libbgp_packet_t *pkt,
     const uint8_t *buf,
     size_t len,
     bool use_4b_asn,
-    size_t *consumed)
+    size_t *consumed,
+    bgp_parse_error_detail_t *detail)
 {
     libbgp_packet_t tmp;
     uint16_t wire_len;
@@ -85,15 +124,19 @@ libbgp_err_t libbgp_packet_parse_as4(
     size_t used = 0u;
     libbgp_err_t err = LIBBGP_OK;
 
+    packet_parse_detail_set(detail, LIBBGP_OK, 0u, 0u);
     if (pkt == NULL || buf == NULL || len < LIBBGP_BGP_HEADER_LEN) {
+        packet_parse_detail_set(detail, LIBBGP_ERR_BAD_LEN, 1u, 2u);
         return LIBBGP_ERR_BAD_LEN;
     }
     if (!packet_marker_valid(buf)) {
+        packet_parse_detail_set(detail, LIBBGP_ERR_BAD_LEN, 1u, 1u);
         return LIBBGP_ERR_BAD_LEN;
     }
     wire_len = bgp_get_be16(buf + 16u);
     if (wire_len < LIBBGP_BGP_MIN_PACKET_LEN || wire_len > LIBBGP_BGP_MAX_PACKET_LEN ||
         len < (size_t)wire_len) {
+        packet_parse_detail_set(detail, LIBBGP_ERR_BAD_LEN, 1u, 2u);
         return LIBBGP_ERR_BAD_LEN;
     }
 
@@ -103,6 +146,10 @@ libbgp_err_t libbgp_packet_parse_as4(
     libbgp_packet_init(&tmp);
     tmp.type = packet_type_from_raw(raw_type);
     tmp.raw_type = raw_type;
+    if (detail != NULL && tmp.type == LIBBGP_PACKET_UNKNOWN) {
+        packet_parse_detail_set(detail, LIBBGP_ERR_BAD_TYPE, 1u, 3u);
+        return LIBBGP_ERR_BAD_TYPE;
+    }
 
     switch (tmp.type) {
     case LIBBGP_PACKET_OPEN:
@@ -135,10 +182,12 @@ libbgp_err_t libbgp_packet_parse_as4(
     }
 
     if (err != LIBBGP_OK) {
+        packet_parse_map_body_error(detail, tmp.type, err);
         libbgp_packet_destroy(&tmp);
         return err;
     }
     if (used != body_len) {
+        packet_parse_map_body_error(detail, tmp.type, LIBBGP_ERR_BAD_LEN);
         libbgp_packet_destroy(&tmp);
         return LIBBGP_ERR_BAD_LEN;
     }
@@ -149,6 +198,16 @@ libbgp_err_t libbgp_packet_parse_as4(
         *consumed = wire_len;
     }
     return LIBBGP_OK;
+}
+
+libbgp_err_t libbgp_packet_parse_as4(
+    libbgp_packet_t *pkt,
+    const uint8_t *buf,
+    size_t len,
+    bool use_4b_asn,
+    size_t *consumed)
+{
+    return bgp_packet_parse_as4_detail(pkt, buf, len, use_4b_asn, consumed, NULL);
 }
 
 libbgp_err_t libbgp_packet_parse(
