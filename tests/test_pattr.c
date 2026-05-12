@@ -163,7 +163,13 @@ LIBBGP_TEST(pattr_parse_write_fixed_scalar_attributes)
     LIBBGP_ASSERT_EQ_U64(0u, attr->data.origin.origin);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, bad_origin, sizeof(bad_origin), NULL));
     assert_roundtrip(attr, next_hop, sizeof(next_hop));
-    LIBBGP_ASSERT_EQ_U64(0xc0000201u, attr->data.next_hop.next_hop);
+    {
+        const uint8_t expected_next_hop[] = { 192u, 0u, 2u, 1u };
+        uint8_t stored_next_hop[4];
+
+        memcpy(stored_next_hop, &attr->data.next_hop.next_hop, sizeof(stored_next_hop));
+        LIBBGP_ASSERT_BYTES_EQ(expected_next_hop, stored_next_hop, sizeof(expected_next_hop));
+    }
     assert_roundtrip(attr, med, sizeof(med));
     LIBBGP_ASSERT_EQ_U64(0x1000u, attr->data.med.value);
     assert_roundtrip(attr, local_pref, sizeof(local_pref));
@@ -507,6 +513,28 @@ LIBBGP_TEST(pattr_parse_write_unknown_extended_and_zero_length)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_next_hop_parse_write_preserves_network_order_bytes)
+{
+    const uint8_t raw[] = { 0x40u, 3u, 4u, 192u, 0u, 2u, 254u };
+    const uint8_t expected_next_hop[] = { 192u, 0u, 2u, 254u };
+    uint8_t stored_next_hop[4];
+    uint8_t out[16];
+    size_t used = 0u;
+    size_t out_len = 0u;
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse(attr, raw, sizeof(raw), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(raw), used);
+    memcpy(stored_next_hop, &attr->data.next_hop.next_hop, sizeof(stored_next_hop));
+    LIBBGP_ASSERT_BYTES_EQ(expected_next_hop, stored_next_hop, sizeof(expected_next_hop));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_write(attr, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(raw), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(raw, out, sizeof(raw));
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_format_provides_debug_strings)
 {
     libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
@@ -663,6 +691,7 @@ int main(void)
         { "pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop", pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop },
         { "pattr_parse_write_unknown_extended_and_zero_length", pattr_parse_write_unknown_extended_and_zero_length },
         { "pattr_forwarded_unknown_optional_transitive_sets_partial", pattr_forwarded_unknown_optional_transitive_sets_partial },
+        { "pattr_next_hop_parse_write_preserves_network_order_bytes", pattr_next_hop_parse_write_preserves_network_order_bytes },
         { "pattr_format_provides_debug_strings", pattr_format_provides_debug_strings },
         { "pattr_parse_write_error_edges_and_nomem_preserves_old_state", pattr_parse_write_error_edges_and_nomem_preserves_old_state }
     };

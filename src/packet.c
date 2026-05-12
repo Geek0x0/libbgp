@@ -101,6 +101,9 @@ static void packet_parse_map_body_error(
         subcode = err == LIBBGP_ERR_INVALID ? 3u : 1u;
     } else if (type == LIBBGP_PACKET_OPEN) {
         code = 2u;
+        if (err == LIBBGP_ERR_BAD_TYPE) {
+            subcode = 4u;
+        }
     } else if (type == LIBBGP_PACKET_NOTIFICATION || type == LIBBGP_PACKET_KEEPALIVE) {
         code = 1u;
         subcode = 2u;

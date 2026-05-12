@@ -614,7 +614,7 @@ libbgp_err_t libbgp_pattr_parse_as4(
         if (value_len != 4u) {
             err = LIBBGP_ERR_BAD_LEN;
         } else {
-            tmp.data.next_hop.next_hop = bgp_get_be32(value);
+            memcpy(&tmp.data.next_hop.next_hop, value, 4u);
         }
         break;
     case LIBBGP_PATTR_MED:
@@ -908,7 +908,7 @@ static libbgp_err_t write_value(const libbgp_pattr_t *attr, uint8_t *buf, size_t
         write_as_path_value(attr, buf);
         break;
     case LIBBGP_PATTR_NEXT_HOP:
-        bgp_put_be32(buf, attr->data.next_hop.next_hop);
+        memcpy(buf, &attr->data.next_hop.next_hop, 4u);
         break;
     case LIBBGP_PATTR_MED:
         bgp_put_be32(buf, attr->data.med.value);

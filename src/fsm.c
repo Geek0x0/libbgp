@@ -1404,14 +1404,20 @@ static bool fsm_zero_addr6(const uint8_t addr[16])
     return addr != NULL && memcmp(addr, zero, sizeof(zero)) == 0;
 }
 
-static bool fsm_valid_addr6(const uint8_t addr[16])
-{
-    return addr != NULL && addr[0] != 0u;
-}
-
 static bool fsm_linklocal_addr6(const uint8_t addr[16])
 {
     return addr != NULL && addr[0] == 0xfeu && (addr[1] & 0xc0u) == 0x80u;
+}
+
+static bool fsm_valid_addr6(const uint8_t addr[16])
+{
+    if (addr == NULL || fsm_zero_addr6(addr)) {
+        return false;
+    }
+    if (addr[0] == 0xffu || fsm_linklocal_addr6(addr)) {
+        return false;
+    }
+    return true;
 }
 
 static int fsm_router_id_cmp(uint32_t a, uint32_t b)
@@ -1536,9 +1542,15 @@ static libbgp_err_t fsm_alter_nexthop4(
     }
     next_hop = libbgp_update_find_attr(update, LIBBGP_PATTR_NEXT_HOP);
     if (force_default_nexthop4 || next_hop == NULL) {
+        if (!fsm_valid_addr4(NULL, default_nexthop4)) {
+            return LIBBGP_ERR_INVALID;
+        }
         return fsm_update_set_next_hop4(update, default_nexthop4);
     }
     if (!fsm_prefix4_contains_addr(peering_lan4, next_hop->data.next_hop.next_hop)) {
+        if (!fsm_valid_addr4(NULL, default_nexthop4)) {
+            return LIBBGP_ERR_INVALID;
+        }
         next_hop->data.next_hop.next_hop = default_nexthop4;
     }
     return LIBBGP_OK;
@@ -1570,6 +1582,14 @@ static libbgp_err_t fsm_alter_nexthop6(
         }
         if (force_default_nexthop6 ||
             !fsm_prefix6_contains_addr(peering_lan6, attr->data.mp_reach_ipv6.nexthop)) {
+            if (!fsm_valid_addr6(default_nexthop6)) {
+                return LIBBGP_ERR_INVALID;
+            }
+            if (default_nexthop6_linklocal != NULL &&
+                !fsm_zero_addr6(default_nexthop6_linklocal) &&
+                !fsm_linklocal_addr6(default_nexthop6_linklocal)) {
+                return LIBBGP_ERR_INVALID;
+            }
             memcpy(attr->data.mp_reach_ipv6.nexthop, default_nexthop6, 16u);
             if (default_nexthop6_linklocal != NULL &&
                 !fsm_zero_addr6(default_nexthop6_linklocal)) {
