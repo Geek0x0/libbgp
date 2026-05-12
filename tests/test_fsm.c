@@ -3697,6 +3697,232 @@ LIBBGP_TEST(fsm_established_out_filter4_denies_route_event_update)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_outbound_filter_cannot_leak_denied_prefix_from_mixed_update)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    out_ctx_t out;
+    event_ctx_t events;
+    libbgp_prefix4_t allowed = p4(10u, 0u, 0u, 0u, 24u);
+    libbgp_prefix4_t denied = p4(10u, 0u, 1u, 0u, 24u);
+    libbgp_prefix4_t prefixes[2];
+    libbgp_packet_t route_update;
+    libbgp_packet_t sent;
+    libbgp_event_t event;
+
+    prefixes[0] = allowed;
+    prefixes[1] = denied;
+    route_update = make_update_add_multi(prefixes, LIBBGP_ARRAY_LEN(prefixes), ip4(192u, 0u, 2u, 254u));
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4_EXACT;
+    rule.decision = LIBBGP_FILTER_DENY;
+    rule.match.prefix4 = denied;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_out_filter4(&fsm, &filter);
+    establish(&fsm, &out, &events);
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    event.source_router_id = ip4(198u, 51u, 100u, 99u);
+    event.prefix4 = &allowed;
+    event.update = &route_update.data.update;
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(3u, out.count);
+
+    parse_sent_packet_as4(&out, 2u, &sent);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_UPDATE, sent.type);
+    LIBBGP_ASSERT_EQ_U64(1u, sent.data.update.nlri_count);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&allowed, &sent.data.update.nlri[0]));
+    libbgp_packet_destroy(&sent);
+
+    libbgp_packet_destroy(&route_update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_filter_destroy(&filter);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_outbound_ipv4_event_drops_mixed_update_ipv6_mp_reach)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    out_ctx_t out;
+    event_ctx_t events;
+    static const uint8_t denied6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x61u };
+    static const uint8_t next_hop6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 8u };
+    libbgp_prefix4_t allowed4 = p4(10u, 0u, 2u, 0u, 24u);
+    libbgp_prefix6_t denied6 = p6(denied6_addr, 40u);
+    libbgp_packet_t route_update = make_update_add_then_mp_reach6(allowed4, denied6, next_hop6);
+    libbgp_packet_t sent;
+    libbgp_event_t event;
+
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX6_EXACT;
+    rule.decision = LIBBGP_FILTER_DENY;
+    rule.match.prefix6 = denied6;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_out_filter6(&fsm, &filter);
+    establish(&fsm, &out, &events);
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    event.source_router_id = ip4(198u, 51u, 100u, 99u);
+    event.prefix4 = &allowed4;
+    event.update = &route_update.data.update;
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(3u, out.count);
+
+    parse_sent_packet_as4(&out, 2u, &sent);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_UPDATE, sent.type);
+    LIBBGP_ASSERT_EQ_U64(1u, sent.data.update.nlri_count);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&allowed4, &sent.data.update.nlri[0]));
+    LIBBGP_ASSERT(libbgp_update_find_attr(&sent.data.update, LIBBGP_PATTR_MP_REACH_IPV6) == NULL);
+    libbgp_packet_destroy(&sent);
+
+    libbgp_packet_destroy(&route_update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_filter_destroy(&filter);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_outbound_ipv6_filter_cannot_leak_denied_prefix_from_mixed_mp_reach)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    out_ctx_t out;
+    event_ctx_t events;
+    static const uint8_t allowed_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x62u };
+    static const uint8_t denied_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x63u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 8u };
+    libbgp_prefix6_t allowed = p6(allowed_addr, 40u);
+    libbgp_prefix6_t denied = p6(denied_addr, 40u);
+    libbgp_prefix6_t prefixes[2];
+    libbgp_packet_t route_update;
+    libbgp_packet_t sent;
+    libbgp_pattr_t *mp_reach;
+    libbgp_event_t event;
+
+    prefixes[0] = allowed;
+    prefixes[1] = denied;
+    route_update = make_update_mp_reach6_multi(prefixes, LIBBGP_ARRAY_LEN(prefixes), next_hop);
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX6_EXACT;
+    rule.decision = LIBBGP_FILTER_DENY;
+    rule.match.prefix6 = denied;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_out_filter6(&fsm, &filter);
+    establish(&fsm, &out, &events);
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    event.source_router_id = ip4(198u, 51u, 100u, 99u);
+    event.prefix6 = &allowed;
+    event.update = &route_update.data.update;
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(3u, out.count);
+
+    parse_sent_packet_as4(&out, 2u, &sent);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_UPDATE, sent.type);
+    LIBBGP_ASSERT_EQ_U64(0u, sent.data.update.nlri_count);
+    mp_reach = libbgp_update_find_attr(&sent.data.update, LIBBGP_PATTR_MP_REACH_IPV6);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, mp_reach->data.mp_reach_ipv6.nlri_count);
+    LIBBGP_ASSERT(libbgp_prefix6_eq(&allowed, &mp_reach->data.mp_reach_ipv6.nlri[0]));
+    libbgp_packet_destroy(&sent);
+
+    libbgp_packet_destroy(&route_update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_filter_destroy(&filter);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_inbound_filter_skips_only_denied_prefix_in_mixed_update)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_rib4_t rib;
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    out_ctx_t out;
+    event_ctx_t events;
+    libbgp_prefix4_t allowed = p4(10u, 0u, 0u, 0u, 24u);
+    libbgp_prefix4_t denied = p4(10u, 0u, 1u, 0u, 24u);
+    libbgp_prefix4_t prefixes[2];
+    libbgp_packet_t update;
+    const libbgp_rib4_route_t *route = NULL;
+
+    prefixes[0] = allowed;
+    prefixes[1] = denied;
+    update = make_update_add_multi(prefixes, LIBBGP_ARRAY_LEN(prefixes), ip4(192u, 0u, 2u, 254u));
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4_EXACT;
+    rule.decision = LIBBGP_FILTER_DENY;
+    rule.match.prefix4 = denied;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_rib4(&fsm, &rib);
+    libbgp_fsm_set_in_filter4(&fsm, &filter);
+    establish(&fsm, &out, &events);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &update));
+    LIBBGP_ASSERT_EQ_U64(1u, event_count_type(&events, LIBBGP_EVENT_ROUTE_ADDED));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 0u, 0u, 1u), &route));
+    LIBBGP_ASSERT(route != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib4_lookup(&rib, ip4(10u, 0u, 1u, 1u), &route));
+
+    libbgp_packet_destroy(&update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_rib4_destroy(&rib);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_filter_destroy(&filter);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_established_in_filter6_denies_route)
 {
     libbgp_fsm_t fsm;
@@ -3824,6 +4050,53 @@ LIBBGP_TEST(fsm_established_out_filter6_denies_route_event_update)
     libbgp_fsm_destroy(&fsm);
     libbgp_event_bus_destroy(&bus);
     libbgp_filter_destroy(&filter);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_route_event_rejects_malformed_mp_reach6_without_nlri_storage)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    out_ctx_t out;
+    event_ctx_t events;
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x64u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 40u);
+    libbgp_packet_t route_update;
+    libbgp_pattr_t *mp;
+    libbgp_event_t event;
+
+    libbgp_packet_init(&route_update);
+    route_update.type = LIBBGP_PACKET_UPDATE;
+    libbgp_update_init(&route_update.data.update);
+    mp = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    LIBBGP_ASSERT(mp != NULL);
+    mp->data.mp_reach_ipv6.nlri_count = 1u;
+    mp->data.mp_reach_ipv6.nlri = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&route_update.data.update, mp));
+    libbgp_pattr_unref(mp);
+
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    establish(&fsm, &out, &events);
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    event.source_router_id = ip4(198u, 51u, 100u, 99u);
+    event.prefix6 = &prefix;
+    event.update = &route_update.data.update;
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(2u, out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+
+    libbgp_packet_destroy(&route_update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
     libbgp_out_handler_destroy(&out_handler);
 }
 
@@ -6877,9 +7150,14 @@ int main(void)
         { "fsm_established_update_uses_internal_rib4_by_default", fsm_established_update_uses_internal_rib4_by_default },
         { "fsm_established_in_filter4_denies_route", fsm_established_in_filter4_denies_route },
         { "fsm_established_out_filter4_denies_route_event_update", fsm_established_out_filter4_denies_route_event_update },
+        { "fsm_outbound_filter_cannot_leak_denied_prefix_from_mixed_update", fsm_outbound_filter_cannot_leak_denied_prefix_from_mixed_update },
+        { "fsm_outbound_ipv4_event_drops_mixed_update_ipv6_mp_reach", fsm_outbound_ipv4_event_drops_mixed_update_ipv6_mp_reach },
+        { "fsm_outbound_ipv6_filter_cannot_leak_denied_prefix_from_mixed_mp_reach", fsm_outbound_ipv6_filter_cannot_leak_denied_prefix_from_mixed_mp_reach },
+        { "fsm_inbound_filter_skips_only_denied_prefix_in_mixed_update", fsm_inbound_filter_skips_only_denied_prefix_in_mixed_update },
         { "fsm_established_in_filter6_denies_route", fsm_established_in_filter6_denies_route },
         { "fsm_established_ignores_ipv6_route_with_invalid_nexthop", fsm_established_ignores_ipv6_route_with_invalid_nexthop },
         { "fsm_established_out_filter6_denies_route_event_update", fsm_established_out_filter6_denies_route_event_update },
+        { "fsm_route_event_rejects_malformed_mp_reach6_without_nlri_storage", fsm_route_event_rejects_malformed_mp_reach6_without_nlri_storage },
         { "fsm_established_update_as_path_metrics_ignore_as_set", fsm_established_update_as_path_metrics_ignore_as_set },
         { "fsm_established_update_after_teardown_discards_late_routes", fsm_established_update_after_teardown_discards_late_routes },
         { "fsm_accepted_update_refreshes_hold_timer_before_route_event", fsm_accepted_update_refreshes_hold_timer_before_route_event },

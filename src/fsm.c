@@ -143,6 +143,9 @@ static fsm_impl_t *fsm_impl_get(const libbgp_fsm_t *fsm)
 
 static libbgp_err_t fsm_update_from_route4(const libbgp_rib4_route_t *route, libbgp_update_msg_t *update);
 static libbgp_err_t fsm_update_from_route6(const libbgp_rib6_route_t *route, libbgp_update_msg_t *update);
+static const libbgp_pattr_t *fsm_find_mp_reach6_for_prefix(
+    const libbgp_update_msg_t *update,
+    const libbgp_prefix6_t *prefix);
 
 static void fsm_set_state(fsm_impl_t *impl, libbgp_fsm_state_t state)
 {
@@ -1430,6 +1433,13 @@ static void fsm_fill_route_attrs(
     route->as_path_len = fsm_as_path_len_and_origin_as(attr, &route->origin_as);
 }
 
+static bool fsm_ipv4_route_attr(const libbgp_pattr_t *attr)
+{
+    return attr != NULL &&
+        attr->type != LIBBGP_PATTR_MP_REACH_IPV6 &&
+        attr->type != LIBBGP_PATTR_MP_UNREACH_IPV6;
+}
+
 static bool fsm_ipv6_route_attr(const libbgp_pattr_t *attr)
 {
     return attr != NULL &&
@@ -2551,6 +2561,122 @@ static libbgp_err_t fsm_send_withdraw6(
     return err;
 }
 
+static libbgp_err_t fsm_send_route_added4(
+    libbgp_out_handler_t *out,
+    const libbgp_event_t *event,
+    uint32_t local_asn,
+    bool use_4b_asn,
+    bool is_ibgp,
+    const libbgp_prefix4_t *peering_lan4,
+    const libbgp_prefix6_t *peering_lan6,
+    uint32_t default_nexthop4,
+    const uint8_t default_nexthop6[16],
+    const uint8_t default_nexthop6_linklocal[16],
+    bool force_default_nexthop4,
+    bool force_default_nexthop6,
+    bool ibgp_alter_nexthop,
+    int32_t route_weight)
+{
+    libbgp_rib4_route_t route;
+    libbgp_update_msg_t update;
+    libbgp_err_t err;
+
+    if (event == NULL || event->prefix4 == NULL || event->update == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    memset(&route, 0, sizeof(route));
+    route.prefix = *event->prefix4;
+    route.source_router_id = event->source_router_id;
+    route.is_ibgp = is_ibgp;
+    fsm_fill_route_attrs(&route, event->update, route_weight);
+    err = fsm_update_from_route4(&route, &update);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = fsm_send_prepared_update(
+        out,
+        &update,
+        local_asn,
+        use_4b_asn,
+        is_ibgp,
+        peering_lan4,
+        peering_lan6,
+        default_nexthop4,
+        default_nexthop6,
+        default_nexthop6_linklocal,
+        force_default_nexthop4,
+        force_default_nexthop6,
+        ibgp_alter_nexthop);
+    libbgp_update_destroy(&update);
+    return err;
+}
+
+static libbgp_err_t fsm_send_route_added6(
+    libbgp_out_handler_t *out,
+    const libbgp_event_t *event,
+    uint32_t local_asn,
+    bool use_4b_asn,
+    bool is_ibgp,
+    const libbgp_prefix4_t *peering_lan4,
+    const libbgp_prefix6_t *peering_lan6,
+    uint32_t default_nexthop4,
+    const uint8_t default_nexthop6[16],
+    const uint8_t default_nexthop6_linklocal[16],
+    bool force_default_nexthop4,
+    bool force_default_nexthop6,
+    bool ibgp_alter_nexthop,
+    int32_t route_weight)
+{
+    const libbgp_pattr_t *mp_reach;
+    libbgp_rib6_route_t route;
+    libbgp_update_msg_t update;
+    bool route_made = false;
+    libbgp_err_t err;
+
+    if (event == NULL || event->prefix6 == NULL || event->update == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    mp_reach = fsm_find_mp_reach6_for_prefix(event->update, event->prefix6);
+    if (mp_reach == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    err = fsm_make_route6(
+        event->source_router_id,
+        event->update,
+        mp_reach,
+        event->prefix6,
+        route_weight,
+        is_ibgp,
+        &route);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    route_made = true;
+    err = fsm_update_from_route6(&route, &update);
+    if (route_made) {
+        fsm_made_route6_destroy(&route);
+    }
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = fsm_send_prepared_update(
+        out,
+        &update,
+        local_asn,
+        use_4b_asn,
+        is_ibgp,
+        peering_lan4,
+        peering_lan6,
+        default_nexthop4,
+        default_nexthop6,
+        default_nexthop6_linklocal,
+        force_default_nexthop4,
+        force_default_nexthop6,
+        ibgp_alter_nexthop);
+    libbgp_update_destroy(&update);
+    return err;
+}
+
 static libbgp_err_t fsm_send_route_event_update(
     libbgp_out_handler_t *out,
     const libbgp_event_t *event,
@@ -2564,26 +2690,47 @@ static libbgp_err_t fsm_send_route_event_update(
     const uint8_t default_nexthop6_linklocal[16],
     bool force_default_nexthop4,
     bool force_default_nexthop6,
-    bool ibgp_alter_nexthop)
+    bool ibgp_alter_nexthop,
+    int32_t route_weight)
 {
     if (event == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (event->update != NULL) {
-        return fsm_send_prepared_update(
-            out,
-            event->update,
-            local_asn,
-            use_4b_asn,
-            is_ibgp,
-            peering_lan4,
-            peering_lan6,
-            default_nexthop4,
-            default_nexthop6,
-            default_nexthop6_linklocal,
-            force_default_nexthop4,
-            force_default_nexthop6,
-            ibgp_alter_nexthop);
+    if (event->type == LIBBGP_EVENT_ROUTE_ADDED) {
+        if (event->prefix4 != NULL) {
+            return fsm_send_route_added4(
+                out,
+                event,
+                local_asn,
+                use_4b_asn,
+                is_ibgp,
+                peering_lan4,
+                peering_lan6,
+                default_nexthop4,
+                default_nexthop6,
+                default_nexthop6_linklocal,
+                force_default_nexthop4,
+                force_default_nexthop6,
+                ibgp_alter_nexthop,
+                route_weight);
+        }
+        if (event->prefix6 != NULL) {
+            return fsm_send_route_added6(
+                out,
+                event,
+                local_asn,
+                use_4b_asn,
+                is_ibgp,
+                peering_lan4,
+                peering_lan6,
+                default_nexthop4,
+                default_nexthop6,
+                default_nexthop6_linklocal,
+                force_default_nexthop4,
+                force_default_nexthop6,
+                ibgp_alter_nexthop,
+                route_weight);
+        }
     }
     if (event->type == LIBBGP_EVENT_ROUTE_WITHDRAWN) {
         if (event->prefix4 != NULL) {
@@ -2633,6 +2780,9 @@ static const libbgp_pattr_t *fsm_find_mp_reach6_for_prefix(
 
         if (attr == NULL || attr->type != LIBBGP_PATTR_MP_REACH_IPV6) {
             continue;
+        }
+        if (attr->data.mp_reach_ipv6.nlri_count != 0u && attr->data.mp_reach_ipv6.nlri == NULL) {
+            return NULL;
         }
         for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
             if (libbgp_prefix6_eq(&attr->data.mp_reach_ipv6.nlri[j], prefix)) {
@@ -2793,6 +2943,9 @@ static libbgp_err_t fsm_update_from_route4(const libbgp_rib4_route_t *route, lib
         if (route->attrs[i] == NULL) {
             libbgp_update_destroy(update);
             return LIBBGP_ERR_INVALID;
+        }
+        if (!fsm_ipv4_route_attr(route->attrs[i])) {
+            continue;
         }
         err = libbgp_update_add_attr(update, route->attrs[i]);
         if (err != LIBBGP_OK && err != LIBBGP_ERR_EXISTS) {
@@ -3235,7 +3388,8 @@ static void fsm_route_event_cb(const libbgp_event_t *event, void *ctx)
         default_nexthop6_linklocal,
         force_default_nexthop4,
         force_default_nexthop6,
-        ibgp_alter_nexthop);
+        ibgp_alter_nexthop,
+        route_weight);
     if (err != LIBBGP_OK) {
         fsm_teardown_current_established(impl, session_generation);
     }
