@@ -198,6 +198,26 @@ LIBBGP_TEST(capability_parse_write_unknown_passthrough_and_zero_length)
     libbgp_capability_unref(cap);
 }
 
+LIBBGP_TEST(capability_parse_exact_boundary_and_nullable_consumed)
+{
+    const uint8_t unknown_in[] = { 254u, 1u, 0xaau, 65u, 4u, 0u, 0u, 0u, 1u };
+    size_t used = 99u;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_capability_parse(cap, unknown_in, sizeof(unknown_in), &used));
+    LIBBGP_ASSERT_EQ_U64(3u, used);
+    LIBBGP_ASSERT_EQ_U64(254u, cap->code);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_CAP_UNKNOWN, cap->type);
+    LIBBGP_ASSERT_EQ_U64(1u, cap->data.unknown.len);
+    LIBBGP_ASSERT_BYTES_EQ(&unknown_in[2], cap->data.unknown.value, 1u);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_capability_parse(cap, unknown_in + used, sizeof(unknown_in) - used, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_CAP_4B_ASN, cap->type);
+    LIBBGP_ASSERT_EQ_U64(1u, cap->data.asn_4b.asn);
+
+    libbgp_capability_unref(cap);
+}
+
 LIBBGP_TEST(capability_parse_rejects_bad_lengths)
 {
     const uint8_t short_header[] = { 65u };
@@ -243,6 +263,48 @@ LIBBGP_TEST(capability_write_rejects_invalid_buffers_and_unknown_value)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_capability_write(cap, out, sizeof(out), &marker));
 
     cap->data.unknown.len = 0u;
+    libbgp_capability_unref(cap);
+}
+
+LIBBGP_TEST(capability_write_unknown_exact_255_byte_value_boundary)
+{
+    uint8_t value[255];
+    uint8_t out[257];
+    size_t out_len = 99u;
+    size_t i;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    for (i = 0u; i < sizeof(value); i++) {
+        value[i] = (uint8_t)i;
+    }
+    cap->code = 203u;
+    cap->data.unknown.value = value;
+    cap->data.unknown.len = sizeof(value);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_capability_write(cap, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(out), out_len);
+    LIBBGP_ASSERT_EQ_U64(203u, out[0]);
+    LIBBGP_ASSERT_EQ_U64(255u, out[1]);
+    LIBBGP_ASSERT_BYTES_EQ(value, out + 2u, sizeof(value));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_capability_write(cap, out, sizeof(out), NULL));
+
+    cap->data.unknown.value = NULL;
+    cap->data.unknown.len = 0u;
+    libbgp_capability_unref(cap);
+}
+
+LIBBGP_TEST(capability_write_rejects_unknown_type_without_changing_out_len)
+{
+    uint8_t out[8];
+    size_t out_len = 99u;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    cap->type = (libbgp_cap_type_t)99;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_capability_write(cap, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    cap->type = LIBBGP_CAP_UNKNOWN;
     libbgp_capability_unref(cap);
 }
 
@@ -319,8 +381,11 @@ int main(void)
         { "capability_parse_write_4b_asn_exact_bytes", capability_parse_write_4b_asn_exact_bytes },
         { "capability_parse_write_mp_bgp_exact_bytes", capability_parse_write_mp_bgp_exact_bytes },
         { "capability_parse_write_unknown_passthrough_and_zero_length", capability_parse_write_unknown_passthrough_and_zero_length },
+        { "capability_parse_exact_boundary_and_nullable_consumed", capability_parse_exact_boundary_and_nullable_consumed },
         { "capability_parse_rejects_bad_lengths", capability_parse_rejects_bad_lengths },
         { "capability_write_rejects_invalid_buffers_and_unknown_value", capability_write_rejects_invalid_buffers_and_unknown_value },
+        { "capability_write_unknown_exact_255_byte_value_boundary", capability_write_unknown_exact_255_byte_value_boundary },
+        { "capability_write_rejects_unknown_type_without_changing_out_len", capability_write_rejects_unknown_type_without_changing_out_len },
         { "capability_unknown_parse_replaces_previous_unknown_value", capability_unknown_parse_replaces_previous_unknown_value },
         { "capability_unknown_parse_nomem_preserves_existing_unknown", capability_unknown_parse_nomem_preserves_existing_unknown }
     };

@@ -95,6 +95,46 @@ LIBBGP_TEST(sink_rejects_bad_length_and_clears_buffer)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_rejects_bad_marker_and_clears_buffer)
+{
+    uint8_t bad[LIBBGP_FIXTURE_KEEPALIVE_LEN];
+    libbgp_sink_t sink;
+
+    memcpy(bad, LIBBGP_FIXTURE_KEEPALIVE, sizeof(bad));
+    bad[7] = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_sink_feed(&sink, bad, sizeof(bad)));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_zero_length_null_feed_is_noop)
+{
+    libbgp_sink_t sink;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, NULL, 0u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_pop_empty_and_null_output_are_errors)
+{
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_pop(&sink, NULL));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
 LIBBGP_TEST(sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet)
 {
     const uint8_t bad_open[] = {
@@ -200,6 +240,9 @@ int main(void)
         { "sink_pops_multiple_packets_in_order", sink_pops_multiple_packets_in_order },
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
+        { "sink_rejects_bad_marker_and_clears_buffer", sink_rejects_bad_marker_and_clears_buffer },
+        { "sink_zero_length_null_feed_is_noop", sink_zero_length_null_feed_is_noop },
+        { "sink_pop_empty_and_null_output_are_errors", sink_pop_empty_and_null_output_are_errors },
         { "sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet", sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet },
         { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer },
         { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output },

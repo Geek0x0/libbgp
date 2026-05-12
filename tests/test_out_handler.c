@@ -17,6 +17,12 @@ typedef struct reentrant_ctx {
     int called;
 } reentrant_ctx_t;
 
+typedef struct short_io_ctx {
+    void *expected_ctx;
+    size_t return_len;
+    int called;
+} short_io_ctx_t;
+
 static libbgp_io_result_t test_send(void *ctx, const uint8_t *buf, size_t len)
 {
     io_ctx_t *io = (io_ctx_t *)ctx;
@@ -83,6 +89,28 @@ static libbgp_io_result_t reentrant_send(void *ctx, const uint8_t *buf, size_t l
     reentrant->called++;
     libbgp_out_handler_set_fd(reentrant->handler, -1);
     return (libbgp_io_result_t)len;
+}
+
+static libbgp_io_result_t short_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    short_io_ctx_t *short_io = (short_io_ctx_t *)ctx;
+
+    (void)buf;
+    LIBBGP_ASSERT(ctx == short_io->expected_ctx);
+    LIBBGP_ASSERT(short_io->return_len < len);
+    short_io->called++;
+    return (libbgp_io_result_t)short_io->return_len;
+}
+
+static libbgp_io_result_t short_recv(void *ctx, uint8_t *buf, size_t len)
+{
+    short_io_ctx_t *short_io = (short_io_ctx_t *)ctx;
+
+    memset(buf, 0xabu, short_io->return_len);
+    LIBBGP_ASSERT(ctx == short_io->expected_ctx);
+    LIBBGP_ASSERT(short_io->return_len < len);
+    short_io->called++;
+    return (libbgp_io_result_t)short_io->return_len;
 }
 
 LIBBGP_TEST(out_handler_custom_callbacks)
@@ -169,6 +197,52 @@ LIBBGP_TEST(out_handler_zero_length_succeeds)
     count = 99u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_recv(&handler, &byte, 0u, &count));
     LIBBGP_ASSERT_EQ_U64(0u, count);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_zero_length_allows_null_buffers)
+{
+    libbgp_out_handler_t handler;
+    size_t count = 99u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_send(&handler, NULL, 0u, &count));
+    LIBBGP_ASSERT_EQ_U64(0u, count);
+    count = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_recv(&handler, NULL, 0u, &count));
+    LIBBGP_ASSERT_EQ_U64(0u, count);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_short_callbacks_report_short_counts)
+{
+    const uint8_t send_buf[] = { 1u, 2u, 3u, 4u };
+    uint8_t recv_buf[4] = { 0u };
+    short_io_ctx_t ctx;
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    size_t count = 99u;
+
+    ctx.expected_ctx = &ctx;
+    ctx.return_len = 2u;
+    ctx.called = 0;
+    ops.send_fn = short_send;
+    ops.recv_fn = short_recv;
+    ops.ctx = &ctx;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_send(&handler, send_buf, sizeof(send_buf), &count));
+    LIBBGP_ASSERT_EQ_U64(2u, count);
+    LIBBGP_ASSERT_EQ_I64(1, ctx.called);
+    count = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_recv(&handler, recv_buf, sizeof(recv_buf), &count));
+    LIBBGP_ASSERT_EQ_U64(2u, count);
+    LIBBGP_ASSERT_EQ_I64(2, ctx.called);
+    LIBBGP_ASSERT_EQ_U64(0xabu, recv_buf[0]);
+    LIBBGP_ASSERT_EQ_U64(0xabu, recv_buf[1]);
+    LIBBGP_ASSERT_EQ_U64(0u, recv_buf[2]);
+    LIBBGP_ASSERT_EQ_U64(0u, recv_buf[3]);
     libbgp_out_handler_destroy(&handler);
 }
 
@@ -284,6 +358,8 @@ int main(void)
         { "out_handler_custom_callbacks", out_handler_custom_callbacks },
         { "out_handler_set_ops_null_clears_custom_callbacks", out_handler_set_ops_null_clears_custom_callbacks },
         { "out_handler_zero_length_succeeds", out_handler_zero_length_succeeds },
+        { "out_handler_zero_length_allows_null_buffers", out_handler_zero_length_allows_null_buffers },
+        { "out_handler_short_callbacks_report_short_counts", out_handler_short_callbacks_report_short_counts },
         { "out_handler_rejects_null_buffers_for_nonzero_io", out_handler_rejects_null_buffers_for_nonzero_io },
         { "out_handler_unconfigured_is_invalid", out_handler_unconfigured_is_invalid },
         { "out_handler_negative_callbacks_map_errors", out_handler_negative_callbacks_map_errors },
