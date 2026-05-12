@@ -95,6 +95,30 @@ LIBBGP_TEST(sink_rejects_bad_length_and_clears_buffer)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet)
+{
+    const uint8_t bad_open[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x1c, 0x01,
+        0x04, 0xfd, 0xe8, 0x00, 0x5a, 0xcb, 0x00, 0x71, 0x01
+    };
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_sink_feed(&sink, bad_open, sizeof(bad_open)));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
 LIBBGP_TEST(sink_clear_discards_packets_and_buffer)
 {
     libbgp_sink_t sink;
@@ -176,6 +200,7 @@ int main(void)
         { "sink_pops_multiple_packets_in_order", sink_pops_multiple_packets_in_order },
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
+        { "sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet", sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet },
         { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer },
         { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output },
         { "sink_as4_context_parses_four_octet_as_path", sink_as4_context_parses_four_octet_as_path }

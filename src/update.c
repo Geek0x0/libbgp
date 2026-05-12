@@ -22,8 +22,10 @@ void libbgp_update_destroy(libbgp_update_msg_t *msg)
     bgp_free(msg->withdrawn);
     msg->withdrawn = NULL;
     msg->withdrawn_count = 0u;
-    for (i = 0u; i < msg->attr_count; i++) {
-        libbgp_pattr_unref(msg->attrs[i]);
+    if (msg->attrs != NULL) {
+        for (i = 0u; i < msg->attr_count; i++) {
+            libbgp_pattr_unref(msg->attrs[i]);
+        }
     }
     bgp_free(msg->attrs);
     msg->attrs = NULL;
@@ -517,6 +519,12 @@ static libbgp_err_t update_rebuild_as_path_from_as4_suffix(
     libbgp_pattr_t *as_path,
     const libbgp_pattr_t *as4_path,
     size_t replace_start);
+static bool update_as_path_has_as_trans_count(const libbgp_pattr_t *as_path, size_t expected_count);
+static bool update_as_path_suffix_matches_as4(
+    const libbgp_pattr_t *as_path,
+    const libbgp_pattr_t *as4_path,
+    size_t start);
+static libbgp_err_t update_restore_as_path_sparse(libbgp_pattr_t *as_path, const libbgp_pattr_t *as4_path);
 
 libbgp_err_t libbgp_update_prepend_asn(libbgp_update_msg_t *msg, uint32_t asn, bool use_4b_asn)
 {
@@ -765,6 +773,128 @@ static libbgp_err_t update_clone_path_suffix_as_type(
     return LIBBGP_OK;
 }
 
+static bool update_as_path_has_as_trans_count(const libbgp_pattr_t *as_path, size_t expected_count)
+{
+    size_t trans_count = 0u;
+    size_t i;
+
+    if (as_path == NULL) {
+        return false;
+    }
+    for (i = 0u; i < as_path->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *seg = &as_path->data.as_path.segments[i];
+        size_t j;
+
+        for (j = 0u; j < seg->asn_count; j++) {
+            if (seg->asns[j] == LIBBGP_AS_TRANS) {
+                trans_count++;
+            }
+        }
+    }
+    return trans_count == expected_count;
+}
+
+static bool update_as_path_suffix_matches_as4(
+    const libbgp_pattr_t *as_path,
+    const libbgp_pattr_t *as4_path,
+    size_t start)
+{
+    size_t pos = 0u;
+    size_t as4_seg_pos = 0u;
+    size_t as4_asn_pos = 0u;
+    size_t i;
+
+    if (as_path == NULL || as4_path == NULL) {
+        return false;
+    }
+    for (i = 0u; i < as_path->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *seg = &as_path->data.as_path.segments[i];
+        size_t j;
+
+        for (j = 0u; j < seg->asn_count; j++) {
+            uint32_t as4_asn;
+
+            if (pos < start) {
+                pos++;
+                continue;
+            }
+            while (as4_seg_pos < as4_path->data.as_path.segment_count &&
+                   as4_asn_pos >= as4_path->data.as_path.segments[as4_seg_pos].asn_count) {
+                as4_seg_pos++;
+                as4_asn_pos = 0u;
+            }
+            if (as4_seg_pos >= as4_path->data.as_path.segment_count) {
+                return false;
+            }
+            as4_asn = as4_path->data.as_path.segments[as4_seg_pos].asns[as4_asn_pos];
+            if (seg->asns[j] != LIBBGP_AS_TRANS && seg->asns[j] != as4_asn) {
+                return false;
+            }
+            as4_asn_pos++;
+            pos++;
+        }
+    }
+    while (as4_seg_pos < as4_path->data.as_path.segment_count &&
+           as4_asn_pos >= as4_path->data.as_path.segments[as4_seg_pos].asn_count) {
+        as4_seg_pos++;
+        as4_asn_pos = 0u;
+    }
+    return as4_seg_pos == as4_path->data.as_path.segment_count;
+}
+
+static libbgp_err_t update_restore_as_path_sparse(libbgp_pattr_t *as_path, const libbgp_pattr_t *as4_path)
+{
+    size_t trans_count = 0u;
+    size_t as4_count = 0u;
+    size_t as4_seg_pos = 0u;
+    size_t as4_asn_pos = 0u;
+    size_t i;
+    libbgp_err_t err;
+
+    err = update_validate_as_path_data(as_path, false, NULL);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    err = update_validate_as_path_data(as4_path, false, &as4_count);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+    for (i = 0u; i < as_path->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *seg = &as_path->data.as_path.segments[i];
+        size_t j;
+
+        for (j = 0u; j < seg->asn_count; j++) {
+            if (seg->asns[j] == LIBBGP_AS_TRANS) {
+                trans_count++;
+            }
+        }
+    }
+    if (trans_count != as4_count) {
+        return LIBBGP_ERR_INVALID;
+    }
+    for (i = 0u; i < as_path->data.as_path.segment_count; i++) {
+        libbgp_as_path_segment_t *seg = &as_path->data.as_path.segments[i];
+        size_t j;
+
+        for (j = 0u; j < seg->asn_count; j++) {
+            if (seg->asns[j] == LIBBGP_AS_TRANS) {
+                while (as4_seg_pos < as4_path->data.as_path.segment_count &&
+                       as4_asn_pos >= as4_path->data.as_path.segments[as4_seg_pos].asn_count) {
+                    as4_seg_pos++;
+                    as4_asn_pos = 0u;
+                }
+                if (as4_seg_pos >= as4_path->data.as_path.segment_count) {
+                    return LIBBGP_ERR_INVALID;
+                }
+                seg->asns[j] = as4_path->data.as_path.segments[as4_seg_pos].asns[as4_asn_pos];
+                as4_asn_pos++;
+            }
+        }
+    }
+    as_path->data.as_path.is_4b = true;
+    return LIBBGP_OK;
+}
+
 static libbgp_err_t update_rebuild_as_path_from_as4_suffix(
     libbgp_pattr_t *as_path,
     const libbgp_pattr_t *as4_path,
@@ -893,7 +1023,13 @@ libbgp_err_t libbgp_update_restore_as_path(libbgp_update_msg_t *msg)
         return LIBBGP_ERR_INVALID;
     }
     replace_start = as_path_count - as4_count;
-    err = update_rebuild_as_path_from_as4_suffix(as_path, as4_path, replace_start);
+    if (as4_count != as_path_count &&
+        update_as_path_has_as_trans_count(as_path, as4_count) &&
+        !update_as_path_suffix_matches_as4(as_path, as4_path, replace_start)) {
+        err = update_restore_as_path_sparse(as_path, as4_path);
+    } else {
+        err = update_rebuild_as_path_from_as4_suffix(as_path, as4_path, replace_start);
+    }
     if (err != LIBBGP_OK) {
         return err;
     }

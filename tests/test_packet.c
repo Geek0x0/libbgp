@@ -175,6 +175,46 @@ LIBBGP_TEST(packet_unknown_type_preserves_raw_body_and_write_small_output)
     libbgp_packet_destroy(&pkt);
 }
 
+LIBBGP_TEST(packet_parse_known_body_failure_preserves_existing_packet)
+{
+    const uint8_t unknown[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x16, 0x63,
+        0xde, 0xad, 0xbe
+    };
+    const uint8_t bad_open[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x1c, 0x01,
+        0x04, 0xfd, 0xe8, 0x00, 0x5a, 0xcb, 0x00, 0x71, 0x01
+    };
+    size_t used = 0u;
+    libbgp_packet_t pkt;
+    libbgp_packet_type_t saved_type;
+    uint8_t saved_raw_type;
+    uint8_t *saved_raw_body;
+    size_t saved_raw_body_len;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, unknown, sizeof(unknown), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(unknown), used);
+    saved_type = pkt.type;
+    saved_raw_type = pkt.raw_type;
+    saved_raw_body = pkt.raw_body;
+    saved_raw_body_len = pkt.raw_body_len;
+    used = 99u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_packet_parse(&pkt, bad_open, sizeof(bad_open), &used));
+    LIBBGP_ASSERT_EQ_I64(saved_type, pkt.type);
+    LIBBGP_ASSERT_EQ_U64(saved_raw_type, pkt.raw_type);
+    LIBBGP_ASSERT_EQ_U64(saved_raw_body_len, pkt.raw_body_len);
+    LIBBGP_ASSERT(pkt.raw_body == saved_raw_body);
+    LIBBGP_ASSERT_BYTES_EQ(&unknown[19], pkt.raw_body, pkt.raw_body_len);
+    LIBBGP_ASSERT_EQ_U64(99u, used);
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(packet_write_oversized_unknown_leaves_output_unchanged)
 {
     uint8_t body[LIBBGP_BGP_MAX_PACKET_LEN - LIBBGP_BGP_HEADER_LEN + 1u];
@@ -230,6 +270,7 @@ int main(void)
         { "packet_parse_as4_uses_four_octet_update_context", packet_parse_as4_uses_four_octet_update_context },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
         { "packet_unknown_type_preserves_raw_body_and_write_small_output", packet_unknown_type_preserves_raw_body_and_write_small_output },
+        { "packet_parse_known_body_failure_preserves_existing_packet", packet_parse_known_body_failure_preserves_existing_packet },
         { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },
         { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged }
     };

@@ -1391,7 +1391,7 @@ static bool fsm_valid_addr4(const fsm_impl_t *impl, uint32_t addr)
     }
     memcpy(bytes, &addr, sizeof(bytes));
     first = bytes[0];
-    if (first == 0u || first == 127u || (first >= 224u && first <= 239u) || first > 240u) {
+    if (first == 0u || first == 127u || first >= 224u) {
         return false;
     }
     return true;
@@ -1407,6 +1407,11 @@ static bool fsm_zero_addr6(const uint8_t addr[16])
 static bool fsm_valid_addr6(const uint8_t addr[16])
 {
     return addr != NULL && addr[0] != 0u;
+}
+
+static bool fsm_linklocal_addr6(const uint8_t addr[16])
+{
+    return addr != NULL && addr[0] == 0xfeu && (addr[1] & 0xc0u) == 0x80u;
 }
 
 static int fsm_router_id_cmp(uint32_t a, uint32_t b)
@@ -1444,7 +1449,7 @@ static bool fsm_ipv6_next_hop_acceptable(
         return false;
     }
     if (next_hop_len == 32u && !fsm_zero_addr6(&next_hop[16]) &&
-        !fsm_valid_addr6(&next_hop[16])) {
+        !fsm_linklocal_addr6(&next_hop[16])) {
         return false;
     }
     if (impl != NULL && !impl->no_nexthop_check6 && !is_ibgp &&

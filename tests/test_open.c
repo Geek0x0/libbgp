@@ -131,6 +131,25 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
     libbgp_open_destroy(&msg);
 }
 
+LIBBGP_TEST(open_write_rejects_capability_count_without_capability_array)
+{
+    uint8_t out[64];
+    size_t out_len = 99u;
+    libbgp_open_msg_t msg;
+
+    libbgp_open_init(&msg);
+    msg.version = 4u;
+    msg.my_asn = 65000u;
+    msg.hold_time = 90u;
+    msg.bgp_id = 0xcb007101u;
+    msg.capability_count = 1u;
+    msg.capabilities = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    libbgp_open_destroy(&msg);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -138,7 +157,8 @@ int main(void)
         { "open_parse_write_four_byte_asn_and_mpbgp_caps", open_parse_write_four_byte_asn_and_mpbgp_caps },
         { "open_parse_accepts_unsupported_version_for_fsm_notification", open_parse_accepts_unsupported_version_for_fsm_notification },
         { "open_add_capability_refs_and_write_emits_capability_param", open_add_capability_refs_and_write_emits_capability_param },
-        { "open_rejects_invalid_version_lengths_and_small_output", open_rejects_invalid_version_lengths_and_small_output }
+        { "open_rejects_invalid_version_lengths_and_small_output", open_rejects_invalid_version_lengths_and_small_output },
+        { "open_write_rejects_capability_count_without_capability_array", open_write_rejects_capability_count_without_capability_array }
     };
 
     return libbgp_run_tests("open", tests, LIBBGP_ARRAY_LEN(tests));
