@@ -630,6 +630,131 @@ LIBBGP_TEST(pattr_forwarded_unknown_optional_transitive_sets_partial)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_parse_rejects_invalid_fixed_attribute_lengths)
+{
+    const uint8_t origin_short[] = { 0x40u, 1u, 0u };
+    const uint8_t origin_long[] = { 0x40u, 1u, 2u, 0u, 1u };
+    const uint8_t next_hop_short[] = { 0x40u, 3u, 3u, 192u, 0u, 2u };
+    const uint8_t next_hop_long[] = { 0x40u, 3u, 5u, 192u, 0u, 2u, 1u, 0u };
+    const uint8_t med_short[] = { 0x80u, 4u, 3u, 0u, 0u, 1u };
+    const uint8_t local_pref_long[] = { 0x40u, 5u, 5u, 0u, 0u, 0u, 100u, 0u };
+    const uint8_t atomic_nonzero[] = { 0x40u, 6u, 1u, 0u };
+    const uint8_t aggregator_short[] = { 0xc0u, 7u, 5u, 0xfdu, 0xe8u, 192u, 0u, 2u };
+    const uint8_t aggregator_4b_short[] = { 0xc0u, 7u, 7u, 0u, 1u, 0u, 1u, 192u, 0u, 2u };
+    const uint8_t as4_aggregator_short[] = { 0xc0u, 18u, 7u, 0u, 1u, 0u, 1u, 198u, 51u, 100u };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, origin_short, sizeof(origin_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, origin_long, sizeof(origin_long), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, next_hop_short, sizeof(next_hop_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, next_hop_long, sizeof(next_hop_long), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, med_short, sizeof(med_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, local_pref_long, sizeof(local_pref_long), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, atomic_nonzero, sizeof(atomic_nonzero), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, aggregator_short, sizeof(aggregator_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse_as4(attr, aggregator_4b_short, sizeof(aggregator_4b_short), true, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, as4_aggregator_short, sizeof(as4_aggregator_short), NULL));
+
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_parse_rejects_malformed_mp_reach_and_unreach_lengths)
+{
+    const uint8_t mp_reach_too_short[] = { 0x80u, 14u, 4u, 0u, 2u, 1u, 16u };
+    const uint8_t mp_reach_truncated_nexthop[] = {
+        0x80u, 14u, 20u,
+        0u, 2u, 1u, 32u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    const uint8_t mp_reach_truncated_prefix[] = {
+        0x80u, 14u, 23u,
+        0u, 2u, 1u, 16u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0u,
+        32u, 0x20u
+    };
+    const uint8_t mp_unreach_too_short[] = { 0x80u, 15u, 2u, 0u, 2u };
+    const uint8_t mp_unreach_truncated_prefix[] = {
+        0x80u, 15u, 5u,
+        0u, 2u, 1u,
+        32u, 0x20u
+    };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, mp_reach_too_short, sizeof(mp_reach_too_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, mp_reach_truncated_nexthop, sizeof(mp_reach_truncated_nexthop), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, mp_reach_truncated_prefix, sizeof(mp_reach_truncated_prefix), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, mp_unreach_too_short, sizeof(mp_unreach_too_short), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, mp_unreach_truncated_prefix, sizeof(mp_unreach_truncated_prefix), NULL));
+
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_write_rejects_public_count_array_mismatches)
+{
+    uint8_t out[64];
+    libbgp_pattr_t *community = libbgp_pattr_new(LIBBGP_PATTR_COMMUNITY);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    libbgp_pattr_t *mp_unreach = libbgp_pattr_new(LIBBGP_PATTR_MP_UNREACH_IPV6);
+    libbgp_pattr_t *unknown = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(community != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    LIBBGP_ASSERT(mp_unreach != NULL);
+    LIBBGP_ASSERT(unknown != NULL);
+
+    community->data.community.count = 1u;
+    community->data.community.values = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(community, out, sizeof(out), NULL));
+
+    mp_reach->data.mp_reach_ipv6.nexthop_len = 16u;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 1u;
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(mp_reach, out, sizeof(out), NULL));
+
+    mp_unreach->data.mp_unreach_ipv6.withdrawn_count = 1u;
+    mp_unreach->data.mp_unreach_ipv6.withdrawn = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(mp_unreach, out, sizeof(out), NULL));
+
+    unknown->flags = 0x80u;
+    unknown->type_code = 99u;
+    unknown->data.unknown.len = 1u;
+    unknown->data.unknown.value = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(unknown, out, sizeof(out), NULL));
+
+    libbgp_pattr_unref(unknown);
+    libbgp_pattr_unref(mp_unreach);
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(community);
+}
+
+LIBBGP_TEST(pattr_write_rejects_small_output_for_computed_lengths)
+{
+    uint8_t out[6];
+    size_t out_len = 123u;
+    libbgp_pattr_t *local_pref = libbgp_pattr_new(LIBBGP_PATTR_LOCAL_PREF);
+    libbgp_pattr_t *as4_aggregator = libbgp_pattr_new(LIBBGP_PATTR_AS4_AGGREGATOR);
+
+    LIBBGP_ASSERT(local_pref != NULL);
+    LIBBGP_ASSERT(as4_aggregator != NULL);
+    local_pref->data.local_pref.value = 100u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_pattr_write(local_pref, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(123u, out_len);
+
+    out_len = 123u;
+    as4_aggregator->data.aggregator.asn = 65537u;
+    as4_aggregator->data.aggregator.router_id = 0xc6336401u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_pattr_write(as4_aggregator, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(123u, out_len);
+
+    libbgp_pattr_unref(as4_aggregator);
+    libbgp_pattr_unref(local_pref);
+}
+
 LIBBGP_TEST(pattr_parse_write_error_edges_and_nomem_preserves_old_state)
 {
     const uint8_t valid_unknown[] = { 0x80u, 99u, 2u, 1u, 2u };
@@ -693,6 +818,10 @@ int main(void)
         { "pattr_forwarded_unknown_optional_transitive_sets_partial", pattr_forwarded_unknown_optional_transitive_sets_partial },
         { "pattr_next_hop_parse_write_preserves_network_order_bytes", pattr_next_hop_parse_write_preserves_network_order_bytes },
         { "pattr_format_provides_debug_strings", pattr_format_provides_debug_strings },
+        { "pattr_parse_rejects_invalid_fixed_attribute_lengths", pattr_parse_rejects_invalid_fixed_attribute_lengths },
+        { "pattr_parse_rejects_malformed_mp_reach_and_unreach_lengths", pattr_parse_rejects_malformed_mp_reach_and_unreach_lengths },
+        { "pattr_write_rejects_public_count_array_mismatches", pattr_write_rejects_public_count_array_mismatches },
+        { "pattr_write_rejects_small_output_for_computed_lengths", pattr_write_rejects_small_output_for_computed_lengths },
         { "pattr_parse_write_error_edges_and_nomem_preserves_old_state", pattr_parse_write_error_edges_and_nomem_preserves_old_state }
     };
 

@@ -131,6 +131,51 @@ LIBBGP_TEST(open_rejects_invalid_version_lengths_and_small_output)
     libbgp_open_destroy(&msg);
 }
 
+LIBBGP_TEST(open_parse_optional_param_exact_boundary_and_trailing_short_header)
+{
+    const uint8_t exact[] = {
+        4u, 0xfdu, 0xe8u, 0u, 90u, 203u, 0u, 113u, 1u,
+        8u, 2u, 6u, 65u, 4u, 0u, 1u, 0u, 0u
+    };
+    const uint8_t trailing_short_param[] = {
+        4u, 0xfdu, 0xe8u, 0u, 90u, 203u, 0u, 113u, 1u,
+        9u, 2u, 6u, 65u, 4u, 0u, 1u, 0u, 0u, 2u
+    };
+    size_t used = 99u;
+    libbgp_open_msg_t msg;
+
+    libbgp_open_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_open_parse(&msg, exact, sizeof(exact), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(exact), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.capability_count);
+    LIBBGP_ASSERT_EQ_U64(65536u, libbgp_open_get_4b_asn(&msg));
+    libbgp_open_destroy(&msg);
+
+    used = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_parse(&msg, trailing_short_param, sizeof(trailing_short_param), &used));
+    LIBBGP_ASSERT_EQ_U64(99u, used);
+}
+
+LIBBGP_TEST(open_write_exact_fixed_len_boundary_and_nullable_out_len)
+{
+    const uint8_t expected[] = { 4u, 0xfdu, 0xe8u, 0u, 90u, 203u, 0u, 113u, 1u, 0u };
+    uint8_t out[sizeof(expected)];
+    size_t out_len = 99u;
+    libbgp_open_msg_t msg;
+
+    libbgp_open_init(&msg);
+    msg.version = 4u;
+    msg.my_asn = 65000u;
+    msg.hold_time = 90u;
+    msg.bgp_id = 0xcb007101u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_open_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(expected), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(expected));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_open_write(&msg, out, sizeof(out), NULL));
+    libbgp_open_destroy(&msg);
+}
+
 LIBBGP_TEST(open_write_rejects_capability_count_without_capability_array)
 {
     uint8_t out[64];
@@ -158,6 +203,8 @@ int main(void)
         { "open_parse_accepts_unsupported_version_for_fsm_notification", open_parse_accepts_unsupported_version_for_fsm_notification },
         { "open_add_capability_refs_and_write_emits_capability_param", open_add_capability_refs_and_write_emits_capability_param },
         { "open_rejects_invalid_version_lengths_and_small_output", open_rejects_invalid_version_lengths_and_small_output },
+        { "open_parse_optional_param_exact_boundary_and_trailing_short_header", open_parse_optional_param_exact_boundary_and_trailing_short_header },
+        { "open_write_exact_fixed_len_boundary_and_nullable_out_len", open_write_exact_fixed_len_boundary_and_nullable_out_len },
         { "open_write_rejects_capability_count_without_capability_array", open_write_rejects_capability_count_without_capability_array }
     };
 

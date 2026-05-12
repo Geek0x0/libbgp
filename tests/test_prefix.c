@@ -77,6 +77,26 @@ LIBBGP_TEST(prefix4_rejects_invalid_lengths_and_buffers)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_prefix4_write(&p, out, sizeof(out), &marker));
 }
 
+LIBBGP_TEST(prefix4_parse_write_exact_32_boundary_and_nullable_lengths)
+{
+    const uint8_t in[] = { 32u, 203u, 0u, 113u, 255u };
+    uint8_t out[sizeof(in)];
+    size_t used = 99u;
+    size_t out_len = 99u;
+    libbgp_prefix4_t p;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix4_parse(&p, in, sizeof(in), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(in), used);
+    LIBBGP_ASSERT_EQ_U64(32u, p.len);
+    LIBBGP_ASSERT_EQ_U64(net32((const uint8_t[]){ 203u, 0u, 113u, 255u }), p.addr);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix4_parse(&p, in, sizeof(in), NULL));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix4_write(&p, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(in), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(in, out, sizeof(in));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix4_write(&p, out, sizeof(out), NULL));
+}
+
 LIBBGP_TEST(prefix4_mask_eq_includes_cmp)
 {
     libbgp_prefix4_t root = { 0u, 0u };
@@ -176,6 +196,34 @@ LIBBGP_TEST(prefix6_rejects_invalid_lengths_and_buffers)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_prefix6_write(&p, out, sizeof(out), &marker));
 }
 
+LIBBGP_TEST(prefix6_parse_write_exact_128_boundary_and_nullable_lengths)
+{
+    const uint8_t in[] = {
+        128u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    const uint8_t expected_addr[16] = {
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    uint8_t out[sizeof(in)];
+    size_t used = 99u;
+    size_t out_len = 99u;
+    libbgp_prefix6_t p;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix6_parse(&p, in, sizeof(in), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(in), used);
+    LIBBGP_ASSERT_EQ_U64(128u, p.len);
+    LIBBGP_ASSERT_BYTES_EQ(expected_addr, p.addr, sizeof(expected_addr));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix6_parse(&p, in, sizeof(in), NULL));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix6_write(&p, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(in), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(in, out, sizeof(in));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_prefix6_write(&p, out, sizeof(out), NULL));
+}
+
 LIBBGP_TEST(prefix6_mask_eq_includes_cmp)
 {
     libbgp_prefix6_t root = { { 0u }, 0u };
@@ -225,9 +273,11 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "prefix4_parse_write_roundtrip_masks_partial", prefix4_parse_write_roundtrip_masks_partial },
         { "prefix4_rejects_invalid_lengths_and_buffers", prefix4_rejects_invalid_lengths_and_buffers },
+        { "prefix4_parse_write_exact_32_boundary_and_nullable_lengths", prefix4_parse_write_exact_32_boundary_and_nullable_lengths },
         { "prefix4_mask_eq_includes_cmp", prefix4_mask_eq_includes_cmp },
         { "prefix6_parse_write_roundtrip_masks_partial", prefix6_parse_write_roundtrip_masks_partial },
         { "prefix6_rejects_invalid_lengths_and_buffers", prefix6_rejects_invalid_lengths_and_buffers },
+        { "prefix6_parse_write_exact_128_boundary_and_nullable_lengths", prefix6_parse_write_exact_128_boundary_and_nullable_lengths },
         { "prefix6_mask_eq_includes_cmp", prefix6_mask_eq_includes_cmp }
     };
 

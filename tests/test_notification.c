@@ -70,12 +70,52 @@ LIBBGP_TEST(notification_rejects_bad_lengths_and_small_output)
     LIBBGP_ASSERT_EQ_U64(99u, marker);
 }
 
+LIBBGP_TEST(notification_write_allows_null_data_when_length_zero_and_exact_buffer)
+{
+    const uint8_t expected[] = { 3u, 1u };
+    uint8_t out[sizeof(expected)];
+    size_t out_len = 99u;
+    libbgp_notification_msg_t msg;
+
+    libbgp_notification_init(&msg);
+    msg.err_code = 3u;
+    msg.err_subcode = 1u;
+    msg.data = NULL;
+    msg.data_len = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_notification_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(expected), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(expected));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_notification_write(&msg, out, sizeof(out), NULL));
+    libbgp_notification_destroy(&msg);
+}
+
+LIBBGP_TEST(notification_write_rejects_null_data_with_nonzero_length)
+{
+    uint8_t out[8];
+    size_t out_len = 99u;
+    libbgp_notification_msg_t msg;
+
+    libbgp_notification_init(&msg);
+    msg.err_code = 2u;
+    msg.err_subcode = 3u;
+    msg.data = NULL;
+    msg.data_len = 1u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_notification_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    msg.data_len = 0u;
+    libbgp_notification_destroy(&msg);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "notification_parse_write_cease_fixture_body", notification_parse_write_cease_fixture_body },
         { "notification_parse_copies_data_and_destroy_clears_it", notification_parse_copies_data_and_destroy_clears_it },
-        { "notification_rejects_bad_lengths_and_small_output", notification_rejects_bad_lengths_and_small_output }
+        { "notification_rejects_bad_lengths_and_small_output", notification_rejects_bad_lengths_and_small_output },
+        { "notification_write_allows_null_data_when_length_zero_and_exact_buffer", notification_write_allows_null_data_when_length_zero_and_exact_buffer },
+        { "notification_write_rejects_null_data_with_nonzero_length", notification_write_rejects_null_data_with_nonzero_length }
     };
 
     return libbgp_run_tests("notification", tests, LIBBGP_ARRAY_LEN(tests));

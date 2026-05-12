@@ -73,6 +73,12 @@ typedef struct bgp_rib6_discard_result {
     size_t replacement_count;
 } bgp_rib6_discard_result_t;
 
+libbgp_err_t bgp_rib4_route_snapshot_clone(
+    const libbgp_rib4_route_t *src,
+    libbgp_rib4_route_t *dst);
+libbgp_err_t bgp_rib6_route_snapshot_clone(
+    const libbgp_rib6_route_t *src,
+    libbgp_rib6_route_t *dst);
 void bgp_rib4_route_snapshot_destroy(libbgp_rib4_route_t *route);
 void bgp_rib6_route_snapshot_destroy(libbgp_rib6_route_t *route);
 void bgp_rib4_saved_route_destroy(bgp_rib4_saved_route_t *saved);

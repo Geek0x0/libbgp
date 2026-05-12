@@ -466,7 +466,7 @@ LIBBGP_TEST(update_restore_as_path_replaces_as_trans_positionally_when_counts_ma
     libbgp_update_destroy(&msg);
 }
 
-LIBBGP_TEST(update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix)
+LIBBGP_TEST(update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ)
 {
     uint32_t path_asns[] = { LIBBGP_AS_TRANS, 64496u, LIBBGP_AS_TRANS };
     uint32_t as4_asns[] = { 65537u, 65538u };
@@ -994,6 +994,128 @@ LIBBGP_TEST(update_rejects_bad_lengths_and_small_output)
     libbgp_update_destroy(&msg);
 }
 
+LIBBGP_TEST(update_parse_rejects_malformed_attr_segment_and_preserves_state)
+{
+    const uint8_t valid_empty[] = { 0u, 0u, 0u, 0u };
+    const uint8_t invalid_as_path_segment[] = {
+        0u, 0u,
+        0u, 4u,
+        0x40u, 2u, 1u, 3u
+    };
+    const uint8_t truncated_mp_reach_attr[] = {
+        0u, 0u,
+        0u, 7u,
+        0x80u, 14u, 4u, 0u, 2u, 1u, 16u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, valid_empty, sizeof(valid_empty), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(valid_empty), used);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, invalid_as_path_segment, sizeof(invalid_as_path_segment), &used));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, truncated_mp_reach_attr, sizeof(truncated_mp_reach_attr), &used));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_allows_unknown_attr_passthrough_length)
+{
+    const uint8_t body[] = {
+        0u, 0u,
+        0u, 8u,
+        0x80u, 99u, 5u, 1u, 2u, 3u, 4u, 5u
+    };
+    uint8_t out[32];
+    size_t used = 0u;
+    size_t out_len = 0u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *attr;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.attr_count);
+    attr = msg.attrs[0];
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
+    LIBBGP_ASSERT_EQ_U64(99u, attr->type_code);
+    LIBBGP_ASSERT_EQ_U64(5u, attr->data.unknown.len);
+    LIBBGP_ASSERT_BYTES_EQ(body + 7u, attr->data.unknown.value, 5u);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(body), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(body, out, sizeof(body));
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_rejects_malformed_as_path_public_arrays)
+{
+    uint32_t asns[] = { 64512u };
+    uint8_t out[64];
+    size_t out_len = 55u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, true, asns, 1u);
+
+    LIBBGP_ASSERT(as_path != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+
+    as_path->data.as_path.segments[0].type = 0u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(55u, out_len);
+
+    as_path->data.as_path.segments[0].type = 2u;
+    as_path->data.as_path.segments[0].asn_count = 1u;
+    free(as_path->data.as_path.segments[0].asns);
+    as_path->data.as_path.segments[0].asns = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_downgrade_as_path(&msg));
+
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_restore_allows_as_set_boundary_at_first_asn)
+{
+    uint32_t set_asns[] = { LIBBGP_AS_TRANS, 64513u };
+    uint32_t seq_asns[] = { LIBBGP_AS_TRANS };
+    const uint32_t *path_asns[] = { set_asns, seq_asns };
+    size_t path_counts[] = { 2u, 1u };
+    uint8_t path_types[] = { 1u, 2u };
+    uint32_t as4_asns[] = { 65551u, 65552u, 65553u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr_segments(
+        LIBBGP_PATTR_AS_PATH, false, path_types, path_asns, path_counts, 2u);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, as4_asns, 3u);
+    libbgp_pattr_t *found;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[0].type);
+    LIBBGP_ASSERT_EQ_U64(3u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(65552u, found->data.as_path.segments[0].asns[1]);
+    LIBBGP_ASSERT_EQ_U64(65553u, found->data.as_path.segments[0].asns[2]);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
 LIBBGP_TEST(update_validate_rejects_nonzero_counts_with_null_arrays)
 {
     uint8_t out[64];
@@ -1025,6 +1147,44 @@ LIBBGP_TEST(update_validate_rejects_nonzero_counts_with_null_arrays)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(99u, out_len);
     libbgp_update_destroy(&msg);
+
+    libbgp_update_init(&msg);
+    msg.attr_count = 1u;
+    msg.attrs = (libbgp_pattr_t **)calloc(1u, sizeof(msg.attrs[0]));
+    LIBBGP_ASSERT(msg.attrs != NULL);
+    msg.attrs[0] = NULL;
+    out_len = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_write_rejects_invalid_prefix_arrays_and_small_output)
+{
+    uint8_t out[4];
+    size_t out_len = 44u;
+    libbgp_update_msg_t msg;
+    libbgp_prefix4_t bad_prefix;
+
+    libbgp_update_init(&msg);
+    bad_prefix.addr = 0u;
+    bad_prefix.len = 33u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_add_nlri(&msg, &bad_prefix));
+
+    msg.withdrawn = (libbgp_prefix4_t *)calloc(1u, sizeof(msg.withdrawn[0]));
+    LIBBGP_ASSERT(msg.withdrawn != NULL);
+    msg.withdrawn_count = 1u;
+    msg.withdrawn[0].addr = 0u;
+    msg.withdrawn[0].len = 33u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(44u, out_len);
+    libbgp_update_destroy(&msg);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_update_write(&msg, out, 3u, &out_len));
+    LIBBGP_ASSERT_EQ_U64(44u, out_len);
+    libbgp_update_destroy(&msg);
 }
 
 int main(void)
@@ -1040,7 +1200,7 @@ int main(void)
         { "update_prepend_asn_rejects_four_octet_mode_when_as4_path_exists", update_prepend_asn_rejects_four_octet_mode_when_as4_path_exists },
         { "update_prepend_asn_rejects_as_path_width_mismatch", update_prepend_asn_rejects_as_path_width_mismatch },
         { "update_restore_as_path_replaces_as_trans_positionally_when_counts_match", update_restore_as_path_replaces_as_trans_positionally_when_counts_match },
-        { "update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix", update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix },
+        { "update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ", update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ },
         { "update_restore_as_path_falls_back_to_suffix_when_sparse_counts_differ", update_restore_as_path_falls_back_to_suffix_when_sparse_counts_differ },
         { "update_restore_as_path_preserves_prefix_as_trans_for_mixed_suffix", update_restore_as_path_preserves_prefix_as_trans_for_mixed_suffix },
         { "update_restore_aggregator_creates_aggregator_from_as4_aggregator_only", update_restore_aggregator_creates_aggregator_from_as4_aggregator_only },
@@ -1058,7 +1218,12 @@ int main(void)
         { "update_downgrade_2byte_as_path_omits_unneeded_as4_path", update_downgrade_2byte_as_path_omits_unneeded_as4_path },
         { "update_add_helpers_ref_attrs_and_write_fixture_body", update_add_helpers_ref_attrs_and_write_fixture_body },
         { "update_rejects_bad_lengths_and_small_output", update_rejects_bad_lengths_and_small_output },
-        { "update_validate_rejects_nonzero_counts_with_null_arrays", update_validate_rejects_nonzero_counts_with_null_arrays }
+        { "update_parse_rejects_malformed_attr_segment_and_preserves_state", update_parse_rejects_malformed_attr_segment_and_preserves_state },
+        { "update_parse_allows_unknown_attr_passthrough_length", update_parse_allows_unknown_attr_passthrough_length },
+        { "update_rejects_malformed_as_path_public_arrays", update_rejects_malformed_as_path_public_arrays },
+        { "update_restore_allows_as_set_boundary_at_first_asn", update_restore_allows_as_set_boundary_at_first_asn },
+        { "update_validate_rejects_nonzero_counts_with_null_arrays", update_validate_rejects_nonzero_counts_with_null_arrays },
+        { "update_write_rejects_invalid_prefix_arrays_and_small_output", update_write_rejects_invalid_prefix_arrays_and_small_output }
     };
 
     return libbgp_run_tests("update", tests, LIBBGP_ARRAY_LEN(tests));
