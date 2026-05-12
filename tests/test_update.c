@@ -204,8 +204,14 @@ LIBBGP_TEST(update_parse_write_with_withdrawn_attrs_and_nlri)
     LIBBGP_ASSERT(as_path != NULL);
     LIBBGP_ASSERT(next_hop != NULL);
     LIBBGP_ASSERT_EQ_U64(0u, origin->data.origin.origin);
-    LIBBGP_ASSERT_EQ_U64(65000u, as_path->data.as_path.segments[0].asns[0]);
-    LIBBGP_ASSERT_EQ_U64(0xc00002feu, next_hop->data.next_hop.next_hop);
+    {
+        const uint8_t expected_next_hop[] = { 192u, 0u, 2u, 254u };
+        uint8_t stored_next_hop[4];
+
+        memcpy(stored_next_hop, &next_hop->data.next_hop.next_hop, sizeof(stored_next_hop));
+        LIBBGP_ASSERT_EQ_U64(65000u, as_path->data.as_path.segments[0].asns[0]);
+        LIBBGP_ASSERT_BYTES_EQ(expected_next_hop, stored_next_hop, sizeof(expected_next_hop));
+    }
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&msg, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(sizeof(body), out_len);
@@ -460,7 +466,7 @@ LIBBGP_TEST(update_restore_as_path_replaces_as_trans_positionally_when_counts_ma
     libbgp_update_destroy(&msg);
 }
 
-LIBBGP_TEST(update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ)
+LIBBGP_TEST(update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix)
 {
     uint32_t path_asns[] = { LIBBGP_AS_TRANS, 64496u, LIBBGP_AS_TRANS };
     uint32_t as4_asns[] = { 65537u, 65538u };
@@ -786,7 +792,7 @@ LIBBGP_TEST(update_restore_rejects_as4_boundary_inside_as_set)
 
 LIBBGP_TEST(update_restore_preserves_as_set_prefix_at_suffix_boundary)
 {
-    uint32_t set_asns[] = { 64512u, 64513u };
+    uint32_t set_asns[] = { LIBBGP_AS_TRANS, 64513u };
     uint32_t seq_asns[] = { LIBBGP_AS_TRANS };
     const uint32_t *path_asns[] = { set_asns, seq_asns };
     size_t path_counts[] = { 2u, 1u };
@@ -808,11 +814,12 @@ LIBBGP_TEST(update_restore_preserves_as_set_prefix_at_suffix_boundary)
     LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segment_count);
     LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[0].type);
     LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[0].asn_count);
-    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_AS_TRANS, found->data.as_path.segments[0].asns[0]);
     LIBBGP_ASSERT_EQ_U64(64513u, found->data.as_path.segments[0].asns[1]);
     LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[1].type);
     LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[1].asn_count);
     LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[1].asns[0]);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
 
     libbgp_pattr_unref(as4_path);
     libbgp_pattr_unref(as_path);
@@ -939,7 +946,10 @@ LIBBGP_TEST(update_add_helpers_ref_attrs_and_write_fixture_body)
     segment->asns = asns;
     as_path->data.as_path.segment_count = 1u;
     as_path->data.as_path.segments = segment;
-    next_hop->data.next_hop.next_hop = 0xc00002feu;
+    {
+        const uint8_t next_hop_bytes[] = { 192u, 0u, 2u, 254u };
+        memcpy(&next_hop->data.next_hop.next_hop, next_hop_bytes, sizeof(next_hop_bytes));
+    }
     nlri.addr = 0x7100cbu;
     nlri.len = 24u;
 
@@ -1030,7 +1040,7 @@ int main(void)
         { "update_prepend_asn_rejects_four_octet_mode_when_as4_path_exists", update_prepend_asn_rejects_four_octet_mode_when_as4_path_exists },
         { "update_prepend_asn_rejects_as_path_width_mismatch", update_prepend_asn_rejects_as_path_width_mismatch },
         { "update_restore_as_path_replaces_as_trans_positionally_when_counts_match", update_restore_as_path_replaces_as_trans_positionally_when_counts_match },
-        { "update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ", update_restore_as_path_consumes_as4_path_only_for_as_trans_when_counts_differ },
+        { "update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix", update_restore_as_path_preserves_prefix_as_trans_when_as4_is_suffix },
         { "update_restore_as_path_falls_back_to_suffix_when_sparse_counts_differ", update_restore_as_path_falls_back_to_suffix_when_sparse_counts_differ },
         { "update_restore_as_path_preserves_prefix_as_trans_for_mixed_suffix", update_restore_as_path_preserves_prefix_as_trans_for_mixed_suffix },
         { "update_restore_aggregator_creates_aggregator_from_as4_aggregator_only", update_restore_aggregator_creates_aggregator_from_as4_aggregator_only },
