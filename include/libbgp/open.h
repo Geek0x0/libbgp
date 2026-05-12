@@ -20,6 +20,7 @@ struct libbgp_open_msg {
 LIBBGP_API void libbgp_open_init(libbgp_open_msg_t *msg);
 LIBBGP_API void libbgp_open_destroy(libbgp_open_msg_t *msg);
 LIBBGP_API libbgp_err_t libbgp_open_add_capability(libbgp_open_msg_t *msg, libbgp_capability_t *cap);
+LIBBGP_API bool libbgp_open_has_4b_asn(const libbgp_open_msg_t *msg);
 LIBBGP_API uint32_t libbgp_open_get_4b_asn(const libbgp_open_msg_t *msg);
 LIBBGP_API bool libbgp_open_has_mpbgp(const libbgp_open_msg_t *msg, uint16_t afi, uint8_t safi);
 

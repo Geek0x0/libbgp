@@ -942,30 +942,65 @@ libbgp_err_t bgp_rib4_foreach_best_route(
     void *ctx)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
+    libbgp_prefix4_t *visited = NULL;
+    size_t visited_count = 0u;
+    libbgp_rib4_route_t route;
     size_t i;
+    libbgp_err_t err = LIBBGP_OK;
     bool keep_going = true;
 
     if (impl == NULL || fn == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    bgp_lock(&impl->lock);
-    for (i = 0u; keep_going && i < impl->routes.bucket_count; i++) {
-        bgp_hashmap_entry_t *entry;
+    memset(&route, 0, sizeof(route));
+    while (err == LIBBGP_OK && keep_going) {
+        bool found = false;
 
-        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
-            const libbgp_rib4_route_t *route = (const libbgp_rib4_route_t *)entry->value;
+        bgp_lock(&impl->lock);
+        for (i = 0u; !found && i < impl->routes.bucket_count; i++) {
+            bgp_hashmap_entry_t *entry;
 
-            if (rib4_best_exact_locked(impl, &route->prefix) != route) {
-                continue;
-            }
-            keep_going = fn(route, ctx);
-            if (!keep_going) {
+            for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+                const libbgp_rib4_route_t *current = (const libbgp_rib4_route_t *)entry->value;
+                libbgp_prefix4_t *next;
+                size_t j;
+                bool already_visited = false;
+
+                for (j = 0u; j < visited_count; j++) {
+                    if (libbgp_prefix4_eq(&visited[j], &current->prefix)) {
+                        already_visited = true;
+                        break;
+                    }
+                }
+                if (already_visited || rib4_best_exact_locked(impl, &current->prefix) != current) {
+                    continue;
+                }
+                if (visited_count == SIZE_MAX || visited_count + 1u > SIZE_MAX / sizeof(*visited)) {
+                    err = LIBBGP_ERR_NOMEM;
+                    break;
+                }
+                next = (libbgp_prefix4_t *)bgp_realloc(visited, (visited_count + 1u) * sizeof(*visited));
+                if (next == NULL) {
+                    err = LIBBGP_ERR_NOMEM;
+                    break;
+                }
+                visited = next;
+                visited[visited_count] = current->prefix;
+                visited_count++;
+                err = rib4_route_snapshot_clone(current, &route);
+                found = err == LIBBGP_OK;
                 break;
             }
         }
+        bgp_unlock(&impl->lock);
+        if (!found) {
+            break;
+        }
+        keep_going = fn(&route, ctx);
+        rib4_route_snapshot_clear(&route);
     }
-    bgp_unlock(&impl->lock);
-    return LIBBGP_OK;
+    bgp_free(visited);
+    return err;
 }
 
 void bgp_rib4_route_snapshot_destroy(libbgp_rib4_route_t *route)

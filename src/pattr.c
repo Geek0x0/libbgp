@@ -701,6 +701,19 @@ libbgp_err_t libbgp_pattr_parse(
     return libbgp_pattr_parse_as4(attr, buf, len, false, consumed);
 }
 
+libbgp_err_t libbgp_pattr_prepare_for_ebgp_forward(libbgp_pattr_t *attr)
+{
+    if (attr == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (attr->type == LIBBGP_PATTR_UNKNOWN &&
+        (attr->flags & LIBBGP_PATTR_FLAG_OPTIONAL) != 0u &&
+        (attr->flags & LIBBGP_PATTR_FLAG_TRANSITIVE) != 0u) {
+        attr->flags |= LIBBGP_PATTR_FLAG_PARTIAL;
+    }
+    return LIBBGP_OK;
+}
+
 static libbgp_err_t add_size(size_t *acc, size_t add)
 {
     if (*acc > SIZE_MAX - add) {
