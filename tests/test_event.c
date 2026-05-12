@@ -25,6 +25,52 @@ static void recording_cb(const libbgp_event_t *event, void *ctx)
     cb_ctx->record->order[cb_ctx->record->order_len++] = cb_ctx->marker;
 }
 
+typedef struct unsubscribe_during_publish_ctx {
+    libbgp_event_bus_t *bus;
+    uint64_t unsubscribe_id;
+    callback_record_t *record;
+    int marker;
+} unsubscribe_during_publish_ctx_t;
+
+typedef struct subscribe_during_publish_ctx {
+    libbgp_event_bus_t *bus;
+    callback_record_t *record;
+    callback_ctx_t *added_ctx;
+    int marker;
+    bool did_subscribe;
+} subscribe_during_publish_ctx_t;
+
+static void unsubscribe_during_publish_cb(const libbgp_event_t *event, void *ctx)
+{
+    unsubscribe_during_publish_ctx_t *cb_ctx = (unsubscribe_during_publish_ctx_t *)ctx;
+
+    (void)event;
+    cb_ctx->record->calls++;
+    cb_ctx->record->last_ctx = ctx;
+    cb_ctx->record->order[cb_ctx->record->order_len++] = cb_ctx->marker;
+    if (cb_ctx->unsubscribe_id != 0u) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_unsubscribe(cb_ctx->bus, cb_ctx->unsubscribe_id));
+        cb_ctx->unsubscribe_id = 0u;
+    }
+}
+
+static void subscribe_during_publish_cb(const libbgp_event_t *event, void *ctx)
+{
+    subscribe_during_publish_ctx_t *cb_ctx = (subscribe_during_publish_ctx_t *)ctx;
+
+    (void)event;
+    cb_ctx->record->calls++;
+    cb_ctx->record->last_ctx = ctx;
+    cb_ctx->record->order[cb_ctx->record->order_len++] = cb_ctx->marker;
+    if (!cb_ctx->did_subscribe) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(cb_ctx->bus, LIBBGP_EVENT_ROUTE_ADDED,
+                recording_cb, cb_ctx->added_ctx, NULL));
+        cb_ctx->did_subscribe = true;
+    }
+}
+
 LIBBGP_TEST(event_subscribe_returns_ids_and_counts_subscribers)
 {
     libbgp_event_bus_t bus;
@@ -168,6 +214,105 @@ LIBBGP_TEST(event_custom_subscriber_only_receives_custom_events)
     libbgp_event_bus_destroy(&bus);
 }
 
+LIBBGP_TEST(event_publish_snapshot_still_invokes_unsubscribed_inflight_callback)
+{
+    libbgp_event_bus_t bus;
+    callback_record_t record;
+    unsubscribe_during_publish_ctx_t ctx_a;
+    callback_ctx_t ctx_b;
+    callback_ctx_t ctx_c;
+    libbgp_event_t event;
+    uint64_t id_b = 0u;
+
+    memset(&record, 0, sizeof(record));
+    ctx_a.bus = &bus;
+    ctx_a.unsubscribe_id = 0u;
+    ctx_a.record = &record;
+    ctx_a.marker = 1;
+    ctx_b.record = &record;
+    ctx_b.marker = 2;
+    ctx_c.record = &record;
+    ctx_c.marker = 3;
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            unsubscribe_during_publish_cb, &ctx_a, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx_b, &id_b));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx_c, NULL));
+    ctx_a.unsubscribe_id = id_b;
+
+    LIBBGP_ASSERT_EQ_U64(3u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(3u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(1, record.order[0]);
+    LIBBGP_ASSERT_EQ_I64(2, record.order[1]);
+    LIBBGP_ASSERT_EQ_I64(3, record.order[2]);
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_event_bus_subscriber_count(&bus));
+
+    memset(&record, 0, sizeof(record));
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(2u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(1, record.order[0]);
+    LIBBGP_ASSERT_EQ_I64(3, record.order[1]);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
+LIBBGP_TEST(event_publish_snapshot_excludes_subscriber_added_during_publish_until_next_publish)
+{
+    libbgp_event_bus_t bus;
+    callback_record_t record;
+    subscribe_during_publish_ctx_t ctx_a;
+    callback_ctx_t ctx_b;
+    callback_ctx_t ctx_c;
+    callback_ctx_t ctx_d;
+    libbgp_event_t event;
+
+    memset(&record, 0, sizeof(record));
+    ctx_a.bus = &bus;
+    ctx_a.record = &record;
+    ctx_a.added_ctx = &ctx_d;
+    ctx_a.marker = 1;
+    ctx_a.did_subscribe = false;
+    ctx_b.record = &record;
+    ctx_b.marker = 2;
+    ctx_c.record = &record;
+    ctx_c.marker = 3;
+    ctx_d.record = &record;
+    ctx_d.marker = 4;
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            subscribe_during_publish_cb, &ctx_a, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx_b, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, recording_cb, &ctx_c, NULL));
+
+    LIBBGP_ASSERT_EQ_U64(3u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(3u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(1, record.order[0]);
+    LIBBGP_ASSERT_EQ_I64(2, record.order[1]);
+    LIBBGP_ASSERT_EQ_I64(3, record.order[2]);
+
+    memset(&record, 0, sizeof(record));
+    LIBBGP_ASSERT_EQ_U64(4u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(4u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(1, record.order[0]);
+    LIBBGP_ASSERT_EQ_I64(2, record.order[1]);
+    LIBBGP_ASSERT_EQ_I64(3, record.order[2]);
+    LIBBGP_ASSERT_EQ_I64(4, record.order[3]);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
 LIBBGP_TEST(event_unsubscribe_removes_subscriber_and_reports_absent_id)
 {
     libbgp_event_bus_t bus;
@@ -247,6 +392,8 @@ int main(void)
         { "event_publish_from_skips_publisher_subscription", event_publish_from_skips_publisher_subscription },
         { "event_publish_different_type_does_not_notify", event_publish_different_type_does_not_notify },
         { "event_custom_subscriber_only_receives_custom_events", event_custom_subscriber_only_receives_custom_events },
+        { "event_publish_snapshot_still_invokes_unsubscribed_inflight_callback", event_publish_snapshot_still_invokes_unsubscribed_inflight_callback },
+        { "event_publish_snapshot_excludes_subscriber_added_during_publish_until_next_publish", event_publish_snapshot_excludes_subscriber_added_during_publish_until_next_publish },
         { "event_unsubscribe_removes_subscriber_and_reports_absent_id", event_unsubscribe_removes_subscriber_and_reports_absent_id },
         { "event_publish_null_inputs_return_zero", event_publish_null_inputs_return_zero },
         { "event_operations_after_destroy_use_null_behavior", event_operations_after_destroy_use_null_behavior }

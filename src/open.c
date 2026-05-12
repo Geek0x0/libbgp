@@ -22,8 +22,10 @@ void libbgp_open_destroy(libbgp_open_msg_t *msg)
     if (msg == NULL) {
         return;
     }
-    for (i = 0u; i < msg->capability_count; i++) {
-        libbgp_capability_unref(msg->capabilities[i]);
+    if (msg->capabilities != NULL) {
+        for (i = 0u; i < msg->capability_count; i++) {
+            libbgp_capability_unref(msg->capabilities[i]);
+        }
     }
     bgp_free(msg->capabilities);
     msg->capabilities = NULL;

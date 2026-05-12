@@ -405,6 +405,74 @@ LIBBGP_TEST(pattr_parse_write_mp_reach_and_unreach_ipv6)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough)
+{
+    const uint8_t mp_reach[] = {
+        0x80u, 14u, 9u,
+        0u, 1u, 1u, 4u, 192u, 0u, 2u, 1u, 0u
+    };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    assert_roundtrip(attr, mp_reach, sizeof(mp_reach));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_CODE_MP_REACH_NLRI, attr->type_code);
+    LIBBGP_ASSERT_EQ_U64(sizeof(mp_reach) - 3u, attr->data.unknown.len);
+    LIBBGP_ASSERT_BYTES_EQ(mp_reach + 3u, attr->data.unknown.value, sizeof(mp_reach) - 3u);
+
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough)
+{
+    const uint8_t mp_unreach[] = {
+        0x80u, 15u, 8u,
+        0u, 1u, 1u, 32u, 192u, 0u, 2u, 0u
+    };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    assert_roundtrip(attr, mp_unreach, sizeof(mp_unreach));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_CODE_MP_UNREACH_NLRI, attr->type_code);
+    LIBBGP_ASSERT_EQ_U64(sizeof(mp_unreach) - 3u, attr->data.unknown.len);
+    LIBBGP_ASSERT_BYTES_EQ(mp_unreach + 3u, attr->data.unknown.value, sizeof(mp_unreach) - 3u);
+
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop)
+{
+    const uint8_t global_nexthop[] = {
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    const uint8_t linklocal_nexthop[] = {
+        0xfeu, 0x80u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    const uint8_t mp_reach[] = {
+        0x80u, 14u, 42u,
+        0u, 2u, 1u, 32u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0xfeu, 0x80u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0u,
+        32u, 0x20u, 0x01u, 0x0du, 0xb8u
+    };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    assert_roundtrip(attr, mp_reach, sizeof(mp_reach));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_MP_REACH_IPV6, attr->type);
+    LIBBGP_ASSERT_EQ_U64(32u, attr->data.mp_reach_ipv6.nexthop_len);
+    LIBBGP_ASSERT_BYTES_EQ(global_nexthop, attr->data.mp_reach_ipv6.nexthop, sizeof(global_nexthop));
+    LIBBGP_ASSERT_BYTES_EQ(linklocal_nexthop, attr->data.mp_reach_ipv6.nexthop + 16u, sizeof(linklocal_nexthop));
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_parse_write_unknown_extended_and_zero_length)
 {
     const uint8_t unknown[] = { 0x80u, 99u, 3u, 1u, 2u, 3u };
@@ -590,6 +658,9 @@ int main(void)
         { "pattr_parse_write_aggregator_community_and_as_paths", pattr_parse_write_aggregator_community_and_as_paths },
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_parse_write_mp_reach_and_unreach_ipv6", pattr_parse_write_mp_reach_and_unreach_ipv6 },
+        { "pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough },
+        { "pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough },
+        { "pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop", pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop },
         { "pattr_parse_write_unknown_extended_and_zero_length", pattr_parse_write_unknown_extended_and_zero_length },
         { "pattr_forwarded_unknown_optional_transitive_sets_partial", pattr_forwarded_unknown_optional_transitive_sets_partial },
         { "pattr_format_provides_debug_strings", pattr_format_provides_debug_strings },

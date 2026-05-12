@@ -45,10 +45,7 @@ LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_SUPPORT := tests/test_main.c tests/fixtures/alloc_tracker.c
 TEST_COMMON_OBJS := $(TEST_SUPPORT:%.c=$(BUILD_DIR)/%.o)
 
-TEST_SRCS := tests/test_alloc_log.c tests/test_vec.c tests/test_prefix.c tests/test_capability.c tests/test_pattr.c \
-	tests/test_open.c tests/test_notification.c tests/test_update.c tests/test_packet.c \
-	tests/test_hashmap.c tests/test_rib.c tests/test_filter.c tests/test_event.c \
-	tests/test_sink.c tests/test_out_handler.c tests/test_fsm.c
+TEST_SRCS := $(filter-out tests/test_main.c,$(wildcard tests/test_*.c))
 TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
