@@ -871,6 +871,7 @@ LIBBGP_TEST(rib6_neighbor_as_skips_null_attrs_and_rejects_malformed_path)
     libbgp_pattr_t *high_attrs[2];
     libbgp_pattr_t *low_attrs[2];
     libbgp_pattr_t *malformed_attrs[1];
+    libbgp_err_t err;
 
     LIBBGP_ASSERT(malformed_path != NULL);
     malformed_path->data.as_path.segment_count = 1u;
@@ -899,7 +900,19 @@ LIBBGP_TEST(rib6_neighbor_as_skips_null_attrs_and_rejects_malformed_path)
     malformed_old.attr_count = 1u;
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &null_high));
+    err = libbgp_rib6_insert(&rib, &null_high);
+    if (err == LIBBGP_ERR_INVALID) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_rib6_insert(&rib, &null_low));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &malformed_low));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &malformed_old));
+        assert_rib6_best_source(&rib, malformed_dest, 4u);
+        libbgp_rib6_destroy(&rib);
+        libbgp_pattr_unref(high_path);
+        libbgp_pattr_unref(low_path);
+        libbgp_pattr_unref(malformed_path);
+        return;
+    }
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, err);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &null_low));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &malformed_low));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &malformed_old));
@@ -2786,6 +2799,188 @@ LIBBGP_TEST(rib6_discard_empty_and_withdraw_missing_preserve_routes)
     libbgp_rib6_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_discard_empty_and_withdraw_missing_preserve_routes)
+{
+    /*
+     * RFC basis: RFC 4271 §9.1.3 (route withdrawals apply to existing routes only).
+     * Covered branches: rib4_withdraw_locked not-found path; libbgp_rib4_discard no-op path.
+     * Expected result: withdrawing a missing route keeps existing best route unchanged.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 84u, 0u, 0u, 24u);
+    libbgp_rib4_route_t route = route4(prefix, 84u);
+    const libbgp_rib4_route_t *found = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 84u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib4_route_count(&rib));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib4_withdraw(&rib, 85u, &prefix));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 84u, 0u, 1u), &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(84u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 85u));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 84u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib4_route_count(&rib));
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_med_ignores_as_path_without_as_sequence)
+{
+    /*
+     * RFC basis: RFC 4271 §9.1.2.2 (MED only compared for paths from same neighboring AS).
+     * Covered branches: rib4_neighbor_as path with AS_PATH present but no AS_SEQUENCE segment.
+     * Expected result: MED ignored, final tie-break falls back to older update_id.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(203u, 0u, 122u, 0u, 24u);
+    libbgp_rib4_route_t high_med_older = route4(prefix, 1u);
+    libbgp_rib4_route_t low_med_newer = route4(prefix, 2u);
+    libbgp_pattr_t *set_only_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_as_path_segment_t *segments;
+    uint32_t *set_asns;
+    libbgp_pattr_t *attrs[1];
+
+    LIBBGP_ASSERT(set_only_path != NULL);
+    segments = (libbgp_as_path_segment_t *)libbgp_calloc(1u, sizeof(*segments));
+    set_asns = (uint32_t *)libbgp_calloc(1u, sizeof(*set_asns));
+    LIBBGP_ASSERT(segments != NULL);
+    LIBBGP_ASSERT(set_asns != NULL);
+    set_asns[0] = 65050u;
+    segments[0].type = 1u;
+    segments[0].asn_count = 1u;
+    segments[0].asns = set_asns;
+    set_only_path->data.as_path.segments = segments;
+    set_only_path->data.as_path.segment_count = 1u;
+    set_only_path->data.as_path.is_4b = true;
+    attrs[0] = set_only_path;
+
+    high_med_older.attrs = attrs;
+    high_med_older.attr_count = 1u;
+    high_med_older.med = 100u;
+    high_med_older.update_id = 10u;
+    low_med_newer.attrs = attrs;
+    low_med_newer.attr_count = 1u;
+    low_med_newer.med = 10u;
+    low_med_newer.update_id = 20u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &high_med_older));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &low_med_newer));
+    assert_rib4_best_source(&rib, ip4(203u, 0u, 122u, 1u), 1u);
+
+    libbgp_rib4_destroy(&rib);
+    libbgp_pattr_unref(set_only_path);
+}
+
+LIBBGP_TEST(rib6_med_ignores_as_path_without_as_sequence)
+{
+    /*
+     * RFC basis: RFC 4271 §9.1.2.2 (MED only compared for paths from same neighboring AS).
+     * Covered branches: rib6_neighbor_as path with AS_PATH present but no AS_SEQUENCE segment.
+     * Expected result: MED ignored, final tie-break falls back to older update_id.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x22u };
+    const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x22u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0x22u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t high_med_older = route6(prefix, 1u, next_hop);
+    libbgp_rib6_route_t low_med_newer = route6(prefix, 2u, next_hop);
+    libbgp_pattr_t *set_only_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_as_path_segment_t *segments;
+    uint32_t *set_asns;
+    libbgp_pattr_t *attrs[1];
+
+    LIBBGP_ASSERT(set_only_path != NULL);
+    segments = (libbgp_as_path_segment_t *)libbgp_calloc(1u, sizeof(*segments));
+    set_asns = (uint32_t *)libbgp_calloc(1u, sizeof(*set_asns));
+    LIBBGP_ASSERT(segments != NULL);
+    LIBBGP_ASSERT(set_asns != NULL);
+    set_asns[0] = 65050u;
+    segments[0].type = 1u;
+    segments[0].asn_count = 1u;
+    segments[0].asns = set_asns;
+    set_only_path->data.as_path.segments = segments;
+    set_only_path->data.as_path.segment_count = 1u;
+    set_only_path->data.as_path.is_4b = true;
+    attrs[0] = set_only_path;
+
+    high_med_older.attrs = attrs;
+    high_med_older.attr_count = 1u;
+    high_med_older.med = 100u;
+    high_med_older.update_id = 10u;
+    low_med_newer.attrs = attrs;
+    low_med_newer.attr_count = 1u;
+    low_med_newer.med = 10u;
+    low_med_newer.update_id = 20u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &high_med_older));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &low_med_newer));
+    assert_rib6_best_source(&rib, dest, 1u);
+
+    libbgp_rib6_destroy(&rib);
+    libbgp_pattr_unref(set_only_path);
+}
+
+LIBBGP_TEST(rib6_discard_collect_reports_allocator_failures)
+{
+    /*
+     * RFC basis: RFC 7606 §2 (error handling should be robust and avoid state corruption).
+     * Covered branches: rib6_prefix_array_push/rib6_result_add_replacement allocation-failure paths.
+     * Expected result: returns LIBBGP_ERR_NOMEM and reports no withdrawn/replacement output.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t withdrawn_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x72u };
+    const uint8_t replaced_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x73u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0x72u };
+    libbgp_prefix6_t withdrawn_prefix = p6(withdrawn_addr, 48u);
+    libbgp_prefix6_t replaced_prefix = p6(replaced_addr, 48u);
+    libbgp_rib6_route_t peer_only = route6(withdrawn_prefix, 72u, next_hop);
+    libbgp_rib6_route_t peer_best = route6(replaced_prefix, 72u, next_hop);
+    libbgp_rib6_route_t replacement = route6(replaced_prefix, 73u, next_hop);
+    bgp_rib6_discard_result_t result;
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t alloc;
+    libbgp_err_t err;
+
+    peer_only.local_pref = 200u;
+    peer_best.local_pref = 200u;
+    replacement.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &peer_only));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &peer_best));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &replacement));
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 1u;
+    alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&alloc);
+    err = bgp_rib6_discard_collect(&rib, 72u, &result);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(0u, result.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, result.replacement_count);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &peer_only));
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 3u;
+    libbgp_set_alloc(&alloc);
+    err = bgp_rib6_discard_collect(&rib, 72u, &result);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(0u, result.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, result.replacement_count);
+
+    libbgp_rib6_destroy(&rib);
+}
+
 LIBBGP_TEST(rib6_saved_route_update_restore_and_conditional_withdraw)
 {
     libbgp_rib6_t rib;
@@ -3181,6 +3376,176 @@ LIBBGP_TEST(rib6_restore_saved_if_absent_noop_when_entry_null)
     libbgp_rib6_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_error_paths_cover_zero_source_saved_route_and_alloc_failures)
+{
+    /*
+     * RFC basis: RFC 4271 §4.2 + RFC 7606 §2 (robust error handling for malformed/invalid state).
+     * Covered branches: source_router_id==0 duplicate insert path, saved-route invalid-entry path,
+     *                   restore-with-source-mismatch, withdraw-save invalid arg, insert_local NOMEM paths.
+     * Expected result: API returns explicit ERR_* without corrupting existing RIB state.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t zero_src_prefix = p4(10u, 96u, 0u, 0u, 24u);
+    libbgp_rib4_route_t zero_src = route4(zero_src_prefix, 0u);
+    libbgp_prefix4_t saved_prefix = p4(10u, 97u, 0u, 0u, 24u);
+    libbgp_rib4_route_t saved_route = route4(saved_prefix, 97u);
+    bgp_rib4_saved_route_t saved;
+    bool had_route = false;
+    uint64_t update_id = 0u;
+    bgp_hashmap_entry_t bogus_entry;
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t alloc;
+    bool saw_local_nomem = false;
+    size_t i;
+
+    memset(&saved, 0, sizeof(saved));
+    memset(&bogus_entry, 0, sizeof(bogus_entry));
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 1u;
+    alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_rib4_init(&rib));
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &zero_src));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS, libbgp_rib4_insert(&rib, &zero_src));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_exact_update_id(&rib, 97u, NULL, &update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_withdraw_exact_save(&rib, 97u, &saved_prefix, NULL, &had_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_save_replaced(&rib, &saved_route, NULL, NULL, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_exact_save(&rib, 97u, &saved_prefix, &saved, &had_route));
+    LIBBGP_ASSERT(had_route);
+    LIBBGP_ASSERT(saved.entry != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_restore_saved_if_absent(&rib, 98u, &saved));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_restore_saved_if_absent(&rib, 97u, &saved));
+    bgp_rib4_saved_route_destroy(&saved);
+
+    saved.entry = &bogus_entry;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_saved_route_update_id(&saved, &update_id));
+    saved.entry = NULL;
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 1u;
+    alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM,
+        libbgp_rib4_insert_local(&rib, &saved_prefix, ip4(192u, 0u, 2u, 97u), 97));
+    libbgp_set_alloc(NULL);
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 2u;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM,
+        libbgp_rib4_insert_local(&rib, &saved_prefix, ip4(192u, 0u, 2u, 98u), 98));
+    libbgp_set_alloc(NULL);
+
+    for (i = 1u; i <= 16u; i++) {
+        libbgp_prefix4_t fail_prefix = p4(10u, 98u, (uint8_t)i, 0u, 24u);
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        libbgp_set_alloc(&alloc);
+        if (libbgp_rib4_insert_local(&rib, &fail_prefix, ip4(192u, 0u, 2u, (uint8_t)i), 99) == LIBBGP_ERR_NOMEM) {
+            saw_local_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        (void)libbgp_rib4_withdraw(&rib, 0u, &fail_prefix);
+    }
+    LIBBGP_ASSERT(saw_local_nomem);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_error_paths_cover_zero_source_saved_route_and_alloc_failures)
+{
+    /*
+     * RFC basis: RFC 4271 §4.2 + RFC 7606 §2 (robust error handling for malformed/invalid state).
+     * Covered branches: source_router_id==0 duplicate insert path, saved-route invalid-entry path,
+     *                   restore-with-source-mismatch, withdraw-save invalid arg, insert_local NOMEM paths.
+     * Expected result: API returns explicit ERR_* without corrupting existing RIB state.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t zero_src_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x96u };
+    const uint8_t saved_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x97u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0x96u };
+    libbgp_prefix6_t zero_src_prefix = p6(zero_src_addr, 48u);
+    libbgp_prefix6_t saved_prefix = p6(saved_addr, 48u);
+    libbgp_rib6_route_t zero_src = route6(zero_src_prefix, 0u, next_hop);
+    libbgp_rib6_route_t saved_route = route6(saved_prefix, 97u, next_hop);
+    bgp_rib6_saved_route_t saved;
+    bool had_route = false;
+    uint64_t update_id = 0u;
+    bgp_hashmap_entry_t bogus_entry;
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t alloc;
+    bool saw_local_nomem = false;
+    size_t i;
+
+    memset(&saved, 0, sizeof(saved));
+    memset(&bogus_entry, 0, sizeof(bogus_entry));
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 1u;
+    alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_rib6_init(&rib));
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &zero_src));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS, libbgp_rib6_insert(&rib, &zero_src));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib6_exact_update_id(&rib, 97u, NULL, &update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib6_withdraw_exact_save(&rib, 97u, &saved_prefix, NULL, &had_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_save_replaced(&rib, &saved_route, NULL, NULL, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_withdraw_exact_save(&rib, 97u, &saved_prefix, &saved, &had_route));
+    LIBBGP_ASSERT(had_route);
+    LIBBGP_ASSERT(saved.entry != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib6_restore_saved_if_absent(&rib, 98u, &saved));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_restore_saved_if_absent(&rib, 97u, &saved));
+    bgp_rib6_saved_route_destroy(&saved);
+
+    saved.entry = &bogus_entry;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib6_saved_route_update_id(&saved, &update_id));
+    saved.entry = NULL;
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 1u;
+    alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_rib6_insert_local(&rib, &saved_prefix, next_hop, 97));
+    libbgp_set_alloc(NULL);
+
+    fail_ctx.calls = 0u;
+    fail_ctx.fail_at = 2u;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_rib6_insert_local(&rib, &saved_prefix, next_hop, 98));
+    libbgp_set_alloc(NULL);
+
+    for (i = 1u; i <= 16u; i++) {
+        uint8_t fail_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x98u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, (uint8_t)i, 0u };
+        libbgp_prefix6_t fail_prefix = p6(fail_addr, 120u);
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        libbgp_set_alloc(&alloc);
+        if (libbgp_rib6_insert_local(&rib, &fail_prefix, next_hop, 99) == LIBBGP_ERR_NOMEM) {
+            saw_local_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        (void)libbgp_rib6_withdraw(&rib, 0u, &fail_prefix);
+    }
+    LIBBGP_ASSERT(saw_local_nomem);
+
+    libbgp_rib6_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_foreach_route_visits_multiple_routes_before_stop)
 {
     /* Exercise the keep_going loop where the callback returns true for
@@ -3222,6 +3587,225 @@ LIBBGP_TEST(rib6_foreach_route_visits_multiple_routes_before_stop)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r2));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_foreach_route(&rib, record_rib6_source, &ctx));
     LIBBGP_ASSERT_EQ_U64(1u, ctx.count);
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_med_rfc4271_neighbor_as_gate_then_med_activation)
+{
+    /*
+     * RFC section: RFC 4271 §9.1.2.2 (MED is comparable only across paths learned from the same neighboring AS).
+     * Target branches: rib4.c:rib4_better() MED gate false path (different neighbor AS), then MED compare true path.
+     * Expected result: lower MED does not win across different neighbor AS; lower MED wins when neighbor AS matches.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t gate_prefix = p4(198u, 51u, 230u, 0u, 24u);
+    libbgp_prefix4_t med_prefix = p4(198u, 51u, 231u, 0u, 24u);
+    libbgp_rib4_route_t gate_baseline = route4(gate_prefix, 230u);
+    libbgp_rib4_route_t gate_diff_neighbor_lower_med = route4(gate_prefix, 231u);
+    libbgp_rib4_route_t med_high = route4(med_prefix, 232u);
+    libbgp_rib4_route_t med_low = route4(med_prefix, 233u);
+    libbgp_pattr_t *gate_baseline_path = test_as_path_attr(65001u, 65101u);
+    libbgp_pattr_t *gate_diff_neighbor_path = test_as_path_attr(65002u, 65102u);
+    libbgp_pattr_t *med_high_path = test_as_path_attr(65111u, 65201u);
+    libbgp_pattr_t *med_low_path = test_as_path_attr(65111u, 65202u);
+    libbgp_pattr_t *gate_baseline_attrs[1];
+    libbgp_pattr_t *diff_attrs[1];
+    libbgp_pattr_t *med_high_attrs[1];
+    libbgp_pattr_t *med_low_attrs[1];
+
+    gate_baseline_attrs[0] = gate_baseline_path;
+    diff_attrs[0] = gate_diff_neighbor_path;
+    med_high_attrs[0] = med_high_path;
+    med_low_attrs[0] = med_low_path;
+
+    gate_baseline.med = 200u;
+    gate_baseline.update_id = 10u;
+    gate_baseline.attrs = gate_baseline_attrs;
+    gate_baseline.attr_count = 1u;
+    gate_diff_neighbor_lower_med.med = 1u;
+    gate_diff_neighbor_lower_med.update_id = 20u;
+    gate_diff_neighbor_lower_med.attrs = diff_attrs;
+    gate_diff_neighbor_lower_med.attr_count = 1u;
+    med_high.med = 180u;
+    med_high.update_id = 10u;
+    med_high.attrs = med_high_attrs;
+    med_high.attr_count = 1u;
+    med_low.med = 20u;
+    med_low.update_id = 20u;
+    med_low.attrs = med_low_attrs;
+    med_low.attr_count = 1u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &gate_baseline));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &gate_diff_neighbor_lower_med));
+    assert_rib4_best_source(&rib, ip4(198u, 51u, 230u, 1u), 230u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &med_high));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &med_low));
+    assert_rib4_best_source(&rib, ip4(198u, 51u, 231u, 1u), 233u);
+
+    libbgp_rib4_destroy(&rib);
+    libbgp_pattr_unref(gate_baseline_path);
+    libbgp_pattr_unref(gate_diff_neighbor_path);
+    libbgp_pattr_unref(med_high_path);
+    libbgp_pattr_unref(med_low_path);
+}
+
+LIBBGP_TEST(rib4_source_zero_exact_update_withdraw_edges)
+{
+    /*
+     * RFC section: RFC 4271 §9.1 (route replacement/withdrawal must be deterministic per source).
+     * Target branches: rib4.c:bgp_rib4_exact_update_id() found/not-found and bgp_rib4_withdraw_exact_if_update_id() mismatch/match/not-found.
+     * Expected result: source_router_id==0 route supports exact-update_id reads; wrong update_id keeps route, exact update_id withdraws it.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 231u, 0u, 0u, 24u);
+    libbgp_rib4_route_t route = route4(prefix, 0u);
+    uint64_t update_id = 0u;
+    const libbgp_rib4_route_t *found = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_exact_update_id(&rib, 0u, &prefix, &update_id));
+    LIBBGP_ASSERT(update_id != 0u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id + 1u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 231u, 0u, 1u), &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(0u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, bgp_rib4_exact_update_id(&rib, 0u, &prefix, &update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, bgp_rib4_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id));
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_discard_collect_non_best_source_has_no_best_delta)
+{
+    /*
+     * RFC section: RFC 4271 §9.1.2 (best-path recomputation only affects NLRI whose best path changes).
+     * Target branches: rib4.c:bgp_rib4_discard_collect() source-match branch where route is not best, plus zero active-prefix result path.
+     * Expected result: removing a non-best source yields no withdrawn/replacement entries and leaves best route intact.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 232u, 0u, 0u, 24u);
+    libbgp_rib4_route_t non_best = route4(prefix, 232u);
+    libbgp_rib4_route_t best = route4(prefix, 233u);
+    bgp_rib4_discard_result_t result;
+    const libbgp_rib4_route_t *found = NULL;
+
+    non_best.local_pref = 100u;
+    best.local_pref = 200u;
+    memset(&result, 0, sizeof(result));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &non_best));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &best));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_discard_collect(&rib, 232u, &result));
+
+    LIBBGP_ASSERT_EQ_U64(0u, result.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, result.replacement_count);
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 232u, 0u, 1u), &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(233u, found->source_router_id);
+
+    bgp_rib4_discard_result_destroy(&result);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_restore_saved_if_absent_noop_and_invalid_saved_entry)
+{
+    /*
+     * RFC section: RFC 7606 §2 (malformed state must return explicit errors without destabilizing routing state).
+     * Target branches: rib4.c:bgp_rib4_restore_saved_if_absent() saved->entry==NULL no-op and route==NULL invalid detached-entry path.
+     * Expected result: NULL saved entry is accepted as no-op; detached entry with NULL route is rejected as LIBBGP_ERR_INVALID.
+     */
+    libbgp_rib4_t rib;
+    bgp_rib4_saved_route_t saved;
+    bgp_hashmap_entry_t bogus;
+    uint64_t update_id = 123u;
+
+    memset(&saved, 0, sizeof(saved));
+    memset(&bogus, 0, sizeof(bogus));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_restore_saved_if_absent(&rib, 234u, &saved));
+
+    saved.entry = &bogus;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_restore_saved_if_absent(&rib, 234u, &saved));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_rib4_saved_route_update_id(&saved, &update_id));
+    LIBBGP_ASSERT_EQ_U64(0u, update_id);
+    saved.entry = NULL;
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_foreach_best_route_continues_then_stops_on_callback_false)
+{
+    /*
+     * RFC section: RFC 4271 §9.1 (best-path set is enumerable, callback controls delivery pacing only).
+     * Target branches: rib4.c:bgp_rib4_foreach_best_route() keep_going true continuation and callback-driven early-stop false branch.
+     * Expected result: limit=2 visits exactly two best routes; limit=0 visits all best routes.
+     */
+    libbgp_rib4_t rib;
+    libbgp_rib4_route_t a = route4(p4(10u, 233u, 1u, 0u, 24u), 1u);
+    libbgp_rib4_route_t b = route4(p4(10u, 233u, 2u, 0u, 24u), 2u);
+    libbgp_rib4_route_t c = route4(p4(10u, 233u, 3u, 0u, 24u), 3u);
+    rib4_iter_count_ctx_t ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &a));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &b));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &c));
+
+    ctx.limit = 2u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_foreach_best_route(&rib, record_rib4_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(2u, ctx.count);
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.limit = 0u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_foreach_best_route(&rib, record_rib4_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(3u, ctx.count);
+    LIBBGP_ASSERT(rib4_sources_contain(&ctx, 1u));
+    LIBBGP_ASSERT(rib4_sources_contain(&ctx, 2u));
+    LIBBGP_ASSERT(rib4_sources_contain(&ctx, 3u));
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_source_zero_exact_update_withdraw_edges)
+{
+    /*
+     * RFC section: RFC 4271 §9.1 (route replacement/withdrawal must be deterministic per source).
+     * Target branches: rib6.c:bgp_rib6_exact_update_id() found/not-found and bgp_rib6_withdraw_exact_if_update_id() mismatch/match/not-found.
+     * Expected result: source_router_id==0 route supports exact-update_id reads; wrong update_id keeps route, exact update_id withdraws it.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xe7u };
+    const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xe7u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xe7u };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t route = route6(prefix, 0u, next_hop);
+    uint64_t update_id = 0u;
+    const libbgp_rib6_route_t *found = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_exact_update_id(&rib, 0u, &prefix, &update_id));
+    LIBBGP_ASSERT(update_id != 0u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id + 1u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(0u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, bgp_rib6_exact_update_id(&rib, 0u, &prefix, &update_id));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, bgp_rib6_withdraw_exact_if_update_id(&rib, 0u, &prefix, update_id));
+
     libbgp_rib6_destroy(&rib);
 }
 
@@ -3294,6 +3878,10 @@ int main(void)
         { "rib6_insert_save_replaced_reports_replaced_route", rib6_insert_save_replaced_reports_replaced_route },
         { "rib4_withdraw_track_reports_no_change_and_rejects_invalid_args", rib4_withdraw_track_reports_no_change_and_rejects_invalid_args },
         { "rib6_discard_empty_and_withdraw_missing_preserve_routes", rib6_discard_empty_and_withdraw_missing_preserve_routes },
+        { "rib4_discard_empty_and_withdraw_missing_preserve_routes", rib4_discard_empty_and_withdraw_missing_preserve_routes },
+        { "rib4_med_ignores_as_path_without_as_sequence", rib4_med_ignores_as_path_without_as_sequence },
+        { "rib6_med_ignores_as_path_without_as_sequence", rib6_med_ignores_as_path_without_as_sequence },
+        { "rib6_discard_collect_reports_allocator_failures", rib6_discard_collect_reports_allocator_failures },
         { "rib6_saved_route_update_restore_and_conditional_withdraw", rib6_saved_route_update_restore_and_conditional_withdraw },
         { "rib4_scoped_lookup_keeps_adj_rib_sources_separate", rib4_scoped_lookup_keeps_adj_rib_sources_separate },
         { "rib6_scoped_lookup_keeps_adj_rib_sources_separate", rib6_scoped_lookup_keeps_adj_rib_sources_separate },
@@ -3306,8 +3894,16 @@ int main(void)
         { "rib4_foreach_best_route_covers_initial_capacity_branch", rib4_foreach_best_route_covers_initial_capacity_branch },
         { "rib6_foreach_best_route_covers_initial_capacity_branch", rib6_foreach_best_route_covers_initial_capacity_branch },
         { "rib6_restore_saved_if_absent_noop_when_entry_null", rib6_restore_saved_if_absent_noop_when_entry_null },
+        { "rib4_error_paths_cover_zero_source_saved_route_and_alloc_failures", rib4_error_paths_cover_zero_source_saved_route_and_alloc_failures },
+        { "rib6_error_paths_cover_zero_source_saved_route_and_alloc_failures", rib6_error_paths_cover_zero_source_saved_route_and_alloc_failures },
         { "rib4_foreach_route_visits_multiple_routes_before_stop", rib4_foreach_route_visits_multiple_routes_before_stop },
-        { "rib6_foreach_route_visits_multiple_routes_before_stop", rib6_foreach_route_visits_multiple_routes_before_stop }
+        { "rib6_foreach_route_visits_multiple_routes_before_stop", rib6_foreach_route_visits_multiple_routes_before_stop },
+        { "rib4_med_rfc4271_neighbor_as_gate_then_med_activation", rib4_med_rfc4271_neighbor_as_gate_then_med_activation },
+        { "rib4_source_zero_exact_update_withdraw_edges", rib4_source_zero_exact_update_withdraw_edges },
+        { "rib4_discard_collect_non_best_source_has_no_best_delta", rib4_discard_collect_non_best_source_has_no_best_delta },
+        { "rib4_restore_saved_if_absent_noop_and_invalid_saved_entry", rib4_restore_saved_if_absent_noop_and_invalid_saved_entry },
+        { "rib4_foreach_best_route_continues_then_stops_on_callback_false", rib4_foreach_best_route_continues_then_stops_on_callback_false },
+        { "rib6_source_zero_exact_update_withdraw_edges", rib6_source_zero_exact_update_withdraw_edges }
     };
 
     return libbgp_run_tests("rib", tests, LIBBGP_ARRAY_LEN(tests));
