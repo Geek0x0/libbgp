@@ -19,9 +19,11 @@ static pthread_mutex_t sink_acquire_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct sink_impl {
     uint8_t *buf;
+    size_t buf_off;
     size_t buf_len;
     size_t buf_cap;
     libbgp_packet_t *packets;
+    size_t packet_head;
     size_t packet_count;
     size_t packet_cap;
     bool use_4b_asn;
@@ -51,12 +53,32 @@ static sink_impl_t *sink_impl_lock_const(const libbgp_sink_t *sink)
     return sink_impl_lock((libbgp_sink_t *)sink);
 }
 
-static bool sink_reserve_buf(sink_impl_t *impl, size_t needed)
+static void sink_compact_buf(sink_impl_t *impl)
+{
+    if (impl->buf_off == 0u) {
+        return;
+    }
+    if (impl->buf_len != 0u) {
+        memmove(impl->buf, impl->buf + impl->buf_off, impl->buf_len);
+    }
+    impl->buf_off = 0u;
+}
+
+static bool sink_reserve_buf(sink_impl_t *impl, size_t len)
 {
     uint8_t *buf;
+    size_t needed;
     size_t new_cap;
 
+    if (len > SIZE_MAX - impl->buf_len) {
+        return false;
+    }
+    needed = impl->buf_len + len;
+    if (impl->buf_off <= impl->buf_cap && len <= impl->buf_cap - impl->buf_off - impl->buf_len) {
+        return true;
+    }
     if (needed <= impl->buf_cap) {
+        sink_compact_buf(impl);
         return true;
     }
     new_cap = impl->buf_cap == 0u ? LIBBGP_BGP_HEADER_LEN : impl->buf_cap * 2u;
@@ -66,6 +88,7 @@ static bool sink_reserve_buf(sink_impl_t *impl, size_t needed)
         }
         new_cap *= 2u;
     }
+    sink_compact_buf(impl);
     buf = (uint8_t *)bgp_realloc(impl->buf, new_cap);
     if (buf == NULL) {
         return false;
@@ -94,14 +117,23 @@ static bool sink_reserve_packets(sink_impl_t *impl, size_t needed)
     if (new_cap > SIZE_MAX / sizeof(*impl->packets)) {
         return false;
     }
-    packets = (libbgp_packet_t *)bgp_realloc(impl->packets, new_cap * sizeof(*impl->packets));
+    packets = (libbgp_packet_t *)bgp_calloc(new_cap, sizeof(*packets));
     if (packets == NULL) {
         return false;
     }
-    for (i = impl->packet_cap; i < new_cap; i++) {
+    for (i = 0u; i < new_cap; i++) {
         libbgp_packet_init(&packets[i]);
     }
+    for (i = 0u; i < impl->packet_count; i++) {
+        size_t old_index = (impl->packet_head + i) % impl->packet_cap;
+
+        libbgp_packet_destroy(&packets[i]);
+        packets[i] = impl->packets[old_index];
+        memset(&impl->packets[old_index], 0, sizeof(*impl->packets));
+    }
+    bgp_free(impl->packets);
     impl->packets = packets;
+    impl->packet_head = 0u;
     impl->packet_cap = new_cap;
     return true;
 }
@@ -121,10 +153,11 @@ static bool sink_marker_valid(const uint8_t *buf)
 static void sink_drop_buffer_prefix(sink_impl_t *impl, size_t len)
 {
     if (len >= impl->buf_len) {
+        impl->buf_off = 0u;
         impl->buf_len = 0u;
         return;
     }
-    memmove(impl->buf, impl->buf + len, impl->buf_len - len);
+    impl->buf_off += len;
     impl->buf_len -= len;
 }
 
@@ -133,9 +166,11 @@ static void sink_clear_locked(sink_impl_t *impl)
     size_t i;
 
     for (i = 0u; i < impl->packet_count; i++) {
-        libbgp_packet_destroy(&impl->packets[i]);
+        libbgp_packet_destroy(&impl->packets[(impl->packet_head + i) % impl->packet_cap]);
     }
+    impl->packet_head = 0u;
     impl->packet_count = 0u;
+    impl->buf_off = 0u;
     impl->buf_len = 0u;
 }
 
@@ -146,14 +181,18 @@ static libbgp_err_t sink_process_locked(sink_impl_t *impl)
     uint16_t wire_len;
 
     while (impl->buf_len >= LIBBGP_BGP_HEADER_LEN) {
+        const uint8_t *frame = impl->buf + impl->buf_off;
         libbgp_packet_t pkt;
+        size_t tail;
 
-        if (!sink_marker_valid(impl->buf)) {
+        if (!sink_marker_valid(frame)) {
+            impl->buf_off = 0u;
             impl->buf_len = 0u;
             return LIBBGP_ERR_BAD_LEN;
         }
-        wire_len = bgp_get_be16(impl->buf + 16u);
+        wire_len = bgp_get_be16(frame + 16u);
         if (wire_len < LIBBGP_BGP_MIN_PACKET_LEN || wire_len > LIBBGP_BGP_MAX_PACKET_LEN) {
+            impl->buf_off = 0u;
             impl->buf_len = 0u;
             return LIBBGP_ERR_BAD_LEN;
         }
@@ -165,7 +204,7 @@ static libbgp_err_t sink_process_locked(sink_impl_t *impl)
         }
         libbgp_packet_init(&pkt);
         consumed = 0u;
-        err = libbgp_packet_parse_as4(&pkt, impl->buf, (size_t)wire_len, impl->use_4b_asn, &consumed);
+        err = libbgp_packet_parse_as4(&pkt, frame, (size_t)wire_len, impl->use_4b_asn, &consumed);
         if (err != LIBBGP_OK) {
             libbgp_packet_destroy(&pkt);
             sink_drop_buffer_prefix(impl, (size_t)wire_len);
@@ -176,8 +215,9 @@ static libbgp_err_t sink_process_locked(sink_impl_t *impl)
             sink_drop_buffer_prefix(impl, (size_t)wire_len);
             return LIBBGP_ERR_BAD_LEN;
         }
-        libbgp_packet_destroy(&impl->packets[impl->packet_count]);
-        impl->packets[impl->packet_count] = pkt;
+        tail = (impl->packet_head + impl->packet_count) % impl->packet_cap;
+        libbgp_packet_destroy(&impl->packets[tail]);
+        impl->packets[tail] = pkt;
         impl->packet_count++;
         sink_drop_buffer_prefix(impl, (size_t)wire_len);
     }
@@ -254,11 +294,11 @@ libbgp_err_t libbgp_sink_feed(libbgp_sink_t *sink, const uint8_t *data, size_t l
     if (impl == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (len > SIZE_MAX - impl->buf_len || !sink_reserve_buf(impl, impl->buf_len + len)) {
+    if (!sink_reserve_buf(impl, len)) {
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOMEM;
     }
-    memcpy(impl->buf + impl->buf_len, data, len);
+    memcpy(impl->buf + impl->buf_off + impl->buf_len, data, len);
     impl->buf_len += len;
     err = sink_process_locked(impl);
     bgp_unlock(&impl->lock);
@@ -281,7 +321,6 @@ size_t libbgp_sink_packet_count(const libbgp_sink_t *sink)
 libbgp_err_t libbgp_sink_pop(libbgp_sink_t *sink, libbgp_packet_t *out_packet)
 {
     sink_impl_t *impl;
-    size_t remaining;
 
     if (out_packet == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -294,14 +333,13 @@ libbgp_err_t libbgp_sink_pop(libbgp_sink_t *sink, libbgp_packet_t *out_packet)
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOT_FOUND;
     }
-    *out_packet = impl->packets[0];
-    memset(&impl->packets[0], 0, sizeof(impl->packets[0]));
-    remaining = impl->packet_count - 1u;
-    if (remaining != 0u) {
-        memmove(&impl->packets[0], &impl->packets[1], remaining * sizeof(*impl->packets));
-        memset(&impl->packets[remaining], 0, sizeof(*impl->packets));
+    *out_packet = impl->packets[impl->packet_head];
+    memset(&impl->packets[impl->packet_head], 0, sizeof(impl->packets[impl->packet_head]));
+    impl->packet_head = (impl->packet_head + 1u) % impl->packet_cap;
+    impl->packet_count--;
+    if (impl->packet_count == 0u) {
+        impl->packet_head = 0u;
     }
-    impl->packet_count = remaining;
     bgp_unlock(&impl->lock);
     return LIBBGP_OK;
 }

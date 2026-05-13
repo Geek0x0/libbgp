@@ -308,6 +308,62 @@ LIBBGP_TEST(pattr_parse_write_aggregator_community_and_as_paths)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_parse_rejects_as_path_segment_count_overrun_variants)
+{
+    const uint8_t seq_declares_two_has_one[] = {
+        LIBBGP_PATTR_FLAG_TRANSITIVE, LIBBGP_PATTR_CODE_AS_PATH, 4u,
+        2u, 2u, 0xfdu, 0xe8u
+    };
+    const uint8_t set_declares_one_missing_asn[] = {
+        LIBBGP_PATTR_FLAG_TRANSITIVE, LIBBGP_PATTR_CODE_AS_PATH, 2u,
+        1u, 1u
+    };
+    const uint8_t zero_count_set[] = {
+        LIBBGP_PATTR_FLAG_TRANSITIVE, LIBBGP_PATTR_CODE_AS_PATH, 2u,
+        1u, 0u
+    };
+    size_t consumed = 99u;
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, seq_declares_two_has_one, sizeof(seq_declares_two_has_one), &consumed));
+    LIBBGP_ASSERT_EQ_U64(99u, consumed);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_parse(attr, set_declares_one_missing_asn, sizeof(set_declares_one_missing_asn), &consumed));
+    LIBBGP_ASSERT_EQ_U64(99u, consumed);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse(attr, zero_count_set, sizeof(zero_count_set), &consumed));
+    LIBBGP_ASSERT_EQ_U64(sizeof(zero_count_set), consumed);
+    LIBBGP_ASSERT_EQ_U64(1u, attr->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(0u, attr->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT(attr->data.as_path.segments[0].asns == NULL);
+
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_parse_as_path_allocation_failure_cleans_partial_segments)
+{
+    const uint8_t two_segments[] = {
+        LIBBGP_PATTR_FLAG_TRANSITIVE, LIBBGP_PATTR_CODE_AS_PATH, 10u,
+        2u, 1u, 0xfdu, 0xe8u,
+        1u, 2u, 0xfdu, 0xe9u, 0xfdu, 0xeau
+    };
+    fail_after_alloc_ctx_t fail_ctx = { 0u, 3u };
+    libbgp_alloc_t fail_alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_err_t err;
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_pattr_parse(attr, two_segments, sizeof(two_segments), NULL);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(3u, fail_ctx.calls);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
+    LIBBGP_ASSERT(attr->data.unknown.value == NULL);
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_write_rejects_type_code_and_as_width_mismatch)
 {
     uint8_t out[16];
@@ -408,6 +464,31 @@ LIBBGP_TEST(pattr_parse_write_mp_reach_and_unreach_ipv6)
     assert_roundtrip(attr, mp_unreach, sizeof(mp_unreach));
     LIBBGP_ASSERT_EQ_U64(1u, attr->data.mp_unreach_ipv6.withdrawn_count);
     LIBBGP_ASSERT_EQ_U64(32u, attr->data.mp_unreach_ipv6.withdrawn[0].len);
+    libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths)
+{
+    const uint8_t short_unsupported_nexthop[] = {
+        LIBBGP_PATTR_FLAG_OPTIONAL, LIBBGP_PATTR_CODE_MP_REACH_NLRI, 8u,
+        0u, 2u, 1u, 3u,
+        0x20u, 0x01u, 0x0du, 0u
+    };
+    const uint8_t long_unsupported_nexthop[] = {
+        LIBBGP_PATTR_FLAG_OPTIONAL, LIBBGP_PATTR_CODE_MP_REACH_NLRI, 38u,
+        0u, 2u, 1u, 33u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0xfeu, 0x80u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0u, 0u
+    };
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, short_unsupported_nexthop, sizeof(short_unsupported_nexthop), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_parse(attr, long_unsupported_nexthop, sizeof(long_unsupported_nexthop), NULL));
+
     libbgp_pattr_unref(attr);
 }
 
@@ -809,8 +890,11 @@ int main(void)
         { "pattr_parse_write_fixed_scalar_attributes", pattr_parse_write_fixed_scalar_attributes },
         { "pattr_parse_rejects_malformed_known_flags", pattr_parse_rejects_malformed_known_flags },
         { "pattr_parse_write_aggregator_community_and_as_paths", pattr_parse_write_aggregator_community_and_as_paths },
+        { "pattr_parse_rejects_as_path_segment_count_overrun_variants", pattr_parse_rejects_as_path_segment_count_overrun_variants },
+        { "pattr_parse_as_path_allocation_failure_cleans_partial_segments", pattr_parse_as_path_allocation_failure_cleans_partial_segments },
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_parse_write_mp_reach_and_unreach_ipv6", pattr_parse_write_mp_reach_and_unreach_ipv6 },
+        { "pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths", pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths },
         { "pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough },
         { "pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough },
         { "pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop", pattr_parse_write_mp_reach_ipv6_with_global_and_linklocal_nexthop },

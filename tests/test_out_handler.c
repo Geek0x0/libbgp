@@ -289,6 +289,104 @@ LIBBGP_TEST(out_handler_unconfigured_is_invalid)
     libbgp_out_handler_destroy(&handler);
 }
 
+LIBBGP_TEST(out_handler_send_allows_null_sent_for_successful_callback)
+{
+    int send_called = 0;
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    uint8_t byte = 0u;
+
+    ops.send_fn = counting_send;
+    ops.recv_fn = NULL;
+    ops.ctx = &send_called;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_send(&handler, &byte, 1u, NULL));
+    LIBBGP_ASSERT_EQ_I64(1, send_called);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_send_rejects_missing_callback_before_invoking_recv_callback)
+{
+    int recv_called = 0;
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    size_t count = 99u;
+    uint8_t byte = 0u;
+
+    ops.send_fn = NULL;
+    ops.recv_fn = counting_recv;
+    ops.ctx = &recv_called;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_send(&handler, &byte, 1u, &count));
+    LIBBGP_ASSERT_EQ_U64(99u, count);
+    LIBBGP_ASSERT_EQ_I64(0, recv_called);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_invalid_fd_send_allows_null_sent)
+{
+    libbgp_out_handler_t handler;
+    uint8_t byte = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_fd(&handler, -1);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_send(&handler, &byte, 1u, NULL));
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_recv_allows_null_received_for_successful_callback)
+{
+    int recv_called = 0;
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    uint8_t byte = 0u;
+
+    ops.send_fn = NULL;
+    ops.recv_fn = counting_recv;
+    ops.ctx = &recv_called;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_recv(&handler, &byte, 1u, NULL));
+    LIBBGP_ASSERT_EQ_I64(1, recv_called);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_recv_rejects_missing_callback_before_invoking_send_callback)
+{
+    int send_called = 0;
+    libbgp_io_ops_t ops;
+    libbgp_out_handler_t handler;
+    size_t count = 99u;
+    uint8_t byte = 0u;
+
+    ops.send_fn = counting_send;
+    ops.recv_fn = NULL;
+    ops.ctx = &send_called;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_ops(&handler, &ops);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_recv(&handler, &byte, 1u, &count));
+    LIBBGP_ASSERT_EQ_U64(99u, count);
+    LIBBGP_ASSERT_EQ_I64(0, send_called);
+    libbgp_out_handler_destroy(&handler);
+}
+
+LIBBGP_TEST(out_handler_invalid_fd_recv_allows_null_received)
+{
+    libbgp_out_handler_t handler;
+    uint8_t byte = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_fd(&handler, -1);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_recv(&handler, &byte, 1u, NULL));
+    libbgp_out_handler_destroy(&handler);
+}
+
 LIBBGP_TEST(out_handler_negative_callbacks_map_errors)
 {
     libbgp_io_ops_t ops;
@@ -362,6 +460,12 @@ int main(void)
         { "out_handler_short_callbacks_report_short_counts", out_handler_short_callbacks_report_short_counts },
         { "out_handler_rejects_null_buffers_for_nonzero_io", out_handler_rejects_null_buffers_for_nonzero_io },
         { "out_handler_unconfigured_is_invalid", out_handler_unconfigured_is_invalid },
+        { "out_handler_send_allows_null_sent_for_successful_callback", out_handler_send_allows_null_sent_for_successful_callback },
+        { "out_handler_send_rejects_missing_callback_before_invoking_recv_callback", out_handler_send_rejects_missing_callback_before_invoking_recv_callback },
+        { "out_handler_invalid_fd_send_allows_null_sent", out_handler_invalid_fd_send_allows_null_sent },
+        { "out_handler_recv_allows_null_received_for_successful_callback", out_handler_recv_allows_null_received_for_successful_callback },
+        { "out_handler_recv_rejects_missing_callback_before_invoking_send_callback", out_handler_recv_rejects_missing_callback_before_invoking_send_callback },
+        { "out_handler_invalid_fd_recv_allows_null_received", out_handler_invalid_fd_recv_allows_null_received },
         { "out_handler_negative_callbacks_map_errors", out_handler_negative_callbacks_map_errors },
         { "out_handler_set_fd_resets_custom_ops", out_handler_set_fd_resets_custom_ops },
         { "out_handler_send_callback_can_reenter_handler", out_handler_send_callback_can_reenter_handler }
