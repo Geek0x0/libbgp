@@ -620,6 +620,32 @@ LIBBGP_TEST(rib4_discard_collect_preserves_replacement_correctness)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_discard_large)
+{
+    libbgp_rib4_t rib;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    for (i = 0u; i < 500u; i++) {
+        libbgp_prefix4_t prefix = p4(10u, (uint8_t)(i >> 8), (uint8_t)i, 0u, 24u);
+        libbgp_rib4_route_t route = route4(prefix, 1u);
+
+        route.local_pref = 100u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+        route.source_router_id = 2u;
+        route.local_pref = 200u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    }
+    LIBBGP_ASSERT_EQ_U64(1000u, libbgp_rib4_route_count(&rib));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 1u));
+    LIBBGP_ASSERT_EQ_U64(500u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 2u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib4_route_count(&rib));
+
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_med_comparison_uses_neighbor_as_from_as_path)
 {
     libbgp_rib4_t rib;
@@ -1323,6 +1349,38 @@ LIBBGP_TEST(rib6_discard_collect_preserves_replacement_correctness)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib6_lookup(&rib, withdrawn_dest, &found));
 
     bgp_rib6_discard_result_destroy(&result);
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_discard_large)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0x55u };
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    for (i = 0u; i < 500u; i++) {
+        uint8_t addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u };
+        libbgp_prefix6_t prefix;
+        libbgp_rib6_route_t route;
+
+        addr[6] = (uint8_t)(i >> 8);
+        addr[7] = (uint8_t)i;
+        prefix = p6(addr, 64u);
+        route = route6(prefix, 1u, next_hop);
+        route.local_pref = 100u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route));
+        route.source_router_id = 2u;
+        route.local_pref = 200u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route));
+    }
+    LIBBGP_ASSERT_EQ_U64(1000u, libbgp_rib6_route_count(&rib));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_discard(&rib, 1u));
+    LIBBGP_ASSERT_EQ_U64(500u, libbgp_rib6_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_discard(&rib, 2u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib6_route_count(&rib));
+
     libbgp_rib6_destroy(&rib);
 }
 
@@ -3180,6 +3238,7 @@ int main(void)
         { "rib4_foreach_best_route_stops_stored_route_iteration_early", rib4_foreach_best_route_stops_stored_route_iteration_early },
         { "rib4_foreach_best_route_avoids_per_prefix_realloc", rib4_foreach_best_route_avoids_per_prefix_realloc },
         { "rib4_discard_collect_preserves_replacement_correctness", rib4_discard_collect_preserves_replacement_correctness },
+        { "rib4_discard_large", rib4_discard_large },
         { "rib4_med_comparison_uses_neighbor_as_from_as_path", rib4_med_comparison_uses_neighbor_as_from_as_path },
         { "rib4_med_not_compared_without_neighbor_as", rib4_med_not_compared_without_neighbor_as },
         { "rib4_med_ignores_missing_wrong_type_and_different_neighbor_as", rib4_med_ignores_missing_wrong_type_and_different_neighbor_as },
@@ -3205,6 +3264,7 @@ int main(void)
         { "rib6_best_route_prefers_lower_update_id", rib6_best_route_prefers_lower_update_id },
         { "rib6_foreach_best_route_stops_stored_route_iteration_early", rib6_foreach_best_route_stops_stored_route_iteration_early },
         { "rib6_med_comparison_uses_neighbor_as_from_as_path", rib6_med_comparison_uses_neighbor_as_from_as_path },
+        { "rib6_discard_large", rib6_discard_large },
         { "rib6_insert_reports_same_update_id_best_replacement", rib6_insert_reports_same_update_id_best_replacement },
         { "rib6_insert_and_withdraw_track_best_changes", rib6_insert_and_withdraw_track_best_changes },
         { "rib6_withdraw_track_reports_unreachable_and_rejects_invalid_args", rib6_withdraw_track_reports_unreachable_and_rejects_invalid_args },
