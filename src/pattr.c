@@ -880,6 +880,32 @@ static void write_as_path_value(const libbgp_pattr_t *attr, uint8_t *buf)
     }
 }
 
+libbgp_err_t libbgp_pattr_wire_len(const libbgp_pattr_t *attr, size_t *out_len)
+{
+    size_t value_len;
+    size_t header_len;
+    bool extended;
+    libbgp_err_t err;
+
+    if (attr == NULL || out_len == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+
+    err = pattr_value_len(attr, &value_len);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
+
+    extended = value_len > 255u ||
+        (attr->flags & LIBBGP_PATTR_FLAG_EXTENDED_LENGTH) != 0u;
+    header_len = extended ? 4u : 3u;
+    if (value_len > SIZE_MAX - header_len) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    *out_len = header_len + value_len;
+    return LIBBGP_OK;
+}
+
 static libbgp_err_t write_value(const libbgp_pattr_t *attr, uint8_t *buf, size_t value_len)
 {
     size_t i;

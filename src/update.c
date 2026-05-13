@@ -1384,7 +1384,6 @@ static libbgp_err_t update_prefixes_len(
 
 static libbgp_err_t update_attrs_len(const libbgp_update_msg_t *msg, size_t *out)
 {
-    uint8_t scratch[4096];
     size_t i;
     size_t total = 0u;
 
@@ -1393,7 +1392,7 @@ static libbgp_err_t update_attrs_len(const libbgp_update_msg_t *msg, size_t *out
     }
     for (i = 0u; i < msg->attr_count; i++) {
         size_t one = 0u;
-        libbgp_err_t err = libbgp_pattr_write(msg->attrs[i], scratch, sizeof(scratch), &one);
+        libbgp_err_t err = libbgp_pattr_wire_len(msg->attrs[i], &one);
         if (err != LIBBGP_OK) {
             return err;
         }
