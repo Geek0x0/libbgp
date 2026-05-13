@@ -45,12 +45,17 @@ static bool rib4_key_eq(const void *a, const void *b, void *ctx)
 
 static int bgp_router_id_cmp(uint32_t a, uint32_t b)
 {
-    uint8_t a_bytes[4];
-    uint8_t b_bytes[4];
+    /*
+     * source_router_id values are stored as NBO bytes in a uint32_t (see rib4.h).
+     * Compare byte-by-byte in memory order so that the comparison reflects
+     * dotted-decimal (first-octet-first) ordering per RFC 4271 §9.1.2.2.
+     */
+    uint8_t buf_a[4];
+    uint8_t buf_b[4];
 
-    memcpy(a_bytes, &a, sizeof(a_bytes));
-    memcpy(b_bytes, &b, sizeof(b_bytes));
-    return memcmp(a_bytes, b_bytes, sizeof(a_bytes));
+    memcpy(buf_a, &a, sizeof(buf_a));
+    memcpy(buf_b, &b, sizeof(buf_b));
+    return memcmp(buf_a, buf_b, sizeof(buf_a));
 }
 
 static void rib4_route_free(libbgp_rib4_route_t *route)

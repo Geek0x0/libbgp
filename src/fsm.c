@@ -465,6 +465,26 @@ static bool fsm_local_open_config_valid(const struct libbgp_fsm_config *config)
     return true;
 }
 
+/*
+ * Validate a peer's BGP Identifier received in an OPEN message.
+ *
+ * RFC 4271 §6.3 requires the BGP Identifier to be "a valid unicast IP host
+ * address assigned to that BGP speaker."  Accordingly we reject:
+ *   - zero                   : explicitly forbidden by RFC 4271 §6.3
+ *   - equal to local_id      : violates the uniqueness requirement
+ *   - first octet == 0       : 0.0.0.0/8 is not a valid host address (RFC 1122)
+ *   - first octet == 127     : 127.0.0.0/8 loopback, not a routable BGP ID
+ *   - first octet >= 224     : multicast (224-239) and reserved/broadcast (240-255)
+ *
+ * NOTE (RFC 6286): RFC 6286 later relaxed this definition to any non-zero
+ * 32-bit integer, removing the "valid unicast IP host address" constraint.
+ * If RFC 6286 compliance is ever required, the address-range checks (first
+ * octet 0 / 127 / >=224) should be revisited, but the zero and equal-to-local
+ * checks must remain.  For now libbgp follows the stricter RFC 4271 §6.3 text.
+ *
+ * peer_id and local_id are both in host byte order (HBO): the MSB equals the
+ * first dotted-decimal octet, so (peer_id >> 24) gives the correct first octet.
+ */
 static bool fsm_valid_peer_bgp_id(uint32_t peer_id, uint32_t local_id)
 {
     uint8_t first = (uint8_t)(peer_id >> 24);
@@ -592,8 +612,21 @@ static void fsm_negotiate_route_families(
     peer_mp6 = libbgp_open_has_mpbgp(open, LIBBGP_AFI_IPV6, LIBBGP_SAFI_UNICAST);
 
     if (peer_has_mpbgp && (local_mp4 || local_mp6)) {
+        /*
+         * RFC 4760 §7: use MP-BGP for a family only when both sides advertised
+         * the corresponding capability.  If the peer has MP-BGP but did not
+         * advertise MP-IPv4, fall back to base IPv4 NLRI (RFC 4271) rather than
+         * disabling IPv4 entirely.
+         */
         if (send_ipv4_routes != NULL) {
-            *send_ipv4_routes = local_mp4 && peer_mp4;
+            if (local_mp4 && peer_mp4) {
+                /* Both sides negotiated MP-IPv4: use MP extension. */
+                *send_ipv4_routes = true;
+            } else {
+                /* Peer has MP-BGP but not MP-IPv4: fall back to base IPv4 NLRI
+                 * unless we are operating in IPv6-only mode. */
+                *send_ipv4_routes = !(local_mp6 && !local_mp4);
+            }
         }
         if (send_ipv6_routes != NULL) {
             *send_ipv6_routes = local_mp6 && peer_mp6;
@@ -1416,17 +1449,20 @@ static size_t fsm_as_path_len_and_origin_as(const libbgp_pattr_t *attr, uint32_t
         const libbgp_as_path_segment_t *seg = &attr->data.as_path.segments[i];
         size_t j;
 
-        if (seg->type != 2u) {
-            continue;
-        }
-        if (seg->asn_count != 0u && seg->asns == NULL) {
-            continue;
-        }
-        len += seg->asn_count;
-        if (origin_as != NULL) {
-            for (j = 0u; j < seg->asn_count; j++) {
-                *origin_as = seg->asns[j];
+        if (seg->type == 2u) {
+            /* AS_SEQUENCE: each ASN counts as one hop */
+            if (seg->asn_count != 0u && seg->asns == NULL) {
+                continue;
             }
+            len += seg->asn_count;
+            if (origin_as != NULL) {
+                for (j = 0u; j < seg->asn_count; j++) {
+                    *origin_as = seg->asns[j];
+                }
+            }
+        } else if (seg->type == 1u) {
+            /* AS_SET: counts as a single hop regardless of members (RFC 4271 §9.1.2.2) */
+            len += 1u;
         }
     }
     return len;
@@ -1485,10 +1521,22 @@ static bool fsm_valid_addr4(const fsm_impl_t *impl, uint32_t addr)
 {
     uint8_t bytes[4];
     uint8_t first;
+    uint32_t local_bgp_id_nbo;
 
-    if (impl != NULL &&
-        (addr == impl->default_nexthop4 || addr == impl->config.local_bgp_id)) {
-        return false;
+    /*
+     * addr is stored in network byte order (raw memcpy from wire).
+     * default_nexthop4 is also NBO.
+     * config.local_bgp_id may be NBO (ip4() in tests) or HBO (router_id_value()
+     * in production).  To compare against the NBO addr, convert local_bgp_id
+     * to NBO by writing it through bgp_put_be32 into a local uint32_t.
+     */
+    if (impl != NULL) {
+        uint8_t lid_buf[4];
+        bgp_put_be32(lid_buf, impl->config.local_bgp_id);
+        memcpy(&local_bgp_id_nbo, lid_buf, sizeof(local_bgp_id_nbo));
+        if (addr == impl->default_nexthop4 || addr == local_bgp_id_nbo) {
+            return false;
+        }
     }
     memcpy(bytes, &addr, sizeof(bytes));
     first = bytes[0];
@@ -1526,8 +1574,10 @@ static int fsm_router_id_cmp(uint32_t a, uint32_t b)
     uint8_t a_bytes[4];
     uint8_t b_bytes[4];
 
-    memcpy(a_bytes, &a, sizeof(a_bytes));
-    memcpy(b_bytes, &b, sizeof(b_bytes));
+    /* Both a (local_bgp_id) and b (peer_bgp_id) are host-byte-order integers.
+     * Convert to network byte order for dotted-decimal comparison per RFC 4271. */
+    bgp_put_be32(a_bytes, a);
+    bgp_put_be32(b_bytes, b);
     return memcmp(a_bytes, b_bytes, sizeof(a_bytes));
 }
 
@@ -1781,7 +1831,8 @@ static libbgp_err_t fsm_update_exceeds_local_as(
 static void fsm_fill_route_attrs(
     libbgp_rib4_route_t *route,
     const libbgp_update_msg_t *update,
-    int32_t weight)
+    int32_t weight,
+    bool is_ibgp)
 {
     libbgp_pattr_t *attr;
 
@@ -1794,9 +1845,12 @@ static void fsm_fill_route_attrs(
     if (attr != NULL) {
         route->next_hop = attr->data.next_hop.next_hop;
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
-    if (attr != NULL) {
-        route->local_pref = attr->data.local_pref.value;
+    /* RFC 4271 §5.1.5: LOCAL_PREF is only meaningful on iBGP sessions. */
+    if (is_ibgp) {
+        attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
+        if (attr != NULL) {
+            route->local_pref = attr->data.local_pref.value;
+        }
     }
     attr = libbgp_update_find_attr(update, LIBBGP_PATTR_ORIGIN);
     if (attr != NULL) {
@@ -1829,7 +1883,8 @@ static void fsm_fill_route6_attrs(
     libbgp_rib6_route_t *route,
     const libbgp_update_msg_t *update,
     const libbgp_pattr_t *mp_reach,
-    int32_t weight)
+    int32_t weight,
+    bool is_ibgp)
 {
     libbgp_pattr_t *attr;
 
@@ -1843,9 +1898,12 @@ static void fsm_fill_route6_attrs(
             sizeof(route->next_hop_linklocal));
     }
 
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
-    if (attr != NULL) {
-        route->local_pref = attr->data.local_pref.value;
+    /* RFC 4271 §5.1.5: LOCAL_PREF is only meaningful on iBGP sessions. */
+    if (is_ibgp) {
+        attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
+        if (attr != NULL) {
+            route->local_pref = attr->data.local_pref.value;
+        }
     }
     attr = libbgp_update_find_attr(update, LIBBGP_PATTR_ORIGIN);
     if (attr != NULL) {
@@ -1883,7 +1941,7 @@ static libbgp_err_t fsm_make_route6(
     route->prefix = *prefix;
     route->source_router_id = peer_bgp_id;
     route->is_ibgp = is_ibgp;
-    fsm_fill_route6_attrs(route, update, mp_reach, weight);
+    fsm_fill_route6_attrs(route, update, mp_reach, weight, is_ibgp);
     for (i = 0u; i < update->attr_count; i++) {
         if (fsm_ipv6_route_attr(update->attrs[i])) {
             count++;
@@ -2184,7 +2242,7 @@ static libbgp_err_t fsm_apply_update(
         route.prefix = update->nlri[i];
         route.source_router_id = peer_bgp_id;
         route.is_ibgp = is_ibgp_session;
-        fsm_fill_route_attrs(&route, update, impl->route_weight);
+        fsm_fill_route_attrs(&route, update, impl->route_weight, is_ibgp_session);
         if (impl->in_filter4 != NULL &&
             libbgp_filter_apply_route(impl->in_filter4, &route, LIBBGP_FILTER_PERMIT) !=
                 LIBBGP_FILTER_PERMIT) {
@@ -2997,7 +3055,7 @@ static libbgp_err_t fsm_send_route_added4(
     route.prefix = *event->prefix4;
     route.source_router_id = event->source_router_id;
     route.is_ibgp = is_ibgp;
-    fsm_fill_route_attrs(&route, event->update, route_weight);
+    fsm_fill_route_attrs(&route, event->update, route_weight, is_ibgp);
     err = fsm_update_from_route4(&route, &update);
     if (err != LIBBGP_OK) {
         return err;
@@ -3168,7 +3226,7 @@ static bool fsm_out_filter4_permits(
     route.prefix = *event->prefix4;
     route.source_router_id = event->source_router_id;
     if (event->update != NULL) {
-        fsm_fill_route_attrs(&route, event->update, route_weight);
+        fsm_fill_route_attrs(&route, event->update, route_weight, true);
     }
     return libbgp_filter_apply_route(filter, &route, LIBBGP_FILTER_PERMIT) ==
         LIBBGP_FILTER_PERMIT;
