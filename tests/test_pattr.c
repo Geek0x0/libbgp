@@ -524,6 +524,51 @@ LIBBGP_TEST(pattr_parse_write_mp_reach_and_unreach_ipv6)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_mp_unreach_many_prefixes)
+{
+    uint8_t buf[512];
+    size_t pos = 0u;
+    size_t len_pos;
+    size_t consumed = 0u;
+    size_t i;
+    uint16_t value_len;
+    libbgp_pattr_t *attr;
+
+    buf[pos++] = LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_EXTENDED_LENGTH;
+    buf[pos++] = LIBBGP_PATTR_CODE_MP_UNREACH_NLRI;
+    len_pos = pos;
+    pos += 2u;
+    buf[pos++] = 0u;
+    buf[pos++] = 2u;
+    buf[pos++] = LIBBGP_SAFI_UNICAST;
+    for (i = 0u; i < 30u; i++) {
+        buf[pos++] = 48u;
+        buf[pos++] = 0x20u;
+        buf[pos++] = 0x01u;
+        buf[pos++] = 0x0du;
+        buf[pos++] = 0xb8u;
+        buf[pos++] = (uint8_t)(i >> 8);
+        buf[pos++] = (uint8_t)i;
+    }
+    value_len = (uint16_t)(pos - 4u);
+    buf[len_pos] = (uint8_t)(value_len >> 8);
+    buf[len_pos + 1u] = (uint8_t)value_len;
+
+    attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+    LIBBGP_ASSERT(attr != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_parse(attr, buf, pos, &consumed));
+    LIBBGP_ASSERT_EQ_U64(pos, consumed);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_MP_UNREACH_IPV6, attr->type);
+    LIBBGP_ASSERT_EQ_U64(30u, attr->data.mp_unreach_ipv6.withdrawn_count);
+    LIBBGP_ASSERT(attr->data.mp_unreach_ipv6.withdrawn != NULL);
+    LIBBGP_ASSERT_EQ_U64(48u, attr->data.mp_unreach_ipv6.withdrawn[0].len);
+    LIBBGP_ASSERT_EQ_U64(48u, attr->data.mp_unreach_ipv6.withdrawn[29].len);
+    LIBBGP_ASSERT_BYTES_EQ(buf + 8u, attr->data.mp_unreach_ipv6.withdrawn[0].addr, 6u);
+    LIBBGP_ASSERT_BYTES_EQ(buf + 8u + 29u * 7u, attr->data.mp_unreach_ipv6.withdrawn[29].addr, 6u);
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths)
 {
     const uint8_t short_unsupported_nexthop[] = {
@@ -1180,6 +1225,7 @@ int main(void)
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_wire_len_matches_write_and_rejects_invalid_write_state", pattr_wire_len_matches_write_and_rejects_invalid_write_state },
         { "pattr_parse_write_mp_reach_and_unreach_ipv6", pattr_parse_write_mp_reach_and_unreach_ipv6 },
+        { "pattr_mp_unreach_many_prefixes", pattr_mp_unreach_many_prefixes },
         { "pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths", pattr_parse_mp_reach_ipv6_rejects_unsupported_nexthop_lengths },
         { "pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_reach_unsupported_afi_safi_falls_back_to_unknown_passthrough },
         { "pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough", pattr_mp_unreach_unsupported_afi_safi_falls_back_to_unknown_passthrough },

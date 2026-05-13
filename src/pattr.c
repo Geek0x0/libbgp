@@ -443,9 +443,10 @@ static libbgp_err_t parse_mp_unreach_ipv6(
 {
     size_t pos;
     size_t count = 0u;
+    size_t cap = 0u;
+    libbgp_prefix6_t *withdrawn = NULL;
     libbgp_prefix6_t p;
     size_t consumed;
-    size_t i;
 
     if (value_len < 3u) {
         return LIBBGP_ERR_BAD_LEN;
@@ -458,33 +459,36 @@ static libbgp_err_t parse_mp_unreach_ipv6(
     while (pos < value_len) {
         libbgp_err_t err = libbgp_prefix6_parse(&p, value + pos, value_len - pos, &consumed);
         if (err != LIBBGP_OK) {
+            bgp_free(withdrawn);
             return err;
         }
+        if (consumed == 0u || consumed > value_len - pos) {
+            bgp_free(withdrawn);
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        if (count >= cap) {
+            size_t new_cap = cap == 0u ? 8u : cap * 2u;
+            libbgp_prefix6_t *next;
+
+            if (new_cap <= cap || new_cap > SIZE_MAX / sizeof(*withdrawn)) {
+                bgp_free(withdrawn);
+                return LIBBGP_ERR_BAD_LEN;
+            }
+            next = (libbgp_prefix6_t *)bgp_realloc(withdrawn, new_cap * sizeof(*withdrawn));
+            if (next == NULL) {
+                bgp_free(withdrawn);
+                return LIBBGP_ERR_NOMEM;
+            }
+            withdrawn = next;
+            cap = new_cap;
+        }
+        withdrawn[count] = p;
         count++;
         pos += consumed;
     }
 
+    tmp->data.mp_unreach_ipv6.withdrawn = withdrawn;
     tmp->data.mp_unreach_ipv6.withdrawn_count = count;
-    if (count == 0u) {
-        return LIBBGP_OK;
-    }
-    tmp->data.mp_unreach_ipv6.withdrawn = (libbgp_prefix6_t *)bgp_calloc(
-        count, sizeof(tmp->data.mp_unreach_ipv6.withdrawn[0]));
-    if (tmp->data.mp_unreach_ipv6.withdrawn == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    pos = 3u;
-    for (i = 0u; i < count; i++) {
-        libbgp_err_t err = libbgp_prefix6_parse(
-            &tmp->data.mp_unreach_ipv6.withdrawn[i],
-            value + pos,
-            value_len - pos,
-            &consumed);
-        if (err != LIBBGP_OK) {
-            return err;
-        }
-        pos += consumed;
-    }
     return LIBBGP_OK;
 }
 
@@ -495,9 +499,10 @@ static libbgp_err_t parse_mp_reach_ipv6(
 {
     size_t pos;
     size_t count = 0u;
+    size_t cap = 0u;
+    libbgp_prefix6_t *nlri = NULL;
     libbgp_prefix6_t p;
     size_t consumed;
-    size_t i;
 
     if (value_len < 5u) {
         return LIBBGP_ERR_BAD_LEN;
@@ -523,33 +528,36 @@ static libbgp_err_t parse_mp_reach_ipv6(
     while (pos < value_len) {
         libbgp_err_t err = libbgp_prefix6_parse(&p, value + pos, value_len - pos, &consumed);
         if (err != LIBBGP_OK) {
+            bgp_free(nlri);
             return err;
         }
+        if (consumed == 0u || consumed > value_len - pos) {
+            bgp_free(nlri);
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        if (count >= cap) {
+            size_t new_cap = cap == 0u ? 8u : cap * 2u;
+            libbgp_prefix6_t *next;
+
+            if (new_cap <= cap || new_cap > SIZE_MAX / sizeof(*nlri)) {
+                bgp_free(nlri);
+                return LIBBGP_ERR_BAD_LEN;
+            }
+            next = (libbgp_prefix6_t *)bgp_realloc(nlri, new_cap * sizeof(*nlri));
+            if (next == NULL) {
+                bgp_free(nlri);
+                return LIBBGP_ERR_NOMEM;
+            }
+            nlri = next;
+            cap = new_cap;
+        }
+        nlri[count] = p;
         count++;
         pos += consumed;
     }
 
+    tmp->data.mp_reach_ipv6.nlri = nlri;
     tmp->data.mp_reach_ipv6.nlri_count = count;
-    if (count == 0u) {
-        return LIBBGP_OK;
-    }
-    tmp->data.mp_reach_ipv6.nlri = (libbgp_prefix6_t *)bgp_calloc(
-        count, sizeof(tmp->data.mp_reach_ipv6.nlri[0]));
-    if (tmp->data.mp_reach_ipv6.nlri == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    pos = 5u + (size_t)value[3];
-    for (i = 0u; i < count; i++) {
-        libbgp_err_t err = libbgp_prefix6_parse(
-            &tmp->data.mp_reach_ipv6.nlri[i],
-            value + pos,
-            value_len - pos,
-            &consumed);
-        if (err != LIBBGP_OK) {
-            return err;
-        }
-        pos += consumed;
-    }
     return LIBBGP_OK;
 }
 
