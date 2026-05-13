@@ -2898,6 +2898,275 @@ LIBBGP_TEST(rib6_lookup_prefers_partial_byte_prefix_over_default)
     libbgp_rib6_destroy(&rib);
 }
 
+/* ---- Branch coverage tests for rib4_better / rib6_better tie-breaking ---- */
+
+LIBBGP_TEST(rib4_better_ties_through_router_id_and_ibgp_and_local_pref_zero)
+{
+    /* Exercise: local_pref==0 defaults to 100, is_ibgp tie-break,
+       update_id tie-break falls through to router_id comparison. */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(172u, 16u, 0u, 0u, 16u);
+    uint32_t dest = ip4(172u, 16u, 0u, 1u);
+    libbgp_rib4_route_t r;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+
+    /* Route A: local_pref=0 (should default to 100), update_id=10 */
+    r = route4(prefix, 1u);
+    r.local_pref = 0u;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r));
+
+    /* Route B: local_pref=0 (also defaults to 100), same weight, update_id=20.
+       Since update_ids differ, prefers lower update_id -> route 1 wins. */
+    r = route4(prefix, 2u);
+    r.local_pref = 0u;
+    r.update_id = 20u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r));
+    assert_rib4_best_source(&rib, dest, 1u);
+
+    /* Route C: same weight, local_pref=0, update_id=10, same as route A.
+       update_id tie, falls through to router_id.  Source 3 > Source 1
+       in NBO comparison, so route 1 still wins (lower router_id). */
+    r = route4(prefix, 3u);
+    r.local_pref = 0u;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r));
+    assert_rib4_best_source(&rib, dest, 1u);
+
+    /* Route D: is_ibgp=true.  When weight/local_pref/as_path/origin are
+       equal but is_ibgp differs, eBGP (is_ibgp=false) is preferred. */
+    r = route4(prefix, 4u);
+    r.local_pref = 0u;
+    r.is_ibgp = true;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r));
+    /* Best should still be source 1 (eBGP) */
+    assert_rib4_best_source(&rib, dest, 1u);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_better_ties_through_router_id_and_ibgp_and_local_pref_zero)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xAAu, 0u };
+    static const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xAAu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xFFu, 0xAAu };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t r;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+
+    r = route6(prefix, 1u, next_hop);
+    r.local_pref = 0u;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r));
+
+    r = route6(prefix, 2u, next_hop);
+    r.local_pref = 0u;
+    r.update_id = 20u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r));
+    assert_rib6_best_source(&rib, dest, 1u);
+
+    r = route6(prefix, 3u, next_hop);
+    r.local_pref = 0u;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r));
+    assert_rib6_best_source(&rib, dest, 1u);
+
+    r = route6(prefix, 4u, next_hop);
+    r.local_pref = 0u;
+    r.is_ibgp = true;
+    r.update_id = 10u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r));
+    assert_rib6_best_source(&rib, dest, 1u);
+
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_scoped_lookup_tiebreaks_same_prefix_length_via_better)
+{
+    /* Two routes from the same source, same prefix length but different
+       local_pref.  The scoped lookup should call rib4_better to pick
+       the higher-local_pref route when prefix lengths tie. */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 80u, 0u, 0u, 16u);
+    libbgp_rib4_route_t low = route4(prefix, 80u);
+    libbgp_rib4_route_t high = route4(prefix, 80u);
+    const libbgp_rib4_route_t *found = NULL;
+    uint32_t dest = ip4(10u, 80u, 5u, 1u);
+
+    low.local_pref = 100u;
+    low.update_id = 1u;
+    high.local_pref = 200u;
+    high.update_id = 2u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &low));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &high));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup_scoped(&rib, 80u, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(200u, found->local_pref);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_scoped_lookup_tiebreaks_same_prefix_length_via_better)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xBBu, 0u };
+    static const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xBBu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xFFu, 0xBBu };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t low = route6(prefix, 81u, next_hop);
+    libbgp_rib6_route_t high = route6(prefix, 81u, next_hop);
+    const libbgp_rib6_route_t *found = NULL;
+
+    low.local_pref = 100u;
+    low.update_id = 1u;
+    high.local_pref = 200u;
+    high.update_id = 2u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &low));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &high));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup_scoped(&rib, 81u, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(200u, found->local_pref);
+
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_withdraw_track_best_reports_replacement_best)
+{
+    /* Withdraw the best route; a backup route from another source should
+       cause BGP_RIB_CHANGE_REPLACEMENT_BEST.  Exercises the uncovered
+       branch at rib6.c line 779. */
+    libbgp_rib6_t rib;
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xCCu, 0u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xFFu, 0xCCu };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t best = route6(prefix, 100u, next_hop);
+    libbgp_rib6_route_t backup = route6(prefix, 101u, next_hop);
+    bgp_rib6_change_t change;
+    uint64_t update_id = 0u;
+
+    best.local_pref = 200u;
+    backup.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &best, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_insert_track_best(&rib, &backup, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NO_BEST_CHANGE, change.kind);
+
+    /* Withdraw the best; backup should become best -> REPLACEMENT_BEST */
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_withdraw_track_best(&rib, 100u, &prefix, &change));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(101u, change.best->source_router_id);
+
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_foreach_best_route_covers_initial_capacity_branch)
+{
+    /* Ensure route_capacity starts at 0, triggering the initial capacity
+       branch (route_capacity == 0) in foreach_best_route.  Only need 1 route
+       so that the first snapshot hits the capacity==0 path. */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 91u, 0u, 0u, 24u);
+    libbgp_rib4_route_t route = route4(prefix, 91u);
+    rib4_iter_count_ctx_t ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_foreach_best_route(&rib, record_rib4_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.count);
+    LIBBGP_ASSERT_EQ_U64(91u, ctx.sources[0]);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_foreach_best_route_covers_initial_capacity_branch)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xDDu, 0u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xFFu, 0xDDu };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t route = route6(prefix, 92u, next_hop);
+    rib6_iter_count_ctx_t ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_foreach_best_route(&rib, record_rib6_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.count);
+    LIBBGP_ASSERT_EQ_U64(92u, ctx.sources[0]);
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_restore_saved_if_absent_noop_when_entry_null)
+{
+    /* When saved->entry == NULL, restore should be a no-op returning OK.
+       Exercises the uncovered branch at rib6.c line 1306-1307. */
+    libbgp_rib6_t rib;
+    bgp_rib6_saved_route_t saved;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    memset(&saved, 0, sizeof(saved));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_restore_saved_if_absent(&rib, 1u, &saved));
+    libbgp_rib6_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_foreach_route_visits_multiple_routes_before_stop)
+{
+    /* Exercise the keep_going loop where the callback returns true for
+       at least one route before returning false.  This covers the
+       `!keep_going` branch at line 948. */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t p1 = p4(10u, 92u, 1u, 0u, 24u);
+    libbgp_prefix4_t p2 = p4(10u, 92u, 2u, 0u, 24u);
+    libbgp_rib4_route_t r1 = route4(p1, 1u);
+    libbgp_rib4_route_t r2 = route4(p2, 2u);
+    rib4_iter_count_ctx_t ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.limit = 1u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r1));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r2));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_foreach_route(&rib, record_rib4_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.count);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_foreach_route_visits_multiple_routes_before_stop)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t a1[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xEEu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    static const uint8_t a2[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xEEu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 2u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xFFu, 0xEEu };
+    libbgp_prefix6_t p1 = p6(a1, 128u);
+    libbgp_prefix6_t p2 = p6(a2, 128u);
+    libbgp_rib6_route_t r1 = route6(p1, 1u, next_hop);
+    libbgp_rib6_route_t r2 = route6(p2, 2u, next_hop);
+    rib6_iter_count_ctx_t ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.limit = 1u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r1));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &r2));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib6_foreach_route(&rib, record_rib6_source, &ctx));
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.count);
+    libbgp_rib6_destroy(&rib);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -2968,7 +3237,17 @@ int main(void)
         { "rib6_saved_route_update_restore_and_conditional_withdraw", rib6_saved_route_update_restore_and_conditional_withdraw },
         { "rib4_scoped_lookup_keeps_adj_rib_sources_separate", rib4_scoped_lookup_keeps_adj_rib_sources_separate },
         { "rib6_scoped_lookup_keeps_adj_rib_sources_separate", rib6_scoped_lookup_keeps_adj_rib_sources_separate },
-        { "rib6_lookup_prefers_partial_byte_prefix_over_default", rib6_lookup_prefers_partial_byte_prefix_over_default }
+        { "rib6_lookup_prefers_partial_byte_prefix_over_default", rib6_lookup_prefers_partial_byte_prefix_over_default },
+        { "rib4_better_ties_through_router_id_and_ibgp_and_local_pref_zero", rib4_better_ties_through_router_id_and_ibgp_and_local_pref_zero },
+        { "rib6_better_ties_through_router_id_and_ibgp_and_local_pref_zero", rib6_better_ties_through_router_id_and_ibgp_and_local_pref_zero },
+        { "rib4_scoped_lookup_tiebreaks_same_prefix_length_via_better", rib4_scoped_lookup_tiebreaks_same_prefix_length_via_better },
+        { "rib6_scoped_lookup_tiebreaks_same_prefix_length_via_better", rib6_scoped_lookup_tiebreaks_same_prefix_length_via_better },
+        { "rib6_withdraw_track_best_reports_replacement_best", rib6_withdraw_track_best_reports_replacement_best },
+        { "rib4_foreach_best_route_covers_initial_capacity_branch", rib4_foreach_best_route_covers_initial_capacity_branch },
+        { "rib6_foreach_best_route_covers_initial_capacity_branch", rib6_foreach_best_route_covers_initial_capacity_branch },
+        { "rib6_restore_saved_if_absent_noop_when_entry_null", rib6_restore_saved_if_absent_noop_when_entry_null },
+        { "rib4_foreach_route_visits_multiple_routes_before_stop", rib4_foreach_route_visits_multiple_routes_before_stop },
+        { "rib6_foreach_route_visits_multiple_routes_before_stop", rib6_foreach_route_visits_multiple_routes_before_stop }
     };
 
     return libbgp_run_tests("rib", tests, LIBBGP_ARRAY_LEN(tests));
