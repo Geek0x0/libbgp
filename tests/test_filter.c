@@ -1,8 +1,56 @@
 #include "test_main.h"
 
 #include "libbgp/filter.h"
+#include "libbgp/alloc.h"
 
 #include <stdint.h>
+#include <stdlib.h>
+
+typedef struct fail_realloc_ctx {
+    size_t realloc_calls;
+    size_t fail_realloc_at;
+} fail_realloc_ctx_t;
+
+typedef struct fail_calloc_ctx {
+    size_t calloc_calls;
+    size_t fail_calloc_at;
+} fail_calloc_ctx_t;
+
+static void *filter_fail_malloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void *filter_fail_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    fail_calloc_ctx_t *fail = (fail_calloc_ctx_t *)ctx;
+
+    if (fail != NULL) {
+        fail->calloc_calls++;
+        if (fail->fail_calloc_at != 0u && fail->calloc_calls == fail->fail_calloc_at) {
+            return NULL;
+        }
+    }
+    return calloc(nmemb, size);
+}
+
+static void *filter_fail_realloc(void *ptr, size_t size, void *ctx)
+{
+    fail_realloc_ctx_t *fail = (fail_realloc_ctx_t *)ctx;
+
+    fail->realloc_calls++;
+    if (fail->fail_realloc_at != 0u && fail->realloc_calls == fail->fail_realloc_at) {
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
+static void filter_fail_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    free(ptr);
+}
 
 static uint32_t ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
@@ -733,6 +781,156 @@ LIBBGP_TEST(filter_as_path_origin_requires_sequence_with_asns)
     libbgp_pattr_unref(as_path);
 }
 
+LIBBGP_TEST(filter_init_reports_calloc_failure)
+{
+    libbgp_filter_t filter;
+    fail_calloc_ctx_t ctx = { 0u, 1u };
+    libbgp_alloc_t alloc = {
+        filter_fail_malloc,
+        filter_fail_calloc,
+        filter_fail_realloc,
+        filter_fail_free,
+        &ctx
+    };
+    libbgp_err_t err;
+
+    filter.impl = (void *)1;
+    libbgp_set_alloc(&alloc);
+    err = libbgp_filter_init(&filter);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.calloc_calls);
+    LIBBGP_ASSERT(filter.impl == NULL);
+}
+
+LIBBGP_TEST(filter_attr_helpers_ignore_null_and_wrong_attr_types)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(198u, 51u, 100u, 0u, 24u));
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *attrs[] = { NULL, origin };
+
+    LIBBGP_ASSERT(origin != NULL);
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.decision = LIBBGP_FILTER_PERMIT;
+
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS;
+    rule.match.asn = 64512u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_NOT_CONTAINS;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS;
+    rule.match.community = 0x000a0001u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    libbgp_pattr_unref(origin);
+}
+
+LIBBGP_TEST(filter_as_path_origin_uses_last_sequence_segment)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { as_path };
+    libbgp_rib4_route_t route = route4(p4(198u, 51u, 100u, 0u, 24u));
+    uint32_t first_segment_asns[] = { 64512u };
+    uint32_t last_segment_asns[] = { 64513u, 64514u };
+
+    LIBBGP_ASSERT(as_path != NULL);
+    as_path->data.as_path.segments =
+        (libbgp_as_path_segment_t *)calloc(2u, sizeof(*as_path->data.as_path.segments));
+    LIBBGP_ASSERT(as_path->data.as_path.segments != NULL);
+    as_path->data.as_path.segment_count = 2u;
+    as_path->data.as_path.segments[0].type = 2u;
+    as_path->data.as_path.segments[0].asn_count = LIBBGP_ARRAY_LEN(first_segment_asns);
+    as_path->data.as_path.segments[0].asns = first_segment_asns;
+    as_path->data.as_path.segments[1].type = 2u;
+    as_path->data.as_path.segments[1].asn_count = LIBBGP_ARRAY_LEN(last_segment_asns);
+    as_path->data.as_path.segments[1].asns = last_segment_asns;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64514u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    as_path->data.as_path.segments[0].asns = NULL;
+    as_path->data.as_path.segments[1].asns = NULL;
+    free_attr_payload(as_path);
+    libbgp_pattr_unref(as_path);
+}
+
+LIBBGP_TEST(filter_prefix_specificity_rejects_non_included_routes)
+{
+    static const uint8_t rule6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x20u };
+    static const uint8_t outside_more6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x21u };
+    static const uint8_t outside_less6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb9u };
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t outside_more4 = route4(p4(203u, 0u, 114u, 0u, 25u));
+    libbgp_rib4_route_t outside_less4 = route4(p4(203u, 0u, 110u, 0u, 23u));
+    libbgp_rib6_route_t outside_more6 = route6(p6(outside_more6_addr, 48u));
+    libbgp_rib6_route_t outside_less6 = route6(p6(outside_less6_addr, 32u));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.prefix4 = p4(203u, 0u, 113u, 0u, 24u);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4_MORE_SPECIFIC;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &outside_more4, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4_LESS_SPECIFIC;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &outside_less4, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match.prefix6 = p6(rule6_addr, 40u);
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX6_MORE_SPECIFIC;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route6(&filter, &outside_more6, LIBBGP_FILTER_DENY));
+    libbgp_filter_clear(&filter);
+
+    rule.match_type = LIBBGP_FILTER_MATCH_PREFIX6_LESS_SPECIFIC;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route6(&filter, &outside_less6, LIBBGP_FILTER_DENY));
+    libbgp_filter_destroy(&filter);
+}
+
 LIBBGP_TEST(filter_rule_order_still_last_match_after_capacity_growth)
 {
     libbgp_filter_t filter;
@@ -795,6 +993,83 @@ LIBBGP_TEST(filter_operations_after_destroy_use_null_behavior)
         libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
 }
 
+LIBBGP_TEST(filter_add_rule_reports_realloc_failure_and_preserves_rules)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+    fail_realloc_ctx_t ctx = { 0u, 1u };
+    libbgp_alloc_t alloc = {
+        filter_fail_malloc,
+        filter_fail_calloc,
+        filter_fail_realloc,
+        filter_fail_free,
+        &ctx
+    };
+    libbgp_err_t err;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_ANY;
+    rule.decision = LIBBGP_FILTER_DENY;
+    libbgp_set_alloc(&alloc);
+    err = libbgp_filter_add_rule(&filter, &rule);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_filter_rule_count(&filter));
+    LIBBGP_ASSERT_EQ_U64(1u, ctx.realloc_calls);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_PERMIT));
+
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_filter_rule_count(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_destroy(&filter);
+}
+
+LIBBGP_TEST(filter_clear_keeps_capacity_for_reuse_without_allocator)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+    fail_realloc_ctx_t ctx = { 0u, 1u };
+    libbgp_alloc_t alloc = {
+        filter_fail_malloc,
+        filter_fail_calloc,
+        filter_fail_realloc,
+        filter_fail_free,
+        &ctx
+    };
+    libbgp_err_t err;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_ANY;
+    for (i = 0u; i < 4u; i++) {
+        rule.decision = LIBBGP_FILTER_DENY;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    }
+    LIBBGP_ASSERT_EQ_U64(4u, libbgp_filter_rule_count(&filter));
+    libbgp_filter_clear(&filter);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_filter_rule_count(&filter));
+
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    libbgp_set_alloc(&alloc);
+    err = libbgp_filter_add_rule(&filter, &rule);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, err);
+    LIBBGP_ASSERT_EQ_U64(0u, ctx.realloc_calls);
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_filter_rule_count(&filter));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_destroy(&filter);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -816,9 +1091,15 @@ int main(void)
         { "filter_route6_path_and_community_negative_matchers", filter_route6_path_and_community_negative_matchers },
         { "filter_route6_malformed_public_attr_structs_fail_closed", filter_route6_malformed_public_attr_structs_fail_closed },
         { "filter_as_path_origin_requires_sequence_with_asns", filter_as_path_origin_requires_sequence_with_asns },
+        { "filter_init_reports_calloc_failure", filter_init_reports_calloc_failure },
+        { "filter_attr_helpers_ignore_null_and_wrong_attr_types", filter_attr_helpers_ignore_null_and_wrong_attr_types },
+        { "filter_as_path_origin_uses_last_sequence_segment", filter_as_path_origin_uses_last_sequence_segment },
+        { "filter_prefix_specificity_rejects_non_included_routes", filter_prefix_specificity_rejects_non_included_routes },
         { "filter_rule_order_still_last_match_after_capacity_growth", filter_rule_order_still_last_match_after_capacity_growth },
         { "filter_clear_and_rule_count", filter_clear_and_rule_count },
-        { "filter_operations_after_destroy_use_null_behavior", filter_operations_after_destroy_use_null_behavior }
+        { "filter_operations_after_destroy_use_null_behavior", filter_operations_after_destroy_use_null_behavior },
+        { "filter_add_rule_reports_realloc_failure_and_preserves_rules", filter_add_rule_reports_realloc_failure_and_preserves_rules },
+        { "filter_clear_keeps_capacity_for_reuse_without_allocator", filter_clear_keeps_capacity_for_reuse_without_allocator }
     };
 
     return libbgp_run_tests("filter", tests, LIBBGP_ARRAY_LEN(tests));

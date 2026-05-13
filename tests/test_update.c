@@ -27,6 +27,19 @@ static libbgp_pattr_t *make_as_path_attr(libbgp_pattr_type_t type, bool is_4b, c
     return attr;
 }
 
+static uint32_t update_ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    uint8_t bytes[4];
+    uint32_t value;
+
+    bytes[0] = a;
+    bytes[1] = b;
+    bytes[2] = c;
+    bytes[3] = d;
+    memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
 static size_t test_as_path_asn_count(const libbgp_pattr_t *attr)
 {
     size_t count = 0u;
@@ -276,6 +289,63 @@ LIBBGP_TEST(update_parse_write_with_withdrawn_attrs_and_nlri)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&msg, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(sizeof(body), out_len);
     LIBBGP_ASSERT_BYTES_EQ(body, out, sizeof(body));
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_write_withdraw_only_without_mandatory_attrs)
+{
+    const uint8_t body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    uint8_t out[16];
+    size_t used = 0u;
+    size_t out_len = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(body), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(body, out, sizeof(body));
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_rejects_ipv4_prefix_length_over_32)
+{
+    const uint8_t bad_withdrawn[] = {
+        0u, 6u,
+        33u, 198u, 51u, 100u, 0u,
+        0u, 0u
+    };
+    const uint8_t bad_nlri[] = {
+        0u, 0u,
+        0u, 18u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfdu, 0xe8u,
+        0x40u, 3u, 4u, 192u, 0u, 2u, 254u,
+        33u, 203u, 0u, 113u, 0u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_parse(&msg, bad_withdrawn, sizeof(bad_withdrawn), &used));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.withdrawn_count);
+    libbgp_update_destroy(&msg);
+
+    used = 0u;
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_parse(&msg, bad_nlri, sizeof(bad_nlri), &used));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
     libbgp_update_destroy(&msg);
 }
 
@@ -1766,11 +1836,407 @@ LIBBGP_TEST(update_prepend_rejects_invalid_first_segment_state)
     libbgp_update_destroy(&msg);
 }
 
+LIBBGP_TEST(update_parse_rejects_duplicate_wire_attrs_and_nomem_paths)
+{
+    const uint8_t duplicate_origin_body[] = {
+        0u, 0u,
+        0u, 8u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 1u, 1u, 0u
+    };
+    const uint8_t withdrawn_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t origin_body[] = {
+        0u, 0u,
+        0u, 4u,
+        0x40u, 1u, 1u, 0u
+    };
+    size_t used = 88u;
+    libbgp_update_msg_t msg;
+    update_fail_alloc_ctx_t fail = { 0u, 0u, 0u, 0u, 0u, 1u };
+    libbgp_alloc_t alloc = update_fail_alloc_make(&fail);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS,
+        libbgp_update_parse(&msg, duplicate_origin_body, sizeof(duplicate_origin_body), &used));
+    LIBBGP_ASSERT_EQ_U64(88u, used);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM,
+        libbgp_update_parse(&msg, withdrawn_body, sizeof(withdrawn_body), &used));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, fail.realloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.withdrawn_count);
+
+    fail.realloc_calls = 0u;
+    fail.fail_on_realloc = 0u;
+    fail.fail_on_calloc = 1u;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM,
+        libbgp_update_parse(&msg, origin_body, sizeof(origin_body), &used));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, fail.calloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_as4_aggregator_allocation_failures_preserve_state)
+{
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *aggregator = make_aggregator_attr(LIBBGP_PATTR_AGGREGATOR, 65551u, 0xc6336401u, true);
+    libbgp_pattr_t *as4_aggregator = make_aggregator_attr(LIBBGP_PATTR_AS4_AGGREGATOR, 65552u, 0xc6336402u, true);
+    update_fail_alloc_ctx_t fail = { 0u, 0u, 0u, 0u, 1u, 0u };
+    libbgp_alloc_t alloc = update_fail_alloc_make(&fail);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_aggregator));
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_update_restore_aggregator(&msg));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AGGREGATOR) == NULL);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_AGGREGATOR) == as4_aggregator);
+    libbgp_update_destroy(&msg);
+
+    fail.calloc_calls = 0u;
+    fail.realloc_calls = 0u;
+    fail.fail_on_calloc = 1u;
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, aggregator));
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_update_downgrade_aggregator(&msg));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_U64(65551u, aggregator->data.aggregator.asn);
+    LIBBGP_ASSERT(aggregator->data.aggregator.is_4b);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_AGGREGATOR) == NULL);
+
+    libbgp_pattr_unref(as4_aggregator);
+    libbgp_pattr_unref(aggregator);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_write_rejects_attr_length_boundary_and_prefix_overflow_state)
+{
+    uint8_t out[16];
+    size_t out_len = 66u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *unknown = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+    LIBBGP_ASSERT(unknown != NULL);
+    libbgp_update_init(&msg);
+    unknown->flags = LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_EXTENDED_LENGTH;
+    unknown->type_code = 99u;
+    unknown->data.unknown.len = 65536u;
+    unknown->data.unknown.value = (uint8_t *)calloc(unknown->data.unknown.len, sizeof(unknown->data.unknown.value[0]));
+    LIBBGP_ASSERT(unknown->data.unknown.value != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, unknown));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(66u, out_len);
+
+    libbgp_pattr_unref(unknown);
+    libbgp_update_destroy(&msg);
+}
+
+
+LIBBGP_TEST(update_write_exact_buffer_and_one_byte_short)
+{
+    const uint8_t expected[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    uint8_t exact[sizeof(expected)];
+    uint8_t short_buf[sizeof(expected) - 1u];
+    size_t out_len = 123u;
+    libbgp_update_msg_t msg;
+    libbgp_prefix4_t withdrawn;
+
+    withdrawn.addr = update_ip4(198u, 51u, 100u, 0u);
+    withdrawn.len = 24u;
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_withdrawn(&msg, &withdrawn));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER,
+        libbgp_update_write(&msg, short_buf, sizeof(short_buf), &out_len));
+    LIBBGP_ASSERT_EQ_U64(123u, out_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_update_write(&msg, exact, sizeof(exact), &out_len));
+    LIBBGP_ASSERT_EQ_U64(sizeof(expected), out_len);
+    LIBBGP_ASSERT_BYTES_EQ(expected, exact, sizeof(expected));
+
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_rejects_duplicate_unknown_wire_attrs)
+{
+    const uint8_t body[] = {
+        0u, 0u,
+        0u, 8u,
+        0x80u, 99u, 1u, 1u,
+        0x80u, 99u, 1u, 2u
+    };
+    size_t used = 77u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS, libbgp_update_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(77u, used);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT(msg.attrs == NULL);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_as4_public_state_edge_branches)
+{
+    uint32_t asns[] = { 64512u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, asns, 1u);
+    libbgp_pattr_t *found;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_downgrade_as_path(&msg));
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(!found->data.as_path.is_4b);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_downgrade_as_path_realloc_failure_preserves_original_path)
+{
+    uint32_t asns[] = { 64512u, 65551u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, true, asns, 2u);
+    libbgp_pattr_t *found;
+    update_fail_alloc_ctx_t fail = { 0u, 0u, 0u, 0u, 0u, 1u };
+    libbgp_alloc_t alloc = update_fail_alloc_make(&fail);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_update_downgrade_as_path(&msg));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, fail.realloc_calls);
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[0].asns[1]);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_validate_rejects_as_path_width_mismatch_public_state)
+{
+    uint32_t wide_asn[] = { 65536u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, wide_asn, 1u);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, wide_asn, 1u);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_validate(&msg));
+    libbgp_update_destroy(&msg);
+
+    as4_path->data.as_path.is_4b = false;
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_validate(&msg));
+    libbgp_update_destroy(&msg);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+}
+
+LIBBGP_TEST(update_parse_rejects_extended_attr_length_past_attribute_block)
+{
+    const uint8_t body[] = {
+        0u, 0u,
+        0u, 5u,
+        0xd0u, 99u, 0u, 2u, 1u
+    };
+    size_t used = 42u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(42u, used);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT(msg.attrs == NULL);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_rejects_mp_reach_with_link_local_nexthop)
+{
+    const uint8_t body[] = {
+        0u, 0u,
+        0u, 45u,
+        0x80u, 14u, 42u,
+        0u, 2u,
+        1u,
+        32u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0xfeu, 0x80u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        0u,
+        32u, 0x20u, 0x01u, 0x0du, 0xb8u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT(msg.attrs == NULL);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_write_mp_reach_ipv6_exact_and_short_buffer)
+{
+    uint32_t asns[] = { 64512u };
+    uint8_t exact[64];
+    uint8_t short_buf[45];
+    size_t out_len = 123u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, true, asns, 1u);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    libbgp_prefix6_t nlri;
+    const uint8_t nexthop[] = {
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+
+    LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    memset(&nlri, 0, sizeof(nlri));
+    nlri.len = 32u;
+    nlri.addr[0] = 0x20u;
+    nlri.addr[1] = 0x01u;
+    nlri.addr[2] = 0x0du;
+    nlri.addr[3] = 0xb8u;
+    memcpy(mp_reach->data.mp_reach_ipv6.nexthop, nexthop, sizeof(nexthop));
+    mp_reach->data.mp_reach_ipv6.nexthop_len = sizeof(nexthop);
+    mp_reach->data.mp_reach_ipv6.nlri = &nlri;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 1u;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, origin));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, mp_reach));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER,
+        libbgp_update_write(&msg, short_buf, sizeof(short_buf), &out_len));
+    LIBBGP_ASSERT_EQ_U64(123u, out_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&msg, exact, sizeof(exact), &out_len));
+    LIBBGP_ASSERT_EQ_U64(46u, out_len);
+
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 0u;
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(origin);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_parse_rejects_truncated_withdrawn_and_attr_blocks)
+{
+    const uint8_t truncated_withdrawn[] = {
+        0u, 4u,
+        24u, 198u, 51u
+    };
+    const uint8_t truncated_attrs[] = {
+        0u, 0u,
+        0u, 4u,
+        0x40u, 1u, 1u
+    };
+    size_t used = 77u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, truncated_withdrawn, sizeof(truncated_withdrawn), &used));
+    LIBBGP_ASSERT_EQ_U64(77u, used);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.withdrawn_count);
+    libbgp_update_destroy(&msg);
+
+    libbgp_update_init(&msg);
+    used = 88u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, truncated_attrs, sizeof(truncated_attrs), &used));
+    LIBBGP_ASSERT_EQ_U64(88u, used);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_validate_accepts_mp_reach_ipv6_with_mandatory_attrs)
+{
+    uint32_t asns[] = { 64512u };
+    const uint8_t nexthop[] = {
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    libbgp_update_msg_t msg;
+    libbgp_prefix6_t ipv6_nlri;
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, true, asns, 1u);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+
+    LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    memset(&ipv6_nlri, 0, sizeof(ipv6_nlri));
+    ipv6_nlri.len = 32u;
+    ipv6_nlri.addr[0] = 0x20u;
+    ipv6_nlri.addr[1] = 0x01u;
+    ipv6_nlri.addr[2] = 0x0du;
+    ipv6_nlri.addr[3] = 0xb8u;
+    origin->data.origin.origin = 0u;
+    memcpy(mp_reach->data.mp_reach_ipv6.nexthop, nexthop, sizeof(nexthop));
+    mp_reach->data.mp_reach_ipv6.nexthop_len = sizeof(nexthop);
+    mp_reach->data.mp_reach_ipv6.nlri = &ipv6_nlri;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 1u;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, origin));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, mp_reach));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 0u;
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(origin);
+    libbgp_update_destroy(&msg);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "update_parse_write_empty_fixture_body", update_parse_write_empty_fixture_body },
         { "update_parse_write_with_withdrawn_attrs_and_nlri", update_parse_write_with_withdrawn_attrs_and_nlri },
+        { "update_parse_write_withdraw_only_without_mandatory_attrs", update_parse_write_withdraw_only_without_mandatory_attrs },
+        { "update_parse_rejects_ipv4_prefix_length_over_32", update_parse_rejects_ipv4_prefix_length_over_32 },
         { "update_rejects_duplicate_attrs_and_missing_mandatory_attrs", update_rejects_duplicate_attrs_and_missing_mandatory_attrs },
         { "update_parse_as4_reads_four_octet_as_path_and_aggregator", update_parse_as4_reads_four_octet_as_path_and_aggregator },
         { "update_as4_helpers_restore_downgrade_prepend_and_aggregator", update_as4_helpers_restore_downgrade_prepend_and_aggregator },
@@ -1819,7 +2285,20 @@ int main(void)
         { "update_validate_rejects_duplicate_semantic_attrs_in_public_state", update_validate_rejects_duplicate_semantic_attrs_in_public_state },
         { "update_restore_as_path_rejects_invalid_as4_shadow_state", update_restore_as_path_rejects_invalid_as4_shadow_state },
         { "update_restore_as_path_allocation_failure_preserves_shadow_attr", update_restore_as_path_allocation_failure_preserves_shadow_attr },
-        { "update_prepend_rejects_invalid_first_segment_state", update_prepend_rejects_invalid_first_segment_state }
+        { "update_prepend_rejects_invalid_first_segment_state", update_prepend_rejects_invalid_first_segment_state },
+        { "update_parse_rejects_duplicate_wire_attrs_and_nomem_paths", update_parse_rejects_duplicate_wire_attrs_and_nomem_paths },
+        { "update_as4_aggregator_allocation_failures_preserve_state", update_as4_aggregator_allocation_failures_preserve_state },
+        { "update_write_rejects_attr_length_boundary_and_prefix_overflow_state", update_write_rejects_attr_length_boundary_and_prefix_overflow_state },
+        { "update_write_exact_buffer_and_one_byte_short", update_write_exact_buffer_and_one_byte_short },
+        { "update_parse_rejects_duplicate_unknown_wire_attrs", update_parse_rejects_duplicate_unknown_wire_attrs },
+        { "update_as4_public_state_edge_branches", update_as4_public_state_edge_branches },
+        { "update_downgrade_as_path_realloc_failure_preserves_original_path", update_downgrade_as_path_realloc_failure_preserves_original_path },
+        { "update_validate_rejects_as_path_width_mismatch_public_state", update_validate_rejects_as_path_width_mismatch_public_state },
+        { "update_parse_rejects_extended_attr_length_past_attribute_block", update_parse_rejects_extended_attr_length_past_attribute_block },
+        { "update_parse_rejects_mp_reach_with_link_local_nexthop", update_parse_rejects_mp_reach_with_link_local_nexthop },
+        { "update_write_mp_reach_ipv6_exact_and_short_buffer", update_write_mp_reach_ipv6_exact_and_short_buffer },
+        { "update_parse_rejects_truncated_withdrawn_and_attr_blocks", update_parse_rejects_truncated_withdrawn_and_attr_blocks },
+        { "update_validate_accepts_mp_reach_ipv6_with_mandatory_attrs", update_validate_accepts_mp_reach_ipv6_with_mandatory_attrs }
     };
 
     return libbgp_run_tests("update", tests, LIBBGP_ARRAY_LEN(tests));

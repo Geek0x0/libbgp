@@ -3,6 +3,9 @@
 #include "libbgp/out_handler.h"
 #include "libbgp/types.h"
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 typedef struct io_ctx {
     const uint8_t *expected_send;
     size_t send_len;
@@ -450,6 +453,58 @@ LIBBGP_TEST(out_handler_send_callback_can_reenter_handler)
     libbgp_out_handler_destroy(&handler);
 }
 
+LIBBGP_TEST(out_handler_destroy_null_and_setters_after_destroy_are_safe)
+{
+    libbgp_out_handler_t handler;
+    libbgp_io_ops_t ops;
+
+    ops.send_fn = counting_send;
+    ops.recv_fn = counting_recv;
+    ops.ctx = NULL;
+
+    libbgp_out_handler_destroy(NULL);
+    libbgp_out_handler_set_ops(NULL, &ops);
+    libbgp_out_handler_set_fd(NULL, -1);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_out_handler_init(NULL));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_destroy(&handler);
+    libbgp_out_handler_destroy(&handler);
+    libbgp_out_handler_set_ops(&handler, &ops);
+    libbgp_out_handler_set_fd(&handler, -1);
+}
+
+LIBBGP_TEST(out_handler_fd_send_and_recv_paths_use_socket)
+{
+    libbgp_out_handler_t handler;
+    int sockets[2];
+    const uint8_t send_buf[] = { 0x11u, 0x22u, 0x33u };
+    uint8_t recv_buf[3] = { 0u };
+    size_t count = 99u;
+
+    LIBBGP_ASSERT_EQ_I64(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sockets));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&handler));
+    libbgp_out_handler_set_fd(&handler, sockets[0]);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_out_handler_send(&handler, send_buf, sizeof(send_buf), &count));
+    LIBBGP_ASSERT_EQ_U64(sizeof(send_buf), count);
+    LIBBGP_ASSERT_EQ_I64((int)sizeof(recv_buf), (int)recv(sockets[1], recv_buf, sizeof(recv_buf), 0));
+    LIBBGP_ASSERT_BYTES_EQ(send_buf, recv_buf, sizeof(send_buf));
+
+    LIBBGP_ASSERT_EQ_I64((int)sizeof(send_buf), (int)send(sockets[1], send_buf, sizeof(send_buf), 0));
+    memset(recv_buf, 0, sizeof(recv_buf));
+    count = 99u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_out_handler_recv(&handler, recv_buf, sizeof(recv_buf), &count));
+    LIBBGP_ASSERT_EQ_U64(sizeof(recv_buf), count);
+    LIBBGP_ASSERT_BYTES_EQ(send_buf, recv_buf, sizeof(send_buf));
+
+    libbgp_out_handler_destroy(&handler);
+    close(sockets[0]);
+    close(sockets[1]);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -468,7 +523,9 @@ int main(void)
         { "out_handler_invalid_fd_recv_allows_null_received", out_handler_invalid_fd_recv_allows_null_received },
         { "out_handler_negative_callbacks_map_errors", out_handler_negative_callbacks_map_errors },
         { "out_handler_set_fd_resets_custom_ops", out_handler_set_fd_resets_custom_ops },
-        { "out_handler_send_callback_can_reenter_handler", out_handler_send_callback_can_reenter_handler }
+        { "out_handler_send_callback_can_reenter_handler", out_handler_send_callback_can_reenter_handler },
+        { "out_handler_destroy_null_and_setters_after_destroy_are_safe", out_handler_destroy_null_and_setters_after_destroy_are_safe },
+        { "out_handler_fd_send_and_recv_paths_use_socket", out_handler_fd_send_and_recv_paths_use_socket }
     };
 
     return libbgp_run_tests("out_handler", tests, LIBBGP_ARRAY_LEN(tests));

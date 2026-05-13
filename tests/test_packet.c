@@ -15,9 +15,11 @@ LIBBGP_TEST(keepalive_body_parse_write_and_packet_fixture)
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_keepalive_parse(NULL, 0u, &used));
     LIBBGP_ASSERT_EQ_U64(0u, used);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_keepalive_parse(NULL, 0u, NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_keepalive_parse(NULL, 1u, &used));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_keepalive_write(NULL, 0u, &out_len));
     LIBBGP_ASSERT_EQ_U64(0u, out_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_keepalive_write(NULL, 0u, NULL));
 
     libbgp_packet_init(&pkt);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN, &used));
