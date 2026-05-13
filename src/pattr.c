@@ -895,6 +895,31 @@ libbgp_err_t libbgp_pattr_wire_len(const libbgp_pattr_t *attr, size_t *out_len)
     if (err != LIBBGP_OK) {
         return err;
     }
+    switch (attr->type) {
+    case LIBBGP_PATTR_ORIGIN:
+        if (attr->data.origin.origin > 2u) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        break;
+    case LIBBGP_PATTR_AS_PATH:
+    case LIBBGP_PATTR_AS4_PATH:
+        if (!attr->data.as_path.is_4b) {
+            size_t i;
+
+            for (i = 0u; i < attr->data.as_path.segment_count; i++) {
+                size_t j;
+
+                for (j = 0u; j < attr->data.as_path.segments[i].asn_count; j++) {
+                    if (attr->data.as_path.segments[i].asns[j] > 65535u) {
+                        return LIBBGP_ERR_BAD_LEN;
+                    }
+                }
+            }
+        }
+        break;
+    default:
+        break;
+    }
 
     extended = value_len > 255u ||
         (attr->flags & LIBBGP_PATTR_FLAG_EXTENDED_LENGTH) != 0u;
