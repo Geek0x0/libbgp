@@ -2659,6 +2659,93 @@ LIBBGP_TEST(rib6_lookup_covers_default_exact_and_boundary_prefixes)
     libbgp_rib6_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_lookup_radix_updates_after_withdraw_restore_and_discard)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t default_prefix = p4(0u, 0u, 0u, 0u, 0u);
+    libbgp_prefix4_t broad_prefix = p4(10u, 91u, 0u, 0u, 16u);
+    libbgp_prefix4_t exact_prefix = p4(10u, 91u, 2u, 3u, 32u);
+    libbgp_rib4_route_t default_route = route4(default_prefix, 90u);
+    libbgp_rib4_route_t broad_route = route4(broad_prefix, 91u);
+    libbgp_rib4_route_t exact_route = route4(exact_prefix, 92u);
+    bgp_rib4_saved_route_t saved;
+    bool had_route = false;
+    const libbgp_rib4_route_t *found = NULL;
+    uint32_t dest = ip4(10u, 91u, 2u, 3u);
+
+    memset(&saved, 0, sizeof(saved));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &default_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &broad_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &exact_route));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(92u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_withdraw_exact_save(&rib, 92u, &exact_prefix, &saved, &had_route));
+    LIBBGP_ASSERT(had_route);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(91u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_restore_saved_if_absent(&rib, 92u, &saved));
+    LIBBGP_ASSERT(saved.entry == NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(92u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_withdraw(&rib, 92u, &exact_prefix));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(91u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 91u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(90u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_discard(&rib, 90u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib4_lookup(&rib, dest, &found));
+
+    bgp_rib4_saved_route_destroy(&saved);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_lookup_radix_updates_partial_prefix_after_withdraw_and_discard)
+{
+    libbgp_rib6_t rib;
+    static const uint8_t zero[16] = { 0u };
+    static const uint8_t broad_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x91u };
+    static const uint8_t partial_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x91u, 0u, 0u, 0x80u };
+    static const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0x91u, 0u, 0u, 0x80u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0x91u };
+    libbgp_prefix6_t default_prefix = p6(zero, 0u);
+    libbgp_prefix6_t broad_prefix = p6(broad_addr, 48u);
+    libbgp_prefix6_t partial_prefix = p6(partial_addr, 65u);
+    libbgp_rib6_route_t default_route = route6(default_prefix, 93u, next_hop);
+    libbgp_rib6_route_t broad_route = route6(broad_prefix, 94u, next_hop);
+    libbgp_rib6_route_t partial_route = route6(partial_prefix, 95u, next_hop);
+    const libbgp_rib6_route_t *found = NULL;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &default_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &broad_route));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &partial_route));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(95u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_withdraw(&rib, 95u, &partial_prefix));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(94u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_discard(&rib, 94u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT_EQ_U64(93u, found->source_router_id);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_discard(&rib, 93u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib6_lookup(&rib, dest, &found));
+
+    libbgp_rib6_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_insert_save_replaced_reports_replaced_route)
 {
     libbgp_rib4_t rib;
@@ -3809,6 +3896,87 @@ LIBBGP_TEST(rib6_source_zero_exact_update_withdraw_edges)
     libbgp_rib6_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_lookup_tie_breaks_on_noncanonical_same_length_prefixes)
+{
+    /*
+     * RFC section: RFC 7606 §2 + RFC 4271 §9.1.2.2 (robust handling of abnormal input with deterministic best-path choice).
+     * Target branches: rib4.c radix lookup maintenance for equivalent noncanonical prefixes.
+     * Expected result: global lookup preserves full-scan tie-break behavior and falls back after exact withdraw.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t canonical = p4(10u, 245u, 0u, 0u, 24u);
+    libbgp_prefix4_t noncanonical;
+    libbgp_rib4_route_t low = route4(canonical, 96u);
+    libbgp_rib4_route_t high;
+    const libbgp_rib4_route_t *found = NULL;
+    uint32_t dest = ip4(10u, 245u, 0u, 99u);
+
+    noncanonical.addr = ip4(10u, 245u, 0u, 128u);
+    noncanonical.len = 24u;
+    high = route4(noncanonical, 97u);
+    low.local_pref = 100u;
+    high.local_pref = 250u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &high));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &low));
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(97u, found->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(250u, found->local_pref);
+    LIBBGP_ASSERT_EQ_U64(noncanonical.addr, found->prefix.addr);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_withdraw(&rib, 97u, &noncanonical));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(96u, found->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(canonical.addr, found->prefix.addr);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_lookup_tie_breaks_on_noncanonical_same_length_prefixes)
+{
+    /*
+     * RFC section: RFC 7606 §2 + RFC 4271 §9.1.2.2 (robust handling of abnormal input with deterministic best-path choice).
+     * Target branches: rib6.c radix lookup maintenance for equivalent noncanonical prefixes.
+     * Expected result: global lookup preserves full-scan tie-break behavior and falls back after exact withdraw.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t base_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xf5u };
+    const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xf5u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xf5u };
+    libbgp_prefix6_t canonical = p6(base_addr, 64u);
+    libbgp_prefix6_t noncanonical = canonical;
+    libbgp_rib6_route_t low = route6(canonical, 98u, next_hop);
+    libbgp_rib6_route_t high;
+    const libbgp_rib6_route_t *found = NULL;
+
+    noncanonical.addr[15] = 0x80u;
+    high = route6(noncanonical, 99u, next_hop);
+    low.local_pref = 100u;
+    high.local_pref = 250u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &high));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &low));
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_rib6_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(99u, found->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(250u, found->local_pref);
+    LIBBGP_ASSERT_EQ_U64(0x80u, found->prefix.addr[15]);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_withdraw(&rib, 99u, &noncanonical));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(98u, found->source_router_id);
+    LIBBGP_ASSERT_EQ_U64(0u, found->prefix.addr[15]);
+
+    libbgp_rib6_destroy(&rib);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -3874,6 +4042,8 @@ int main(void)
         { "rib4_saved_route_update_restore_and_conditional_withdraw", rib4_saved_route_update_restore_and_conditional_withdraw },
         { "rib4_lookup_covers_default_exact_and_boundary_prefixes", rib4_lookup_covers_default_exact_and_boundary_prefixes },
         { "rib6_lookup_covers_default_exact_and_boundary_prefixes", rib6_lookup_covers_default_exact_and_boundary_prefixes },
+        { "rib4_lookup_radix_updates_after_withdraw_restore_and_discard", rib4_lookup_radix_updates_after_withdraw_restore_and_discard },
+        { "rib6_lookup_radix_updates_partial_prefix_after_withdraw_and_discard", rib6_lookup_radix_updates_partial_prefix_after_withdraw_and_discard },
         { "rib4_insert_save_replaced_reports_replaced_route", rib4_insert_save_replaced_reports_replaced_route },
         { "rib6_insert_save_replaced_reports_replaced_route", rib6_insert_save_replaced_reports_replaced_route },
         { "rib4_withdraw_track_reports_no_change_and_rejects_invalid_args", rib4_withdraw_track_reports_no_change_and_rejects_invalid_args },
@@ -3903,7 +4073,9 @@ int main(void)
         { "rib4_discard_collect_non_best_source_has_no_best_delta", rib4_discard_collect_non_best_source_has_no_best_delta },
         { "rib4_restore_saved_if_absent_noop_and_invalid_saved_entry", rib4_restore_saved_if_absent_noop_and_invalid_saved_entry },
         { "rib4_foreach_best_route_continues_then_stops_on_callback_false", rib4_foreach_best_route_continues_then_stops_on_callback_false },
-        { "rib6_source_zero_exact_update_withdraw_edges", rib6_source_zero_exact_update_withdraw_edges }
+        { "rib6_source_zero_exact_update_withdraw_edges", rib6_source_zero_exact_update_withdraw_edges },
+        { "rib4_lookup_tie_breaks_on_noncanonical_same_length_prefixes", rib4_lookup_tie_breaks_on_noncanonical_same_length_prefixes },
+        { "rib6_lookup_tie_breaks_on_noncanonical_same_length_prefixes", rib6_lookup_tie_breaks_on_noncanonical_same_length_prefixes }
     };
 
     return libbgp_run_tests("rib", tests, LIBBGP_ARRAY_LEN(tests));
