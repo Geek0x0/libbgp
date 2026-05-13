@@ -2,8 +2,62 @@
 
 #include "fixtures/bgp_packets.h"
 
+#include "libbgp/alloc.h"
 #include "libbgp/sink.h"
 #include "libbgp/types.h"
+
+typedef struct sink_fail_alloc_ctx {
+    size_t calloc_calls;
+    size_t realloc_calls;
+    size_t fail_calloc_after;
+    size_t fail_realloc_after;
+} sink_fail_alloc_ctx_t;
+
+static void *sink_fail_alloc_malloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void *sink_fail_alloc_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    sink_fail_alloc_ctx_t *fail_ctx = (sink_fail_alloc_ctx_t *)ctx;
+
+    fail_ctx->calloc_calls++;
+    if (fail_ctx->fail_calloc_after != 0u && fail_ctx->calloc_calls >= fail_ctx->fail_calloc_after) {
+        return NULL;
+    }
+    return calloc(nmemb, size);
+}
+
+static void *sink_fail_alloc_realloc(void *ptr, size_t size, void *ctx)
+{
+    sink_fail_alloc_ctx_t *fail_ctx = (sink_fail_alloc_ctx_t *)ctx;
+
+    fail_ctx->realloc_calls++;
+    if (fail_ctx->fail_realloc_after != 0u && fail_ctx->realloc_calls >= fail_ctx->fail_realloc_after) {
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
+static void sink_fail_alloc_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    free(ptr);
+}
+
+static libbgp_alloc_t sink_fail_alloc_make(sink_fail_alloc_ctx_t *ctx)
+{
+    libbgp_alloc_t alloc;
+
+    alloc.malloc = sink_fail_alloc_malloc;
+    alloc.calloc = sink_fail_alloc_calloc;
+    alloc.realloc = sink_fail_alloc_realloc;
+    alloc.free = sink_fail_alloc_free;
+    alloc.ctx = ctx;
+    return alloc;
+}
 
 LIBBGP_TEST(sink_feed_keepalive_and_pop)
 {
@@ -110,6 +164,32 @@ LIBBGP_TEST(sink_rejects_bad_marker_and_clears_buffer)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_rejects_partial_bad_marker_then_accepts_valid_frame)
+{
+    uint8_t bad_prefix[LIBBGP_BGP_HEADER_LEN - 1u];
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    memset(bad_prefix, 0xff, sizeof(bad_prefix));
+    bad_prefix[7] = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, bad_prefix, sizeof(bad_prefix)));
+    LIBBGP_ASSERT_EQ_U64(sizeof(bad_prefix), libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
 LIBBGP_TEST(sink_zero_length_null_feed_is_noop)
 {
     libbgp_sink_t sink;
@@ -119,6 +199,17 @@ LIBBGP_TEST(sink_zero_length_null_feed_is_noop)
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
     libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_null_handles_are_safe)
+{
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_init(NULL));
+    libbgp_sink_destroy(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(NULL, NULL, 0u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_feed(NULL, LIBBGP_FIXTURE_KEEPALIVE, 1u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(NULL));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(NULL));
+    libbgp_sink_clear(NULL);
 }
 
 LIBBGP_TEST(sink_pop_empty_and_null_output_are_errors)
@@ -133,6 +224,79 @@ LIBBGP_TEST(sink_pop_empty_and_null_output_are_errors)
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
     libbgp_packet_destroy(&pkt);
     libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_rejects_null_data_for_nonzero_len)
+{
+    libbgp_sink_t sink;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_sink_feed(&sink, NULL, 1u));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_feed_reports_nomem_when_buffer_realloc_fails)
+{
+    sink_fail_alloc_ctx_t fail_ctx = { 0u, 0u, 0u, 1u };
+    libbgp_alloc_t alloc = sink_fail_alloc_make(&fail_ctx);
+    libbgp_sink_t sink;
+    libbgp_err_t init_rc;
+    libbgp_err_t feed_rc = LIBBGP_ERR_INVALID;
+    size_t realloc_calls;
+    size_t buffered_len = 0u;
+    size_t packet_count = 0u;
+
+    libbgp_set_alloc(&alloc);
+    init_rc = libbgp_sink_init(&sink);
+    if (init_rc == LIBBGP_OK) {
+        feed_rc = libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, 1u);
+        buffered_len = libbgp_sink_buffered_len(&sink);
+        packet_count = libbgp_sink_packet_count(&sink);
+    }
+    realloc_calls = fail_ctx.realloc_calls;
+    libbgp_set_alloc(NULL);
+    if (init_rc == LIBBGP_OK) {
+        libbgp_sink_destroy(&sink);
+    }
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_rc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, feed_rc);
+    LIBBGP_ASSERT_EQ_U64(1u, realloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, buffered_len);
+    LIBBGP_ASSERT_EQ_U64(0u, packet_count);
+}
+
+LIBBGP_TEST(sink_feed_reports_nomem_when_packet_array_alloc_fails)
+{
+    sink_fail_alloc_ctx_t fail_ctx = { 0u, 0u, 2u, 0u };
+    libbgp_alloc_t alloc = sink_fail_alloc_make(&fail_ctx);
+    libbgp_sink_t sink;
+    libbgp_err_t init_rc;
+    libbgp_err_t feed_rc = LIBBGP_ERR_INVALID;
+    size_t calloc_calls;
+    size_t packet_count = 0u;
+    size_t buffered_len = 0u;
+
+    libbgp_set_alloc(&alloc);
+    init_rc = libbgp_sink_init(&sink);
+    if (init_rc == LIBBGP_OK) {
+        feed_rc = libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+        packet_count = libbgp_sink_packet_count(&sink);
+        buffered_len = libbgp_sink_buffered_len(&sink);
+    }
+    calloc_calls = fail_ctx.calloc_calls;
+    libbgp_set_alloc(NULL);
+    if (init_rc == LIBBGP_OK) {
+        libbgp_sink_destroy(&sink);
+    }
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_rc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, feed_rc);
+    LIBBGP_ASSERT_EQ_U64(2u, calloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, packet_count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FIXTURE_KEEPALIVE_LEN, buffered_len);
 }
 
 LIBBGP_TEST(sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet)
@@ -232,6 +396,78 @@ LIBBGP_TEST(sink_as4_context_parses_four_octet_as_path)
     libbgp_sink_destroy(&sink);
 }
 
+static void sink_feed_keepalive_batch(size_t count)
+{
+    uint8_t *batch;
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+    size_t i;
+
+    batch = (uint8_t *)malloc(count * LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    LIBBGP_ASSERT(batch != NULL);
+    for (i = 0u; i < count; i++) {
+        memcpy(batch + (i * LIBBGP_FIXTURE_KEEPALIVE_LEN), LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    }
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, batch, count * LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(count, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+
+    for (i = 0u; i < count; i++) {
+        libbgp_packet_init(&pkt);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+        libbgp_packet_destroy(&pkt);
+    }
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+
+    libbgp_sink_destroy(&sink);
+    free(batch);
+}
+
+LIBBGP_TEST(sink_feeds_and_pops_1k_keepalive_batch)
+{
+    sink_feed_keepalive_batch(1000u);
+}
+
+LIBBGP_TEST(sink_feeds_and_pops_10k_keepalive_batch)
+{
+    sink_feed_keepalive_batch(10000u);
+}
+
+LIBBGP_TEST(sink_reuses_packet_queue_slots_after_partial_pop)
+{
+    uint8_t batch[8u * LIBBGP_FIXTURE_KEEPALIVE_LEN];
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+    size_t i;
+
+    for (i = 0u; i < 8u; i++) {
+        memcpy(batch + (i * LIBBGP_FIXTURE_KEEPALIVE_LEN), LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    }
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, batch, 4u * LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    for (i = 0u; i < 3u; i++) {
+        libbgp_packet_init(&pkt);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+        libbgp_packet_destroy(&pkt);
+    }
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, batch + (4u * LIBBGP_FIXTURE_KEEPALIVE_LEN), 4u * LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(5u, libbgp_sink_packet_count(&sink));
+    for (i = 0u; i < 5u; i++) {
+        libbgp_packet_init(&pkt);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+        libbgp_packet_destroy(&pkt);
+    }
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+
+    libbgp_sink_destroy(&sink);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -241,12 +477,20 @@ int main(void)
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
         { "sink_rejects_bad_marker_and_clears_buffer", sink_rejects_bad_marker_and_clears_buffer },
+        { "sink_rejects_partial_bad_marker_then_accepts_valid_frame", sink_rejects_partial_bad_marker_then_accepts_valid_frame },
         { "sink_zero_length_null_feed_is_noop", sink_zero_length_null_feed_is_noop },
+        { "sink_null_handles_are_safe", sink_null_handles_are_safe },
         { "sink_pop_empty_and_null_output_are_errors", sink_pop_empty_and_null_output_are_errors },
+        { "sink_rejects_null_data_for_nonzero_len", sink_rejects_null_data_for_nonzero_len },
+        { "sink_feed_reports_nomem_when_buffer_realloc_fails", sink_feed_reports_nomem_when_buffer_realloc_fails },
+        { "sink_feed_reports_nomem_when_packet_array_alloc_fails", sink_feed_reports_nomem_when_packet_array_alloc_fails },
         { "sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet", sink_drops_bad_complete_frame_and_recovers_on_next_valid_packet },
         { "sink_clear_discards_packets_and_buffer", sink_clear_discards_packets_and_buffer },
         { "sink_pop_moves_dynamic_packet_into_zeroed_output", sink_pop_moves_dynamic_packet_into_zeroed_output },
-        { "sink_as4_context_parses_four_octet_as_path", sink_as4_context_parses_four_octet_as_path }
+        { "sink_as4_context_parses_four_octet_as_path", sink_as4_context_parses_four_octet_as_path },
+        { "sink_feeds_and_pops_1k_keepalive_batch", sink_feeds_and_pops_1k_keepalive_batch },
+        { "sink_feeds_and_pops_10k_keepalive_batch", sink_feeds_and_pops_10k_keepalive_batch },
+        { "sink_reuses_packet_queue_slots_after_partial_pop", sink_reuses_packet_queue_slots_after_partial_pop }
     };
 
     return libbgp_run_tests("sink", tests, LIBBGP_ARRAY_LEN(tests));

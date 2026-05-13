@@ -39,8 +39,8 @@ typedef struct scoped_update_event_ctx {
 } scoped_update_event_ctx_t;
 
 typedef struct state_change_ctx {
-    libbgp_fsm_state_t old_states[16];
-    libbgp_fsm_state_t new_states[16];
+    libbgp_fsm_state_t old_states[64];
+    libbgp_fsm_state_t new_states[64];
     size_t count;
 } state_change_ctx_t;
 
@@ -159,6 +159,11 @@ typedef struct fail_rib6_route_alloc_ctx {
     size_t fail_on_rib6_route_calloc;
 } fail_rib6_route_alloc_ctx_t;
 
+typedef struct fsm_fail_realloc_ctx {
+    size_t realloc_calls;
+    size_t fail_on_realloc;
+} fsm_fail_realloc_ctx_t;
+
 static void *fail_rib6_route_alloc_malloc(size_t size, void *ctx)
 {
     (void)ctx;
@@ -200,6 +205,47 @@ static libbgp_alloc_t fail_rib6_route_alloc_make(fail_rib6_route_alloc_ctx_t *ct
     alloc.calloc = fail_rib6_route_alloc_calloc;
     alloc.realloc = fail_rib6_route_alloc_realloc;
     alloc.free = fail_rib6_route_alloc_free;
+    alloc.ctx = ctx;
+    return alloc;
+}
+
+static void *fsm_fail_realloc_malloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void *fsm_fail_realloc_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)ctx;
+    return calloc(nmemb, size);
+}
+
+static void *fsm_fail_realloc_realloc(void *ptr, size_t size, void *ctx)
+{
+    fsm_fail_realloc_ctx_t *fail = (fsm_fail_realloc_ctx_t *)ctx;
+
+    fail->realloc_calls++;
+    if (fail->realloc_calls == fail->fail_on_realloc) {
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
+static void fsm_fail_realloc_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    free(ptr);
+}
+
+static libbgp_alloc_t fsm_fail_realloc_make(fsm_fail_realloc_ctx_t *ctx)
+{
+    libbgp_alloc_t alloc;
+
+    alloc.malloc = fsm_fail_realloc_malloc;
+    alloc.calloc = fsm_fail_realloc_calloc;
+    alloc.realloc = fsm_fail_realloc_realloc;
+    alloc.free = fsm_fail_realloc_free;
     alloc.ctx = ctx;
     return alloc;
 }
@@ -379,6 +425,23 @@ static libbgp_io_result_t zero_progress_send(void *ctx, const uint8_t *buf, size
     memcpy(short_send->bytes + short_send->len, buf, len);
     short_send->len += len;
     short_send->calls++;
+    return 0;
+}
+
+static libbgp_io_result_t short_then_zero_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    short_send_ctx_t *short_send = (short_send_ctx_t *)ctx;
+    size_t sent;
+
+    LIBBGP_ASSERT(short_send->calls < 4u);
+    LIBBGP_ASSERT(short_send->len + len <= sizeof(short_send->bytes));
+    memcpy(short_send->bytes + short_send->len, buf, len);
+    short_send->len += len;
+    short_send->calls++;
+    if (short_send->calls == 1u) {
+        sent = len / 2u;
+        return (libbgp_io_result_t)(sent == 0u ? 1u : sent);
+    }
     return 0;
 }
 
@@ -569,6 +632,20 @@ static void state_change_capture(
     changes->old_states[changes->count] = old_state;
     changes->new_states[changes->count] = new_state;
     changes->count++;
+}
+
+static void state_change_clear_self_on_first_call(
+    libbgp_fsm_state_t old_state,
+    libbgp_fsm_state_t new_state,
+    void *ctx)
+{
+    reentrant_start_ctx_t *reentrant = (reentrant_start_ctx_t *)ctx;
+
+    LIBBGP_ASSERT(reentrant != NULL);
+    reentrant->calls++;
+    reentrant->out.sent[0].type = (libbgp_packet_type_t)old_state;
+    reentrant->out.sent[1].type = (libbgp_packet_type_t)new_state;
+    libbgp_fsm_set_state_change_cb(reentrant->fsm, NULL, NULL);
 }
 
 static void restart_on_session_down(const libbgp_event_t *event, void *ctx)
@@ -4657,6 +4734,51 @@ LIBBGP_TEST(fsm_established_rejects_invalid_ipv4_nexthops_even_when_lan_check_di
     }
 }
 
+LIBBGP_TEST(fsm_initial_rib_advertisement_send_failure_tears_down)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_rib4_t *rib;
+    fail_after_send_ctx_t fail_after;
+    event_ctx_t events;
+    libbgp_prefix4_t prefix = p4(10u, 65u, 0u, 0u, 16u);
+    libbgp_packet_t open;
+    libbgp_packet_t keepalive = make_keepalive_packet();
+
+    memset(&fail_after, 0, sizeof(fail_after));
+    memset(&events, 0, sizeof(events));
+    fail_after.fail_on_call = 3u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out_handler));
+    set_out_send_fn(&out_handler, fail_after_send, &fail_after);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    rib = libbgp_fsm_get_rib4(&fsm);
+    LIBBGP_ASSERT(rib != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_rib4_insert_local(rib, &prefix, ip4(192u, 0u, 2u, 254u), 100));
+
+    open = make_open_packet_with_mpbgp(65010u, 45u, ip4(198u, 51u, 100u, 10u), true, true, true);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, fail_after.out.count);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &open));
+    LIBBGP_ASSERT_EQ_U64(2u, fail_after.out.count);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_WRITE, libbgp_fsm_on_packet(&fsm, &keepalive));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(3u, fail_after.calls);
+    LIBBGP_ASSERT_EQ_U64(2u, fail_after.out.count);
+    LIBBGP_ASSERT_EQ_U64(0u, events.count);
+
+    libbgp_packet_destroy(&keepalive);
+    libbgp_packet_destroy(&open);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_open_confirm_advertises_existing_local_rib4_routes)
 {
     libbgp_fsm_t fsm;
@@ -6179,6 +6301,71 @@ LIBBGP_TEST(fsm_established_invalid_update_is_atomic_and_does_not_refresh_hold_t
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_established_update_event_journal_nomem_rolls_back_inserted_route)
+{
+    struct libbgp_fsm_config config;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    libbgp_rib4_t rib4;
+    out_ctx_t out;
+    event_ctx_t events;
+    fsm_fail_realloc_ctx_t fail_ctx = { 0u, 1u };
+    libbgp_alloc_t fail_alloc;
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_packet_t update = make_update_add(prefix, ip4(192u, 0u, 2u, 44u));
+    const libbgp_rib4_route_t *route = NULL;
+    libbgp_err_t err;
+    size_t out_before_update;
+
+    config.local_asn = 65000u;
+    config.local_bgp_id = ip4(192u, 0u, 2u, 1u);
+    config.hold_time = 3u;
+    config.keepalive_time = 0u;
+    config.enable_4byte_asn = true;
+    config.enable_mpbgp_ipv6 = true;
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_DOWN, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED, event_capture, &events, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib4));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_rib4(&fsm, &rib4);
+    establish(&fsm, &out, &events);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 1000u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 3500u));
+    out_before_update = out.count;
+    fail_alloc = fsm_fail_realloc_make(&fail_ctx);
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_fsm_on_packet(&fsm, &update);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.realloc_calls);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_rib4_route_count(&rib4));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOT_FOUND, libbgp_rib4_lookup_scoped(&rib4, ip4(198u, 51u, 100u, 10u), ip4(203u, 0u, 113u, 44u), &route));
+    LIBBGP_ASSERT_EQ_U64(1u, events.count);
+    LIBBGP_ASSERT_EQ_U64(out_before_update, out.count);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_tick(&fsm, 4501u));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(out_before_update + 1u, out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_NOTIFICATION, out.sent[out_before_update].type);
+    LIBBGP_ASSERT_EQ_U64(2u, events.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_EVENT_SESSION_DOWN, events.types[1]);
+
+    libbgp_packet_destroy(&update);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_rib4_destroy(&rib4);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_established_update_nomem_rolls_back_inserted_routes_and_events)
 {
     static const uint8_t addr6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x60u };
@@ -6895,6 +7082,32 @@ LIBBGP_TEST(fsm_established_update_nomem_removes_absent_duplicate_ipv6_replaceme
     libbgp_rib6_destroy(&rib6);
     libbgp_event_bus_destroy(&bus);
     libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_established_rejects_update_with_null_required_arrays)
+{
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_packet_t null_withdrawn = make_update_withdraw(prefix);
+    libbgp_packet_t null_attrs = make_update_add(prefix, ip4(192u, 0u, 2u, 254u));
+    libbgp_packet_t null_nlri = make_update_add(prefix, ip4(192u, 0u, 2u, 254u));
+    libbgp_prefix4_t *withdrawn = null_withdrawn.data.update.withdrawn;
+    libbgp_pattr_t **attrs = null_attrs.data.update.attrs;
+    libbgp_prefix4_t *nlri = null_nlri.data.update.nlri;
+
+    null_withdrawn.data.update.withdrawn = NULL;
+    null_attrs.data.update.attrs = NULL;
+    null_nlri.data.update.nlri = NULL;
+
+    assert_invalid_update_no_route_effects(&null_withdrawn, 1u);
+    assert_invalid_update_no_route_effects(&null_attrs, 1u);
+    assert_invalid_update_no_route_effects(&null_nlri, 1u);
+
+    null_nlri.data.update.nlri = nlri;
+    null_attrs.data.update.attrs = attrs;
+    null_withdrawn.data.update.withdrawn = withdrawn;
+    libbgp_packet_destroy(&null_nlri);
+    libbgp_packet_destroy(&null_attrs);
+    libbgp_packet_destroy(&null_withdrawn);
 }
 
 LIBBGP_TEST(fsm_established_rejects_ipv4_advertisements_missing_mandatory_attrs)
@@ -8962,6 +9175,264 @@ LIBBGP_TEST(fsm_state_change_callback_observes_transitions)
     libbgp_out_handler_destroy(&out_handler);
 }
 
+LIBBGP_TEST(fsm_state_change_queue_coalesces_overflow_to_latest_state)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+    state_change_ctx_t changes;
+    size_t i;
+
+    setup_out(&out_handler, &out);
+    memset(&changes, 0, sizeof(changes));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_state_change_cb(&fsm, state_change_capture, &changes);
+
+    for (i = 0u; i < 20u; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_connect(&fsm));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_active(&fsm));
+    }
+    LIBBGP_ASSERT_EQ_U64(40u, changes.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ACTIVE, changes.old_states[38]);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_CONNECT, changes.new_states[38]);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_CONNECT, changes.old_states[39]);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ACTIVE, changes.new_states[39]);
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+
+LIBBGP_TEST(fsm_null_handles_are_safe_noops)
+{
+    libbgp_fsm_t null_fsm;
+
+    null_fsm.impl = NULL;
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(NULL));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&null_fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_fsm_start(NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_fsm_start(&null_fsm));
+    libbgp_fsm_set_state_change_cb(NULL, state_change_capture, NULL);
+    libbgp_fsm_set_state_change_cb(&null_fsm, state_change_capture, NULL);
+}
+
+LIBBGP_TEST(fsm_state_change_same_state_and_cleared_callback_are_noops)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+    state_change_ctx_t changes;
+
+    setup_out(&out_handler, &out);
+    memset(&changes, 0, sizeof(changes));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_state_change_cb(&fsm, state_change_capture, &changes);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_connect(&fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_connect(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, changes.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, changes.old_states[0]);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_CONNECT, changes.new_states[0]);
+
+    libbgp_fsm_set_state_change_cb(&fsm, NULL, NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_active(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, changes.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ACTIVE, libbgp_fsm_state(&fsm));
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_state_change_dispatch_stops_after_callback_cleared)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+    reentrant_start_ctx_t reentrant;
+
+    setup_out(&out_handler, &out);
+    memset(&reentrant, 0, sizeof(reentrant));
+    reentrant.fsm = &fsm;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_state_change_cb(&fsm, state_change_clear_self_on_first_call, &reentrant);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_connect(&fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_enter_active(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, reentrant.calls);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, reentrant.out.sent[0].type);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_CONNECT, reentrant.out.sent[1].type);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ACTIVE, libbgp_fsm_state(&fsm));
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_start_2byte_asn_without_capability_sends_plain_open)
+{
+    struct libbgp_fsm_config config = test_fsm_config();
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+    libbgp_packet_t sent;
+
+    config.local_asn = 64512u;
+    config.enable_4byte_asn = false;
+    config.enable_mpbgp_ipv6 = false;
+    setup_out(&out_handler, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(1u, out.count);
+    parse_sent_packet_2b(&out, 0u, &sent);
+    LIBBGP_ASSERT_EQ_U64(64512u, sent.data.open.my_asn);
+    LIBBGP_ASSERT_EQ_U64(0u, sent.data.open.capability_count);
+
+    libbgp_packet_destroy(&sent);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_start_capability_allocation_failures_restore_allocator)
+{
+    struct libbgp_fsm_config config = test_fsm_config();
+    libbgp_alloc_t fail_alloc;
+    fsm_fail_realloc_ctx_t fail;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    out_ctx_t out;
+    libbgp_err_t err;
+
+    setup_out(&out_handler, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    memset(&fail, 0, sizeof(fail));
+    fail.fail_on_realloc = 1u;
+    fail_alloc = fsm_fail_realloc_make(&fail);
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_fsm_start(&fsm);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, out.count);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+
+    config.enable_4byte_asn = false;
+    config.enable_mpbgp_ipv6 = false;
+    setup_out(&out_handler, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_mpbgp_ipv4(&fsm, true);
+    memset(&fail, 0, sizeof(fail));
+    fail.fail_on_realloc = 1u;
+    fail_alloc = fsm_fail_realloc_make(&fail);
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_fsm_start(&fsm);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, out.count);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+
+    config.enable_mpbgp_ipv6 = true;
+    setup_out(&out_handler, &out);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_mpbgp_ipv4(&fsm, true);
+    memset(&fail, 0, sizeof(fail));
+    fail.fail_on_realloc = 2u;
+    fail_alloc = fsm_fail_realloc_make(&fail);
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_fsm_start(&fsm);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(0u, out.count);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_start_zero_progress_after_partial_send_rolls_back_to_idle)
+{
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    short_send_ctx_t short_send;
+
+    memset(&short_send, 0, sizeof(short_send));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out_handler));
+    set_out_send_fn(&out_handler, short_then_zero_send, &short_send);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_WRITE, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_IDLE, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(2u, short_send.calls);
+    LIBBGP_ASSERT(short_send.len > 0u);
+
+    libbgp_fsm_destroy(&fsm);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
+LIBBGP_TEST(fsm_peer_open_without_any_mpbgp_cap_uses_ipv4_legacy_fallback)
+{
+    struct libbgp_fsm_config config = test_fsm_config();
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_event_bus_t bus;
+    out_ctx_t out;
+    event_ctx_t events;
+    libbgp_rib4_t *rib;
+    libbgp_rib6_t *rib6;
+    libbgp_prefix4_t prefix4 = p4(10u, 91u, 0u, 0u, 16u);
+    static const uint8_t prefix6_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x91u };
+    static const uint8_t nexthop6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x01u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    libbgp_prefix6_t prefix6 = p6(prefix6_addr, 40u);
+    libbgp_packet_t open = make_open_packet(65010u, 45u, ip4(198u, 51u, 100u, 10u), true);
+    libbgp_packet_t keepalive = make_keepalive_packet();
+    libbgp_packet_t sent_update;
+
+    setup_out(&out_handler, &out);
+    memset(&events, 0, sizeof(events));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_SESSION_UP, event_capture, &events, NULL));
+    config.enable_mpbgp_ipv6 = true;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_init(&fsm, &config));
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_fsm_set_mpbgp_ipv4(&fsm, true);
+    rib = libbgp_fsm_get_rib4(&fsm);
+    rib6 = libbgp_fsm_get_rib6(&fsm);
+    LIBBGP_ASSERT(rib != NULL);
+    LIBBGP_ASSERT(rib6 != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_rib4_insert_local(rib, &prefix4, ip4(192u, 0u, 2u, 254u), 100));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_rib6_insert_local(rib6, &prefix6, nexthop6, 100));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_start(&fsm));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &open));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_fsm_on_packet(&fsm, &keepalive));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FSM_ESTABLISHED, libbgp_fsm_state(&fsm));
+    LIBBGP_ASSERT_EQ_U64(3u, out.count);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_PACKET_UPDATE, out.sent[2].type);
+    parse_sent_packet_as4(&out, 2u, &sent_update);
+    LIBBGP_ASSERT_EQ_U64(1u, sent_update.data.update.nlri_count);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&prefix4, &sent_update.data.update.nlri[0]));
+    LIBBGP_ASSERT(libbgp_update_find_attr(&sent_update.data.update, LIBBGP_PATTR_MP_REACH_IPV6) == NULL);
+
+    libbgp_packet_destroy(&sent_update);
+    libbgp_packet_destroy(&keepalive);
+    libbgp_packet_destroy(&open);
+    libbgp_fsm_destroy(&fsm);
+    libbgp_event_bus_destroy(&bus);
+    libbgp_out_handler_destroy(&out_handler);
+}
+
 LIBBGP_TEST(fsm_keepalive_zero_uses_negotiated_hold_third)
 {
     struct libbgp_fsm_config config;
@@ -9272,6 +9743,7 @@ int main(void)
         { "fsm_established_ignores_ipv4_route_with_nexthop_outside_peering_lan", fsm_established_ignores_ipv4_route_with_nexthop_outside_peering_lan },
         { "fsm_established_accepts_ipv4_route_outside_peering_lan_when_nexthop_check_disabled", fsm_established_accepts_ipv4_route_outside_peering_lan_when_nexthop_check_disabled },
         { "fsm_established_rejects_invalid_ipv4_nexthops_even_when_lan_check_disabled", fsm_established_rejects_invalid_ipv4_nexthops_even_when_lan_check_disabled },
+        { "fsm_initial_rib_advertisement_send_failure_tears_down", fsm_initial_rib_advertisement_send_failure_tears_down },
         { "fsm_open_confirm_advertises_existing_local_rib4_routes", fsm_open_confirm_advertises_existing_local_rib4_routes },
         { "fsm_open_confirm_advertises_only_best_existing_rib4_route", fsm_open_confirm_advertises_only_best_existing_rib4_route },
         { "fsm_open_confirm_advertises_only_best_existing_rib6_route", fsm_open_confirm_advertises_only_best_existing_rib6_route },
@@ -9303,6 +9775,7 @@ int main(void)
         { "fsm_established_accepts_network_order_ipv4_nexthop_inside_peering_lan", fsm_established_accepts_network_order_ipv4_nexthop_inside_peering_lan },
         { "fsm_established_rejects_class_d_and_class_e_ipv4_nexthops", fsm_established_rejects_class_d_and_class_e_ipv4_nexthops },
         { "fsm_established_invalid_update_is_atomic_and_does_not_refresh_hold_timer", fsm_established_invalid_update_is_atomic_and_does_not_refresh_hold_timer },
+        { "fsm_established_update_event_journal_nomem_rolls_back_inserted_route", fsm_established_update_event_journal_nomem_rolls_back_inserted_route },
         { "fsm_established_update_nomem_rolls_back_inserted_routes_and_events", fsm_established_update_nomem_rolls_back_inserted_routes_and_events },
         { "fsm_established_update_nomem_restores_withdrawn_routes_and_events", fsm_established_update_nomem_restores_withdrawn_routes_and_events },
         { "fsm_established_update_nomem_restores_replaced_ipv4_route_and_events", fsm_established_update_nomem_restores_replaced_ipv4_route_and_events },
@@ -9311,6 +9784,7 @@ int main(void)
         { "fsm_established_update_nomem_restores_replaced_ipv6_route_and_events", fsm_established_update_nomem_restores_replaced_ipv6_route_and_events },
         { "fsm_established_update_nomem_restores_original_after_duplicate_ipv6_replacements", fsm_established_update_nomem_restores_original_after_duplicate_ipv6_replacements },
         { "fsm_established_update_nomem_removes_absent_duplicate_ipv6_replacements", fsm_established_update_nomem_removes_absent_duplicate_ipv6_replacements },
+        { "fsm_established_rejects_update_with_null_required_arrays", fsm_established_rejects_update_with_null_required_arrays },
         { "fsm_established_rejects_ipv4_advertisements_missing_mandatory_attrs", fsm_established_rejects_ipv4_advertisements_missing_mandatory_attrs },
         { "fsm_established_rejects_ipv6_advertisements_missing_common_mandatory_attrs", fsm_established_rejects_ipv6_advertisements_missing_common_mandatory_attrs },
         { "fsm_established_rejects_duplicate_mandatory_attrs", fsm_established_rejects_duplicate_mandatory_attrs },
@@ -9359,6 +9833,14 @@ int main(void)
         { "fsm_keepalive_uses_negotiated_hold_third_when_shorter", fsm_keepalive_uses_negotiated_hold_third_when_shorter },
         { "fsm_exposes_negotiated_hold_timer", fsm_exposes_negotiated_hold_timer },
         { "fsm_state_change_callback_observes_transitions", fsm_state_change_callback_observes_transitions },
+        { "fsm_state_change_queue_coalesces_overflow_to_latest_state", fsm_state_change_queue_coalesces_overflow_to_latest_state },
+        { "fsm_null_handles_are_safe_noops", fsm_null_handles_are_safe_noops },
+        { "fsm_state_change_same_state_and_cleared_callback_are_noops", fsm_state_change_same_state_and_cleared_callback_are_noops },
+        { "fsm_state_change_dispatch_stops_after_callback_cleared", fsm_state_change_dispatch_stops_after_callback_cleared },
+        { "fsm_start_2byte_asn_without_capability_sends_plain_open", fsm_start_2byte_asn_without_capability_sends_plain_open },
+        { "fsm_start_capability_allocation_failures_restore_allocator", fsm_start_capability_allocation_failures_restore_allocator },
+        { "fsm_start_zero_progress_after_partial_send_rolls_back_to_idle", fsm_start_zero_progress_after_partial_send_rolls_back_to_idle },
+        { "fsm_peer_open_without_any_mpbgp_cap_uses_ipv4_legacy_fallback", fsm_peer_open_without_any_mpbgp_cap_uses_ipv4_legacy_fallback },
         { "fsm_keepalive_zero_uses_negotiated_hold_third", fsm_keepalive_zero_uses_negotiated_hold_third },
         { "fsm_negotiated_hold_zero_disables_periodic_keepalive", fsm_negotiated_hold_zero_disables_periodic_keepalive },
         { "fsm_accepted_keepalive_refreshes_hold_timer", fsm_accepted_keepalive_refreshes_hold_timer },

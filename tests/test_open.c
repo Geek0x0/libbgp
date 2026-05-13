@@ -2,8 +2,53 @@
 
 #include "fixtures/bgp_packets.h"
 
+#include "libbgp/alloc.h"
 #include "libbgp/open.h"
 #include "libbgp/types.h"
+
+typedef struct open_fail_realloc_ctx {
+    size_t realloc_calls;
+} open_fail_realloc_ctx_t;
+
+static void *open_fail_realloc_malloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void *open_fail_realloc_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)ctx;
+    return calloc(nmemb, size);
+}
+
+static void *open_fail_realloc_realloc(void *ptr, size_t size, void *ctx)
+{
+    open_fail_realloc_ctx_t *fail_ctx = (open_fail_realloc_ctx_t *)ctx;
+
+    (void)ptr;
+    (void)size;
+    fail_ctx->realloc_calls++;
+    return NULL;
+}
+
+static void open_fail_realloc_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    free(ptr);
+}
+
+static libbgp_alloc_t open_fail_realloc_make(open_fail_realloc_ctx_t *ctx)
+{
+    libbgp_alloc_t alloc;
+
+    alloc.malloc = open_fail_realloc_malloc;
+    alloc.calloc = open_fail_realloc_calloc;
+    alloc.realloc = open_fail_realloc_realloc;
+    alloc.free = open_fail_realloc_free;
+    alloc.ctx = ctx;
+    return alloc;
+}
 
 LIBBGP_TEST(open_parse_write_two_byte_asn_fixture_body)
 {
@@ -101,6 +146,83 @@ LIBBGP_TEST(open_add_capability_refs_and_write_emits_capability_param)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_open_write(&msg, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(sizeof(expected), out_len);
     LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(expected));
+    libbgp_open_destroy(&msg);
+}
+
+LIBBGP_TEST(open_add_capability_rejects_null_inputs)
+{
+    libbgp_open_msg_t msg;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_4B_ASN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    libbgp_open_init(&msg);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_add_capability(NULL, cap));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_open_add_capability(&msg, NULL));
+    LIBBGP_ASSERT_EQ_U64(0u, msg.capability_count);
+    LIBBGP_ASSERT(msg.capabilities == NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, cap->refcount);
+
+    libbgp_capability_unref(cap);
+    libbgp_open_destroy(&msg);
+}
+
+LIBBGP_TEST(open_init_destroy_null_and_lookup_null_are_safe)
+{
+    libbgp_open_init(NULL);
+    libbgp_open_destroy(NULL);
+    LIBBGP_ASSERT(!libbgp_open_has_4b_asn(NULL));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_open_get_4b_asn(NULL));
+    LIBBGP_ASSERT(!libbgp_open_has_mpbgp(NULL, LIBBGP_AFI_IPV4, LIBBGP_SAFI_UNICAST));
+}
+
+LIBBGP_TEST(open_capability_lookup_skips_null_entries)
+{
+    libbgp_open_msg_t msg;
+
+    libbgp_open_init(&msg);
+    msg.my_asn = 65000u;
+    msg.capability_count = 1u;
+    msg.capabilities = (libbgp_capability_t **)calloc(1u, sizeof(msg.capabilities[0]));
+    LIBBGP_ASSERT(msg.capabilities != NULL);
+
+    LIBBGP_ASSERT(!libbgp_open_has_4b_asn(&msg));
+    LIBBGP_ASSERT_EQ_U64(65000u, libbgp_open_get_4b_asn(&msg));
+    LIBBGP_ASSERT(!libbgp_open_has_mpbgp(&msg, LIBBGP_AFI_IPV4, LIBBGP_SAFI_UNICAST));
+
+    libbgp_open_destroy(&msg);
+}
+
+LIBBGP_TEST(open_add_capability_reports_nomem_without_ref_or_count_change)
+{
+    open_fail_realloc_ctx_t fail_ctx = { 0u };
+    libbgp_alloc_t alloc = open_fail_realloc_make(&fail_ctx);
+    libbgp_open_msg_t msg;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_4B_ASN);
+    libbgp_err_t add_rc;
+    size_t realloc_calls;
+    size_t capability_count;
+    bool capabilities_null;
+    size_t refcount;
+
+    LIBBGP_ASSERT(cap != NULL);
+    libbgp_open_init(&msg);
+
+    libbgp_set_alloc(&alloc);
+    add_rc = libbgp_open_add_capability(&msg, cap);
+    realloc_calls = fail_ctx.realloc_calls;
+    capability_count = msg.capability_count;
+    capabilities_null = msg.capabilities == NULL;
+    refcount = cap->refcount;
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, add_rc);
+    LIBBGP_ASSERT_EQ_U64(1u, realloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, capability_count);
+    LIBBGP_ASSERT(capabilities_null);
+    LIBBGP_ASSERT_EQ_U64(1u, refcount);
+
+    libbgp_capability_unref(cap);
     libbgp_open_destroy(&msg);
 }
 
@@ -202,6 +324,10 @@ int main(void)
         { "open_parse_write_four_byte_asn_and_mpbgp_caps", open_parse_write_four_byte_asn_and_mpbgp_caps },
         { "open_parse_accepts_unsupported_version_for_fsm_notification", open_parse_accepts_unsupported_version_for_fsm_notification },
         { "open_add_capability_refs_and_write_emits_capability_param", open_add_capability_refs_and_write_emits_capability_param },
+        { "open_add_capability_rejects_null_inputs", open_add_capability_rejects_null_inputs },
+        { "open_init_destroy_null_and_lookup_null_are_safe", open_init_destroy_null_and_lookup_null_are_safe },
+        { "open_capability_lookup_skips_null_entries", open_capability_lookup_skips_null_entries },
+        { "open_add_capability_reports_nomem_without_ref_or_count_change", open_add_capability_reports_nomem_without_ref_or_count_change },
         { "open_rejects_invalid_version_lengths_and_small_output", open_rejects_invalid_version_lengths_and_small_output },
         { "open_parse_optional_param_exact_boundary_and_trailing_short_header", open_parse_optional_param_exact_boundary_and_trailing_short_header },
         { "open_write_exact_fixed_len_boundary_and_nullable_out_len", open_write_exact_fixed_len_boundary_and_nullable_out_len },

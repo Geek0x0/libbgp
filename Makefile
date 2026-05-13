@@ -53,10 +53,14 @@ EXAMPLE_SRCS := examples/peer_and_print.c examples/route_server.c
 EXAMPLE_OBJS := $(EXAMPLE_SRCS:%.c=$(BUILD_DIR)/%.o)
 EXAMPLE_BINS := $(EXAMPLE_SRCS:examples/%.c=$(BUILD_DIR)/examples/%)
 
-DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d)
+BENCH_SRCS := bench/bench.c
+BENCH_OBJS := $(BENCH_SRCS:%.c=$(BUILD_DIR)/%.o)
+BENCH_BINS := $(BENCH_SRCS:bench/%.c=$(BUILD_DIR)/bench/%)
 
-.PHONY: all clean test install headers examples symbol-check verify release-check FORCE
-.SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS)
+DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d) $(BENCH_OBJS:.o=.d)
+
+.PHONY: all clean test bench install headers examples symbol-check verify release-check FORCE
+.SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS) $(BENCH_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(STATIC_LIB_ALIAS) $(SHARED_LIB_ALIAS)
 
@@ -94,8 +98,15 @@ $(BUILD_DIR)/examples/%: $(BUILD_DIR)/examples/%.o $(STATIC_LIB)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
 
+$(BUILD_DIR)/bench/%: $(BUILD_DIR)/bench/%.o $(STATIC_LIB)
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
+
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do $$t; done
+
+bench: $(BENCH_BINS)
+	@set -e; for b in $(BENCH_BINS); do $$b; done
 
 examples: $(EXAMPLE_BINS)
 

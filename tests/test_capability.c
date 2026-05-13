@@ -113,6 +113,29 @@ LIBBGP_TEST(capability_ref_saturates_at_uint32_max)
     libbgp_capability_unref(cap);
 }
 
+LIBBGP_TEST(capability_new_reports_null_when_allocator_calloc_fails)
+{
+    fail_malloc_alloc_ctx_t fail_ctx = { 0u, 0u };
+    libbgp_alloc_t fail_alloc = fail_malloc_alloc_make(&fail_ctx);
+
+    libbgp_set_alloc(&fail_alloc);
+    LIBBGP_ASSERT(libbgp_capability_new(LIBBGP_CAP_UNKNOWN) == NULL);
+    libbgp_set_alloc(NULL);
+}
+
+LIBBGP_TEST(capability_unref_ignores_zero_refcount)
+{
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    cap->refcount = 0u;
+    libbgp_capability_unref(cap);
+    LIBBGP_ASSERT_EQ_U64(0u, cap->refcount);
+
+    cap->refcount = 1u;
+    libbgp_capability_unref(cap);
+}
+
 LIBBGP_TEST(capability_parse_write_4b_asn_exact_bytes)
 {
     const uint8_t in[] = { 65u, 4u, 0u, 1u, 0x02u, 0x03u };
@@ -266,6 +289,42 @@ LIBBGP_TEST(capability_write_rejects_invalid_buffers_and_unknown_value)
     libbgp_capability_unref(cap);
 }
 
+LIBBGP_TEST(capability_write_mp_bgp_rejects_short_buffer)
+{
+    uint8_t out[5];
+    size_t out_len = 99u;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_MP_BGP);
+
+    LIBBGP_ASSERT(cap != NULL);
+    cap->data.mp_bgp.afi = LIBBGP_AFI_IPV4;
+    cap->data.mp_bgp.safi = LIBBGP_SAFI_UNICAST;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_capability_write(cap, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+
+    libbgp_capability_unref(cap);
+}
+
+LIBBGP_TEST(capability_write_unknown_rejects_short_buffer)
+{
+    const uint8_t value[] = { 1u, 2u, 3u, 4u };
+    uint8_t out[5];
+    size_t out_len = 99u;
+    libbgp_capability_t *cap = libbgp_capability_new(LIBBGP_CAP_UNKNOWN);
+
+    LIBBGP_ASSERT(cap != NULL);
+    cap->code = 204u;
+    cap->data.unknown.value = (uint8_t *)value;
+    cap->data.unknown.len = sizeof(value);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_capability_write(cap, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+
+    cap->data.unknown.value = NULL;
+    cap->data.unknown.len = 0u;
+    libbgp_capability_unref(cap);
+}
+
 LIBBGP_TEST(capability_write_unknown_exact_255_byte_value_boundary)
 {
     uint8_t value[255];
@@ -378,12 +437,16 @@ int main(void)
         { "capability_new_initializes_refcount_type_and_code", capability_new_initializes_refcount_type_and_code },
         { "capability_ref_increments_and_unref_null_is_safe", capability_ref_increments_and_unref_null_is_safe },
         { "capability_ref_saturates_at_uint32_max", capability_ref_saturates_at_uint32_max },
+        { "capability_new_reports_null_when_allocator_calloc_fails", capability_new_reports_null_when_allocator_calloc_fails },
+        { "capability_unref_ignores_zero_refcount", capability_unref_ignores_zero_refcount },
         { "capability_parse_write_4b_asn_exact_bytes", capability_parse_write_4b_asn_exact_bytes },
         { "capability_parse_write_mp_bgp_exact_bytes", capability_parse_write_mp_bgp_exact_bytes },
         { "capability_parse_write_unknown_passthrough_and_zero_length", capability_parse_write_unknown_passthrough_and_zero_length },
         { "capability_parse_exact_boundary_and_nullable_consumed", capability_parse_exact_boundary_and_nullable_consumed },
         { "capability_parse_rejects_bad_lengths", capability_parse_rejects_bad_lengths },
         { "capability_write_rejects_invalid_buffers_and_unknown_value", capability_write_rejects_invalid_buffers_and_unknown_value },
+        { "capability_write_mp_bgp_rejects_short_buffer", capability_write_mp_bgp_rejects_short_buffer },
+        { "capability_write_unknown_rejects_short_buffer", capability_write_unknown_rejects_short_buffer },
         { "capability_write_unknown_exact_255_byte_value_boundary", capability_write_unknown_exact_255_byte_value_boundary },
         { "capability_write_rejects_unknown_type_without_changing_out_len", capability_write_rejects_unknown_type_without_changing_out_len },
         { "capability_unknown_parse_replaces_previous_unknown_value", capability_unknown_parse_replaces_previous_unknown_value },
