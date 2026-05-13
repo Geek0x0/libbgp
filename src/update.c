@@ -99,40 +99,42 @@ static libbgp_err_t update_validate_as_path_data(
 static libbgp_err_t update_add_prefix(
     libbgp_prefix4_t **array,
     size_t *count,
+    size_t *cap,
     const libbgp_prefix4_t *p)
 {
     libbgp_prefix4_t *next;
+    size_t new_cap;
 
-    if (array == NULL || count == NULL || p == NULL || p->len > 32u) {
+    if (array == NULL || count == NULL || cap == NULL || p == NULL || p->len > 32u) {
         return LIBBGP_ERR_BAD_LEN;
     }
-    if (*count > (SIZE_MAX / sizeof((*array)[0])) - 1u) {
-        return LIBBGP_ERR_BAD_LEN;
+    if (*count >= *cap) {
+        new_cap = *cap == 0u ? 8u : *cap * 2u;
+        if (new_cap <= *cap || new_cap > SIZE_MAX / sizeof((*array)[0])) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        next = (libbgp_prefix4_t *)bgp_realloc(*array, new_cap * sizeof((*array)[0]));
+        if (next == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        *array = next;
+        *cap = new_cap;
     }
-    next = (libbgp_prefix4_t *)bgp_realloc(*array, (*count + 1u) * sizeof((*array)[0]));
-    if (next == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    *array = next;
     (*array)[*count] = *p;
     (*count)++;
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_update_add_withdrawn(libbgp_update_msg_t *msg, const libbgp_prefix4_t *p)
-{
-    if (msg == NULL) {
-        return LIBBGP_ERR_BAD_LEN;
-    }
-    return update_add_prefix(&msg->withdrawn, &msg->withdrawn_count, p);
-}
-
-libbgp_err_t libbgp_update_add_attr(libbgp_update_msg_t *msg, libbgp_pattr_t *attr)
+static libbgp_err_t update_add_attr_with_cap(
+    libbgp_update_msg_t *msg,
+    libbgp_pattr_t *attr,
+    size_t *cap)
 {
     libbgp_pattr_t **next;
     size_t i;
+    size_t new_cap;
 
-    if (msg == NULL || attr == NULL) {
+    if (msg == NULL || attr == NULL || cap == NULL) {
         return LIBBGP_ERR_BAD_LEN;
     }
     if (msg->attr_count != 0u && msg->attrs == NULL) {
@@ -143,27 +145,54 @@ libbgp_err_t libbgp_update_add_attr(libbgp_update_msg_t *msg, libbgp_pattr_t *at
             return LIBBGP_ERR_EXISTS;
         }
     }
-    if (msg->attr_count > (SIZE_MAX / sizeof(msg->attrs[0])) - 1u) {
-        return LIBBGP_ERR_BAD_LEN;
+    if (msg->attr_count >= *cap) {
+        new_cap = *cap == 0u ? 8u : *cap * 2u;
+        if (new_cap <= *cap || new_cap > SIZE_MAX / sizeof(msg->attrs[0])) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        next = (libbgp_pattr_t **)bgp_realloc(msg->attrs, new_cap * sizeof(msg->attrs[0]));
+        if (next == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        msg->attrs = next;
+        *cap = new_cap;
     }
-    next = (libbgp_pattr_t **)bgp_realloc(
-        msg->attrs,
-        (msg->attr_count + 1u) * sizeof(msg->attrs[0]));
-    if (next == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    msg->attrs = next;
     msg->attrs[msg->attr_count] = libbgp_pattr_ref(attr);
     msg->attr_count++;
     return LIBBGP_OK;
 }
 
-libbgp_err_t libbgp_update_add_nlri(libbgp_update_msg_t *msg, const libbgp_prefix4_t *p)
+libbgp_err_t libbgp_update_add_withdrawn(libbgp_update_msg_t *msg, const libbgp_prefix4_t *p)
 {
+    size_t cap;
+
     if (msg == NULL) {
         return LIBBGP_ERR_BAD_LEN;
     }
-    return update_add_prefix(&msg->nlri, &msg->nlri_count, p);
+    cap = msg->withdrawn_count;
+    return update_add_prefix(&msg->withdrawn, &msg->withdrawn_count, &cap, p);
+}
+
+libbgp_err_t libbgp_update_add_attr(libbgp_update_msg_t *msg, libbgp_pattr_t *attr)
+{
+    size_t cap;
+
+    if (msg == NULL || attr == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    cap = msg->attr_count;
+    return update_add_attr_with_cap(msg, attr, &cap);
+}
+
+libbgp_err_t libbgp_update_add_nlri(libbgp_update_msg_t *msg, const libbgp_prefix4_t *p)
+{
+    size_t cap;
+
+    if (msg == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    cap = msg->nlri_count;
+    return update_add_prefix(&msg->nlri, &msg->nlri_count, &cap, p);
 }
 
 libbgp_pattr_t *libbgp_update_find_attr(const libbgp_update_msg_t *msg, libbgp_pattr_type_t type)
@@ -1191,6 +1220,12 @@ static libbgp_err_t update_parse_prefixes(
     size_t len)
 {
     size_t pos = 0u;
+    size_t cap;
+
+    if (count == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    cap = *count;
 
     while (pos < len) {
         libbgp_prefix4_t p;
@@ -1201,7 +1236,7 @@ static libbgp_err_t update_parse_prefixes(
         if (err != LIBBGP_OK) {
             return err;
         }
-        err = update_add_prefix(array, count, &p);
+        err = update_add_prefix(array, count, &cap, &p);
         if (err != LIBBGP_OK) {
             return err;
         }
@@ -1220,6 +1255,12 @@ static libbgp_err_t update_parse_attrs(
     bool use_4b_asn)
 {
     size_t pos = 0u;
+    size_t cap;
+
+    if (tmp == NULL) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    cap = tmp->attr_count;
 
     while (pos < len) {
         libbgp_pattr_t *attr;
@@ -1232,7 +1273,7 @@ static libbgp_err_t update_parse_attrs(
         }
         err = libbgp_pattr_parse_as4(attr, buf + pos, len - pos, use_4b_asn, &used);
         if (err == LIBBGP_OK) {
-            err = libbgp_update_add_attr(tmp, attr);
+            err = update_add_attr_with_cap(tmp, attr, &cap);
         }
         libbgp_pattr_unref(attr);
         if (err != LIBBGP_OK) {

@@ -292,6 +292,60 @@ LIBBGP_TEST(update_parse_write_with_withdrawn_attrs_and_nlri)
     libbgp_update_destroy(&msg);
 }
 
+LIBBGP_TEST(update_parse_write_many_nlri)
+{
+    libbgp_update_msg_t build;
+    libbgp_update_msg_t parsed;
+    uint8_t buf[4096];
+    uint8_t roundtrip[4096];
+    size_t out_len = 0u;
+    size_t used = 0u;
+    size_t i;
+
+    libbgp_update_init(&build);
+    {
+        libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+        libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+        libbgp_pattr_t *next_hop = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+
+        LIBBGP_ASSERT(origin != NULL);
+        LIBBGP_ASSERT(as_path != NULL);
+        LIBBGP_ASSERT(next_hop != NULL);
+        origin->data.origin.origin = 0u;
+        as_path->data.as_path.is_4b = false;
+        next_hop->data.next_hop.next_hop = update_ip4(1u, 2u, 3u, 4u);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&build, origin));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&build, as_path));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&build, next_hop));
+        libbgp_pattr_unref(origin);
+        libbgp_pattr_unref(as_path);
+        libbgp_pattr_unref(next_hop);
+    }
+    for (i = 0u; i < 100u; i++) {
+        libbgp_prefix4_t prefix;
+
+        prefix.addr = update_ip4(10u, 0u, (uint8_t)i, 0u);
+        prefix.len = 24u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_nlri(&build, &prefix));
+    }
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&build, buf, sizeof(buf), &out_len));
+
+    libbgp_update_init(&parsed);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&parsed, buf, out_len, &used));
+    LIBBGP_ASSERT_EQ_U64(out_len, used);
+    LIBBGP_ASSERT_EQ_U64(100u, parsed.nlri_count);
+    LIBBGP_ASSERT(parsed.nlri != NULL);
+    LIBBGP_ASSERT_EQ_U64(24u, parsed.nlri[0].len);
+    LIBBGP_ASSERT_EQ_U64(update_ip4(10u, 0u, 0u, 0u), parsed.nlri[0].addr);
+    LIBBGP_ASSERT_EQ_U64(24u, parsed.nlri[99].len);
+    LIBBGP_ASSERT_EQ_U64(update_ip4(10u, 0u, 99u, 0u), parsed.nlri[99].addr);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_write(&parsed, roundtrip, sizeof(roundtrip), &used));
+    LIBBGP_ASSERT_EQ_U64(out_len, used);
+    LIBBGP_ASSERT_BYTES_EQ(buf, roundtrip, out_len);
+    libbgp_update_destroy(&parsed);
+    libbgp_update_destroy(&build);
+}
+
 LIBBGP_TEST(update_parse_write_withdraw_only_without_mandatory_attrs)
 {
     const uint8_t body[] = {
@@ -2740,6 +2794,7 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "update_parse_write_empty_fixture_body", update_parse_write_empty_fixture_body },
         { "update_parse_write_with_withdrawn_attrs_and_nlri", update_parse_write_with_withdrawn_attrs_and_nlri },
+        { "update_parse_write_many_nlri", update_parse_write_many_nlri },
         { "update_parse_write_withdraw_only_without_mandatory_attrs", update_parse_write_withdraw_only_without_mandatory_attrs },
         { "update_parse_rejects_ipv4_prefix_length_over_32", update_parse_rejects_ipv4_prefix_length_over_32 },
         { "update_rejects_duplicate_attrs_and_missing_mandatory_attrs", update_rejects_duplicate_attrs_and_missing_mandatory_attrs },
