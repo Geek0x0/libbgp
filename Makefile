@@ -38,7 +38,7 @@ endef
 
 LIB_SRCS := src/alloc.c src/errcode.c src/log.c src/prefix4.c src/prefix6.c src/capability.c src/pattr.c \
 	src/open.c src/keepalive.c src/notification.c src/update.c src/packet.c \
-	src/hashmap.c src/rib4.c src/rib6.c src/filter.c src/event.c src/sink.c src/out_handler.c \
+	src/hashmap.c src/radix4.c src/radix6.c src/rib4.c src/rib6.c src/filter.c src/event.c src/sink.c src/out_handler.c \
 	src/fsm.c
 LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD_DIR)/%.o)
 

@@ -4,6 +4,7 @@
 
 #include "hashmap.h"
 #include "internal.h"
+#include "radix4.h"
 #include "rib_internal.h"
 
 typedef struct rib4_key {
@@ -24,6 +25,7 @@ typedef struct rib4_source_entry {
 typedef struct rib4_impl {
     bgp_hashmap_t routes;
     bgp_hashmap_t sources;
+    bgp_radix4_t lpm_tree;
     bgp_lock_t lock;
     uint64_t next_update_id;
 } rib4_impl_t;
@@ -418,10 +420,38 @@ static bool rib4_addr_matches(const libbgp_prefix4_t *prefix, uint32_t dest)
     return (dest & mask) == (prefix->addr & mask);
 }
 
+static bool rib4_same_lpm_prefix(const libbgp_prefix4_t *a, const libbgp_prefix4_t *b)
+{
+    uint32_t mask;
+
+    if (a == NULL || b == NULL || a->len > 32u || a->len != b->len) {
+        return false;
+    }
+    mask = libbgp_cidr_to_mask(a->len);
+    return (a->addr & mask) == (b->addr & mask);
+}
+
 static libbgp_rib4_route_t *rib4_find_locked(
     rib4_impl_t *impl,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix);
+
+static libbgp_rib4_route_t *rib4_best_exact_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix);
+
+static libbgp_rib4_route_t *rib4_best_lpm_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix);
+
+static libbgp_err_t rib4_lpm_update_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix);
+
+static void rib4_lpm_restore_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix,
+    libbgp_rib4_route_t *previous_best);
 
 static bool rib4_route_entry_unlink_locked(rib4_impl_t *impl, bgp_hashmap_entry_t *entry)
 {
@@ -484,6 +514,8 @@ static size_t rib4_remove_source_locked(rib4_impl_t *impl, uint32_t source_route
     }
     for (i = 0u; i < source->count; i++) {
         bgp_hashmap_entry_t *entry = source->entries[i];
+        libbgp_rib4_route_t *route = (libbgp_rib4_route_t *)entry->value;
+        libbgp_prefix4_t prefix = route->prefix;
 
         if (rib4_route_entry_unlink_locked(impl, entry)) {
             if (impl->routes.free_entry != NULL) {
@@ -491,6 +523,7 @@ static size_t rib4_remove_source_locked(rib4_impl_t *impl, uint32_t source_route
             }
             bgp_free(entry);
             removed++;
+            (void)rib4_lpm_update_prefix_locked(impl, &prefix);
         }
     }
     (void)bgp_hashmap_remove_one(&impl->sources, &find_key, source);
@@ -525,7 +558,10 @@ static libbgp_err_t rib4_withdraw_locked(
         return LIBBGP_ERR_NOT_FOUND;
     }
     rib4_source_index_remove(impl, match_entry);
-    return bgp_hashmap_remove_one(&impl->routes, &find_key, match);
+    if (bgp_hashmap_remove_one(&impl->routes, &find_key, match) != LIBBGP_OK) {
+        return LIBBGP_ERR_NOT_FOUND;
+    }
+    return rib4_lpm_update_prefix_locked(impl, prefix);
 }
 
 static libbgp_err_t rib4_detach_locked(
@@ -560,7 +596,7 @@ static libbgp_err_t rib4_detach_locked(
             impl->routes.len--;
             rib4_source_index_remove(impl, entry);
             *out_entry = entry;
-            return LIBBGP_OK;
+            return rib4_lpm_update_prefix_locked(impl, prefix);
         }
         link = &entry->next;
     }
@@ -598,7 +634,7 @@ static libbgp_err_t rib4_detach_value_locked(
             impl->routes.len--;
             rib4_source_index_remove(impl, entry);
             *out_entry = entry;
-            return LIBBGP_OK;
+            return rib4_lpm_update_prefix_locked(impl, prefix);
         }
         link = &entry->next;
     }
@@ -608,8 +644,10 @@ static libbgp_err_t rib4_detach_value_locked(
 static libbgp_err_t rib4_attach_detached_locked(rib4_impl_t *impl, bgp_hashmap_entry_t *entry)
 {
     libbgp_rib4_route_t *route;
+    libbgp_rib4_route_t *previous_best;
     libbgp_rib4_route_t *old;
     size_t idx;
+    libbgp_err_t err;
 
     if (impl == NULL || entry == NULL || entry->key == NULL || entry->value == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -619,15 +657,25 @@ static libbgp_err_t rib4_attach_detached_locked(rib4_impl_t *impl, bgp_hashmap_e
     if (old != NULL) {
         return LIBBGP_ERR_EXISTS;
     }
+    previous_best = rib4_best_lpm_prefix_locked(impl, &route->prefix);
+    err = bgp_radix4_insert(
+        &impl->lpm_tree,
+        route->prefix.addr,
+        route->prefix.len,
+        previous_best);
+    if (err != LIBBGP_OK) {
+        return err;
+    }
     entry->hash = rib4_hash(entry->key, NULL);
     if (rib4_source_index_add(impl, entry) != LIBBGP_OK) {
+        rib4_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
         return LIBBGP_ERR_NOMEM;
     }
     idx = (size_t)(entry->hash % (uint64_t)impl->routes.bucket_count);
     entry->next = impl->routes.buckets[idx];
     impl->routes.buckets[idx] = entry;
     impl->routes.len++;
-    return LIBBGP_OK;
+    return rib4_lpm_update_prefix_locked(impl, &route->prefix);
 }
 
 static void rib4_detached_entry_free(bgp_hashmap_entry_t *entry)
@@ -688,6 +736,64 @@ static libbgp_rib4_route_t *rib4_best_exact_locked(
         }
     }
     return best;
+}
+
+static libbgp_rib4_route_t *rib4_best_lpm_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix)
+{
+    libbgp_rib4_route_t *best = NULL;
+    size_t i;
+
+    if (impl == NULL || prefix == NULL || prefix->len > 32u) {
+        return NULL;
+    }
+    for (i = 0u; i < impl->routes.bucket_count; i++) {
+        bgp_hashmap_entry_t *entry;
+
+        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
+            libbgp_rib4_route_t *route = (libbgp_rib4_route_t *)entry->value;
+
+            if (rib4_same_lpm_prefix(&route->prefix, prefix) &&
+                (best == NULL || rib4_better(route, best))) {
+                best = route;
+            }
+        }
+    }
+    return best;
+}
+
+static libbgp_err_t rib4_lpm_update_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix)
+{
+    libbgp_rib4_route_t *best;
+    libbgp_err_t err;
+
+    if (impl == NULL || prefix == NULL || prefix->len > 32u) {
+        return LIBBGP_ERR_INVALID;
+    }
+    best = rib4_best_lpm_prefix_locked(impl, prefix);
+    if (best != NULL) {
+        return bgp_radix4_insert(&impl->lpm_tree, prefix->addr, prefix->len, best);
+    }
+    err = bgp_radix4_remove(&impl->lpm_tree, prefix->addr, prefix->len);
+    return err == LIBBGP_ERR_NOT_FOUND ? LIBBGP_OK : err;
+}
+
+static void rib4_lpm_restore_prefix_locked(
+    rib4_impl_t *impl,
+    const libbgp_prefix4_t *prefix,
+    libbgp_rib4_route_t *previous_best)
+{
+    if (impl == NULL || prefix == NULL || prefix->len > 32u) {
+        return;
+    }
+    if (previous_best == NULL) {
+        (void)bgp_radix4_remove(&impl->lpm_tree, prefix->addr, prefix->len);
+        return;
+    }
+    (void)bgp_radix4_insert(&impl->lpm_tree, prefix->addr, prefix->len, previous_best);
 }
 
 static libbgp_err_t rib4_prefix_array_push(
@@ -772,6 +878,13 @@ libbgp_err_t libbgp_rib4_init(libbgp_rib4_t *rib)
         bgp_free(impl);
         return err;
     }
+    err = bgp_radix4_init(&impl->lpm_tree);
+    if (err != LIBBGP_OK) {
+        bgp_hashmap_destroy(&impl->sources);
+        bgp_hashmap_destroy(&impl->routes);
+        bgp_free(impl);
+        return err;
+    }
     bgp_lock_init(&impl->lock);
     rib->impl = impl;
     return LIBBGP_OK;
@@ -785,6 +898,7 @@ void libbgp_rib4_destroy(libbgp_rib4_t *rib)
         return;
     }
     bgp_lock(&impl->lock);
+    bgp_radix4_destroy(&impl->lpm_tree);
     bgp_hashmap_destroy(&impl->sources);
     bgp_hashmap_destroy(&impl->routes);
     bgp_unlock(&impl->lock);
@@ -859,6 +973,7 @@ static libbgp_err_t rib4_insert_save_replaced_locked(
 {
     libbgp_rib4_route_t *copy = NULL;
     libbgp_rib4_route_t *old = NULL;
+    libbgp_rib4_route_t *previous_best = NULL;
     bgp_hashmap_entry_t *new_entry = NULL;
     rib4_key_t *key = NULL;
     libbgp_err_t err;
@@ -874,10 +989,15 @@ static libbgp_err_t rib4_insert_save_replaced_locked(
         err = rib4_route_clone(impl, route, &copy, &key);
     }
     if (err == LIBBGP_OK) {
+        previous_best = rib4_best_lpm_prefix_locked(impl, &copy->prefix);
+        err = bgp_radix4_insert(&impl->lpm_tree, copy->prefix.addr, copy->prefix.len, previous_best);
+    }
+    if (err == LIBBGP_OK) {
         err = bgp_hashmap_insert(&impl->routes, key, copy);
         if (err != LIBBGP_OK) {
             bgp_free(key);
             rib4_route_free(copy);
+            rib4_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
         } else {
             new_entry = rib4_entry_find_value_locked(impl, &copy->prefix, copy);
             if (new_entry == NULL) {
@@ -892,6 +1012,7 @@ static libbgp_err_t rib4_insert_save_replaced_locked(
                 } else {
                     (void)bgp_hashmap_remove_one(&impl->routes, key, copy);
                 }
+                rib4_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
             }
         }
         if (err == LIBBGP_OK && old != NULL) {
@@ -913,6 +1034,12 @@ static libbgp_err_t rib4_insert_save_replaced_locked(
         } else if (err == LIBBGP_OK && update_id != NULL) {
             *update_id = copy->update_id;
         }
+        if (err == LIBBGP_OK) {
+            err = rib4_lpm_update_prefix_locked(impl, &copy->prefix);
+        }
+    } else if (copy != NULL) {
+        bgp_free(key);
+        rib4_route_free(copy);
     }
     return err;
 }
@@ -1103,28 +1230,15 @@ libbgp_err_t libbgp_rib4_lookup(
     const libbgp_rib4_route_t **out_route)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
-    const libbgp_rib4_route_t *best = NULL;
-    size_t i;
+    const libbgp_rib4_route_t *best;
 
     if (impl == NULL || out_route == NULL) {
         return LIBBGP_ERR_INVALID;
     }
 
     bgp_lock(&impl->lock);
-    for (i = 0u; i < impl->routes.bucket_count; i++) {
-        bgp_hashmap_entry_t *entry;
-        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
-            const libbgp_rib4_route_t *route = (const libbgp_rib4_route_t *)entry->value;
-            if (!rib4_addr_matches(&route->prefix, dest_addr)) {
-                continue;
-            }
-            if (best == NULL || route->prefix.len > best->prefix.len ||
-                (route->prefix.len == best->prefix.len && rib4_better(route, best))) {
-                best = route;
-            }
-        }
-    }
-    if (best == NULL) {
+    best = (const libbgp_rib4_route_t *)bgp_radix4_lookup_lpm(&impl->lpm_tree, dest_addr);
+    if (best == NULL || !rib4_addr_matches(&best->prefix, dest_addr)) {
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOT_FOUND;
     }
