@@ -202,6 +202,34 @@ static int bench_rib_discard(size_t routes)
     return 0;
 }
 
+static int bench_rib_insert(size_t routes)
+{
+    libbgp_rib4_t rib;
+    size_t i;
+    uint64_t start;
+    uint64_t elapsed;
+
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < routes; i++) {
+        libbgp_prefix4_t prefix = p4(
+            (uint8_t)(10u + (i >> 16)),
+            (uint8_t)(i >> 8),
+            (uint8_t)i, 0u, 24u);
+        if (libbgp_rib4_insert_local(&rib, &prefix, ip4(192u, 0u, 2u, 1u), 100) != LIBBGP_OK) {
+            libbgp_rib4_destroy(&rib);
+            return 1;
+        }
+    }
+    elapsed = now_ns() - start;
+    print_result("rib insert", routes, elapsed);
+    libbgp_rib4_destroy(&rib);
+    return 0;
+}
+
 static int bench_sink_batch(size_t packets)
 {
     uint8_t *buf;
@@ -283,6 +311,77 @@ static int bench_update_parse_write(size_t iterations)
     return 0;
 }
 
+static int bench_update_parse_large(size_t iterations)
+{
+    libbgp_update_msg_t update;
+    libbgp_pattr_t *origin = NULL;
+    libbgp_pattr_t *as_path = NULL;
+    libbgp_pattr_t *next_hop = NULL;
+    uint8_t buf[4096];
+    size_t serialized_len = 0u;
+    size_t i;
+    uint64_t start;
+    uint64_t elapsed;
+
+    libbgp_update_init(&update);
+    origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    next_hop = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+    if (origin == NULL || as_path == NULL || next_hop == NULL) {
+        libbgp_pattr_unref(origin);
+        libbgp_pattr_unref(as_path);
+        libbgp_pattr_unref(next_hop);
+        libbgp_update_destroy(&update);
+        return 1;
+    }
+    origin->data.origin.origin = 0u;
+    as_path->data.as_path.is_4b = false;
+    next_hop->data.next_hop.next_hop = ip4(192u, 0u, 2u, 1u);
+    if (libbgp_update_add_attr(&update, origin) != LIBBGP_OK ||
+        libbgp_update_add_attr(&update, as_path) != LIBBGP_OK ||
+        libbgp_update_add_attr(&update, next_hop) != LIBBGP_OK) {
+        libbgp_pattr_unref(origin);
+        libbgp_pattr_unref(as_path);
+        libbgp_pattr_unref(next_hop);
+        libbgp_update_destroy(&update);
+        return 1;
+    }
+    libbgp_pattr_unref(origin);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(next_hop);
+
+    for (i = 0u; i < 50u; i++) {
+        libbgp_prefix4_t prefix = p4(10u, (uint8_t)(i >> 8), (uint8_t)i, 0u, 24u);
+
+        if (libbgp_update_add_nlri(&update, &prefix) != LIBBGP_OK) {
+            libbgp_update_destroy(&update);
+            return 1;
+        }
+    }
+    if (libbgp_update_write(&update, buf, sizeof(buf), &serialized_len) != LIBBGP_OK) {
+        libbgp_update_destroy(&update);
+        return 1;
+    }
+    libbgp_update_destroy(&update);
+
+    start = now_ns();
+    for (i = 0u; i < iterations; i++) {
+        libbgp_update_msg_t msg;
+        size_t used = 0u;
+
+        libbgp_update_init(&msg);
+        if (libbgp_update_parse(&msg, buf, serialized_len, &used) != LIBBGP_OK) {
+            libbgp_update_destroy(&msg);
+            return 1;
+        }
+        bench_sink_value += msg.nlri_count;
+        libbgp_update_destroy(&msg);
+    }
+    elapsed = now_ns() - start;
+    print_result("update parse large", iterations, elapsed);
+    return 0;
+}
+
 static void event_counter_cb(const libbgp_event_t *event, void *ctx)
 {
     size_t *calls = (size_t *)ctx;
@@ -343,6 +442,8 @@ int main(void)
     rc |= bench_rib_discard(small);
     rc |= bench_sink_batch(large);
     rc |= bench_update_parse_write(large);
+    rc |= bench_rib_insert(small);
+    rc |= bench_update_parse_large(large);
     rc |= bench_event_publish(subscribers, small);
     printf("bench guard: %" PRIu64 "\n", bench_sink_value);
     return rc == 0 ? 0 : 1;
