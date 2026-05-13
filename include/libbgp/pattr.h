@@ -109,6 +109,8 @@ LIBBGP_API libbgp_err_t libbgp_pattr_parse_as4(
     bool use_4b_asn,
     size_t *consumed);
 
+LIBBGP_API libbgp_err_t libbgp_pattr_wire_len(const libbgp_pattr_t *attr, size_t *out_len);
+
 LIBBGP_API libbgp_err_t libbgp_pattr_write(
     const libbgp_pattr_t *attr,
     uint8_t *buf,
