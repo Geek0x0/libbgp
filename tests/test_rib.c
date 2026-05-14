@@ -5242,6 +5242,278 @@ LIBBGP_TEST(rib6_init_allocation_failures_cover_cleanup_stages)
     LIBBGP_ASSERT(saw_after_second_alloc);
 }
 
+/* ---- LPM group best recomputation via rib4_better / rib6_better ---- */
+
+LIBBGP_TEST(rib4_withdraw_best_forces_lpm_group_best_recomputation)
+{
+    /*
+     * RFC section: RFC 4271 §9.1.2.2 (best-path recomputation after withdrawal).
+     * Target branches: rib4.c:rib4_lpm_group_best_locked() rib4_better() comparison
+     *                  when best != NULL (line 799), triggered by removing the current best
+     *                  from an LPM group with 2+ routes.
+     * Expected result: after withdrawing the best route, the LPM group recomputes the best
+     *                  using rib4_better() and the radix tree updates to the new best.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t prefix = p4(10u, 250u, 0u, 0u, 24u);
+    libbgp_rib4_route_t route_a = route4(prefix, 250u);
+    libbgp_rib4_route_t route_b = route4(prefix, 251u);
+    uint32_t dest = ip4(10u, 250u, 0u, 1u);
+
+    route_a.local_pref = 300u;
+    route_b.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route_a));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route_b));
+    assert_rib4_best_source(&rib, dest, 250u);
+
+    /* Withdraw the best route; this forces rib4_lpm_group_best_locked to recompute
+       by iterating remaining routes with rib4_better() comparisons. */
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_withdraw(&rib, 250u, &prefix));
+    assert_rib4_best_source(&rib, dest, 251u);
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_withdraw_best_forces_lpm_group_best_recomputation)
+{
+    /*
+     * RFC section: RFC 4271 §9.1.2.2 (best-path recomputation after withdrawal).
+     * Target branches: rib6.c:rib6_lpm_group_best_locked() rib6_better() comparison
+     *                  when best != NULL (line 819), triggered by removing the current best
+     *                  from an LPM group with 2+ routes.
+     * Expected result: after withdrawing the best route, the LPM group recomputes the best
+     *                  using rib6_better() and the radix tree updates to the new best.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfbu };
+    const uint8_t dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfbu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xfbu };
+    libbgp_prefix6_t prefix = p6(prefix_addr, 48u);
+    libbgp_rib6_route_t route_a = route6(prefix, 250u, next_hop);
+    libbgp_rib6_route_t route_b = route6(prefix, 251u, next_hop);
+
+    route_a.local_pref = 300u;
+    route_b.local_pref = 100u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route_a));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &route_b));
+    assert_rib6_best_source(&rib, dest, 250u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_withdraw(&rib, 250u, &prefix));
+    assert_rib6_best_source(&rib, dest, 251u);
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib6_route_count(&rib));
+
+    libbgp_rib6_destroy(&rib);
+}
+
+/* ---- OOM in rib4/rib6_source_index_add for a new source ---- */
+
+LIBBGP_TEST(rib4_source_index_add_new_source_oom_preserves_rib)
+{
+    /*
+     * RFC section: RFC 7606 §2 (allocation failure must not corrupt routing state).
+     * Target branches: rib4.c:rib4_source_index_add() new-source allocation paths
+     *                  (key malloc, source calloc, entries malloc, hashmap insert).
+     * Expected result: inserting a route from a previously unseen source under OOM
+     *                  returns ERR_NOMEM and leaves existing routes intact.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t existing_prefix = p4(10u, 252u, 0u, 0u, 24u);
+    libbgp_prefix4_t new_prefix = p4(10u, 252u, 1u, 0u, 24u);
+    libbgp_rib4_route_t existing = route4(existing_prefix, 252u);
+    libbgp_rib4_route_t new_route = route4(new_prefix, 999u);
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t fail_alloc;
+    const libbgp_rib4_route_t *found = NULL;
+    bool saw_nomem = false;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &existing));
+
+    /* Try failing at each allocation step for a new source */
+    for (i = 1u; i <= 16u; i++) {
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        fail_alloc = fail_after_alloc_make(&fail_ctx);
+        libbgp_set_alloc(&fail_alloc);
+        if (libbgp_rib4_insert(&rib, &new_route) == LIBBGP_ERR_NOMEM) {
+            saw_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        /* Insert succeeded for this fail_at, withdraw and retry */
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_withdraw(&rib, 999u, &new_prefix));
+    }
+    LIBBGP_ASSERT(saw_nomem);
+
+    /* Original route must be intact */
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 252u, 0u, 1u), &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(252u, found->source_router_id);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_source_index_add_new_source_oom_preserves_rib)
+{
+    /*
+     * RFC section: RFC 7606 §2 (allocation failure must not corrupt routing state).
+     * Target branches: rib6.c:rib6_source_index_add() new-source allocation paths
+     *                  (key malloc, source calloc, entries malloc, hashmap insert).
+     * Expected result: inserting a route from a previously unseen source under OOM
+     *                  returns ERR_NOMEM and leaves existing routes intact.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t existing_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfcu };
+    const uint8_t new_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfcu, 1u };
+    const uint8_t existing_dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfcu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xfcu };
+    libbgp_prefix6_t existing_prefix = p6(existing_addr, 48u);
+    libbgp_prefix6_t new_prefix = p6(new_addr, 56u);
+    libbgp_rib6_route_t existing = route6(existing_prefix, 252u, next_hop);
+    libbgp_rib6_route_t new_route = route6(new_prefix, 999u, next_hop);
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t fail_alloc;
+    const libbgp_rib6_route_t *found = NULL;
+    bool saw_nomem = false;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &existing));
+
+    for (i = 1u; i <= 16u; i++) {
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        fail_alloc = fail_after_alloc_make(&fail_ctx);
+        libbgp_set_alloc(&fail_alloc);
+        if (libbgp_rib6_insert(&rib, &new_route) == LIBBGP_ERR_NOMEM) {
+            saw_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_withdraw(&rib, 999u, &new_prefix));
+    }
+    LIBBGP_ASSERT(saw_nomem);
+
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib6_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, existing_dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(252u, found->source_router_id);
+
+    libbgp_rib6_destroy(&rib);
+}
+
+/* ---- OOM in rib4/rib6_lpm_index_add_locked for a new prefix (new LPM group) ---- */
+
+LIBBGP_TEST(rib4_lpm_index_add_new_group_oom_preserves_rib)
+{
+    /*
+     * RFC section: RFC 7606 §2 (allocation failure must not corrupt routing state).
+     * Target branches: rib4.c:rib4_lpm_index_add_locked() group==NULL path:
+     *                  key malloc, group calloc, entries malloc, hashmap insert,
+     *                  radix insert failure with created-group cleanup.
+     * Expected result: inserting a route to a new prefix under OOM returns ERR_NOMEM,
+     *                  and leaves the RIB and existing routes intact.
+     */
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t existing_prefix = p4(10u, 253u, 0u, 0u, 24u);
+    libbgp_prefix4_t new_prefix = p4(10u, 253u, 1u, 0u, 24u);
+    libbgp_rib4_route_t existing = route4(existing_prefix, 253u);
+    libbgp_rib4_route_t new_route = route4(new_prefix, 253u);
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t fail_alloc;
+    const libbgp_rib4_route_t *found = NULL;
+    bool saw_nomem = false;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &existing));
+
+    /* Fail at various allocation points during insert of a new prefix.
+       Source 253 already exists from the first insert, so source_index_add won't fail.
+       The lpm_index_add path needs to create a new LPM group (new prefix). */
+    for (i = 1u; i <= 32u; i++) {
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        fail_alloc = fail_after_alloc_make(&fail_ctx);
+        libbgp_set_alloc(&fail_alloc);
+        if (libbgp_rib4_insert(&rib, &new_route) == LIBBGP_ERR_NOMEM) {
+            saw_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_withdraw(&rib, 253u, &new_prefix));
+    }
+    LIBBGP_ASSERT(saw_nomem);
+
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib4_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, ip4(10u, 253u, 0u, 1u), &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(253u, found->source_router_id);
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib6_lpm_index_add_new_group_oom_preserves_rib)
+{
+    /*
+     * RFC section: RFC 7606 §2 (allocation failure must not corrupt routing state).
+     * Target branches: rib6.c:rib6_lpm_index_add_locked() group==NULL path:
+     *                  key malloc, group calloc, entries malloc, hashmap insert,
+     *                  radix insert failure with created-group cleanup.
+     * Expected result: inserting a route to a new prefix under OOM returns ERR_NOMEM,
+     *                  and leaves the RIB and existing routes intact.
+     */
+    libbgp_rib6_t rib;
+    const uint8_t existing_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfdu };
+    const uint8_t new_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfdu, 1u };
+    const uint8_t existing_dest[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0xfdu, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u };
+    const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xfdu };
+    libbgp_prefix6_t existing_prefix = p6(existing_addr, 48u);
+    libbgp_prefix6_t new_prefix = p6(new_addr, 56u);
+    libbgp_rib6_route_t existing = route6(existing_prefix, 254u, next_hop);
+    libbgp_rib6_route_t new_route = route6(new_prefix, 254u, next_hop);
+    fail_after_alloc_ctx_t fail_ctx;
+    libbgp_alloc_t fail_alloc;
+    const libbgp_rib6_route_t *found = NULL;
+    bool saw_nomem = false;
+    size_t i;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_insert(&rib, &existing));
+
+    for (i = 1u; i <= 32u; i++) {
+        fail_ctx.calls = 0u;
+        fail_ctx.fail_at = i;
+        fail_alloc = fail_after_alloc_make(&fail_ctx);
+        libbgp_set_alloc(&fail_alloc);
+        if (libbgp_rib6_insert(&rib, &new_route) == LIBBGP_ERR_NOMEM) {
+            saw_nomem = true;
+            libbgp_set_alloc(NULL);
+            break;
+        }
+        libbgp_set_alloc(NULL);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_withdraw(&rib, 254u, &new_prefix));
+    }
+    LIBBGP_ASSERT(saw_nomem);
+
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_rib6_route_count(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_lookup(&rib, existing_dest, &found));
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(254u, found->source_router_id);
+
+    libbgp_rib6_destroy(&rib);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -5364,7 +5636,13 @@ int main(void)
         { "rib4_public_guard_paths_and_non_best_track_best_withdraw", rib4_public_guard_paths_and_non_best_track_best_withdraw },
         { "rib6_public_guard_paths_and_non_best_track_best_withdraw", rib6_public_guard_paths_and_non_best_track_best_withdraw },
         { "rib4_init_allocation_failures_cover_cleanup_stages", rib4_init_allocation_failures_cover_cleanup_stages },
-        { "rib6_init_allocation_failures_cover_cleanup_stages", rib6_init_allocation_failures_cover_cleanup_stages }
+        { "rib6_init_allocation_failures_cover_cleanup_stages", rib6_init_allocation_failures_cover_cleanup_stages },
+        { "rib4_withdraw_best_forces_lpm_group_best_recomputation", rib4_withdraw_best_forces_lpm_group_best_recomputation },
+        { "rib6_withdraw_best_forces_lpm_group_best_recomputation", rib6_withdraw_best_forces_lpm_group_best_recomputation },
+        { "rib4_source_index_add_new_source_oom_preserves_rib", rib4_source_index_add_new_source_oom_preserves_rib },
+        { "rib6_source_index_add_new_source_oom_preserves_rib", rib6_source_index_add_new_source_oom_preserves_rib },
+        { "rib4_lpm_index_add_new_group_oom_preserves_rib", rib4_lpm_index_add_new_group_oom_preserves_rib },
+        { "rib6_lpm_index_add_new_group_oom_preserves_rib", rib6_lpm_index_add_new_group_oom_preserves_rib }
     };
 
     return libbgp_run_tests("rib", tests, LIBBGP_ARRAY_LEN(tests));

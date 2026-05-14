@@ -10153,6 +10153,69 @@ LIBBGP_TEST(fsm_null_handles_are_safe_noops)
     libbgp_fsm_set_state_change_cb(&null_fsm, state_change_capture, NULL);
 }
 
+/*
+ * RFC basis: N/A -- defensive programming tests for NULL handle paths.
+ * Targeted branch point(s): all fsm_handle_acquire NULL-return paths in setters
+ * (src/fsm.c lines ~4287-4394, plus many other setters).
+ * Expected result: calling setters on a destroyed FSM is a safe no-op.
+ */
+LIBBGP_TEST(fsm_destroyed_handle_setters_are_safe_noops)
+{
+    libbgp_fsm_t fsm;
+    libbgp_prefix4_t p4_val = p4(10u, 0u, 0u, 0u, 8u);
+    libbgp_prefix6_t p6_val;
+    static const uint8_t nh6[16] = { 0x20u, 0x01u, 0x0du, 0xb8u };
+    libbgp_filter_t filter;
+    libbgp_event_bus_t bus;
+    libbgp_out_handler_t out;
+    libbgp_rib4_t rib4;
+    libbgp_rib6_t rib6;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, init_test_fsm(&fsm));
+    libbgp_fsm_destroy(&fsm);
+
+    libbgp_fsm_set_peering_lan4(&fsm, NULL);
+    libbgp_fsm_set_peering_lan4(&fsm, &p4_val);
+    libbgp_fsm_set_peering_lan6(&fsm, NULL);
+    libbgp_fsm_set_peering_lan6(&fsm, &p6_val);
+    libbgp_fsm_set_no_nexthop_check4(&fsm, true);
+    libbgp_fsm_set_no_nexthop_check6(&fsm, true);
+    libbgp_fsm_set_default_nexthop4(&fsm, ip4(192u, 0u, 2u, 1u));
+    libbgp_fsm_set_default_nexthop6(&fsm, nh6);
+    libbgp_fsm_set_default_nexthop6_linklocal(&fsm, nh6);
+    libbgp_fsm_set_force_default_nexthop4(&fsm, true);
+    libbgp_fsm_set_force_default_nexthop6(&fsm, true);
+    libbgp_fsm_set_ibgp_alter_nexthop(&fsm, true);
+    libbgp_fsm_set_expected_peer_asn(&fsm, 65001u);
+    libbgp_fsm_set_route_weight(&fsm, 10);
+    libbgp_fsm_set_allow_local_as(&fsm, true);
+    libbgp_fsm_set_no_collision_detection(&fsm, true);
+    libbgp_fsm_set_mpbgp_ipv4(&fsm, true);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    libbgp_fsm_set_in_filter4(&fsm, &filter);
+    libbgp_fsm_set_out_filter4(&fsm, &filter);
+    libbgp_fsm_set_in_filter6(&fsm, &filter);
+    libbgp_fsm_set_out_filter6(&fsm, &filter);
+    libbgp_filter_destroy(&filter);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    libbgp_fsm_set_event_bus(&fsm, &bus);
+    libbgp_event_bus_destroy(&bus);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_out_handler_init(&out));
+    libbgp_fsm_set_out_handler(&fsm, &out);
+    libbgp_out_handler_destroy(&out);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib4));
+    libbgp_fsm_set_rib4(&fsm, &rib4);
+    libbgp_rib4_destroy(&rib4);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib6_init(&rib6));
+    libbgp_fsm_set_rib6(&fsm, &rib6);
+    libbgp_rib6_destroy(&rib6);
+}
+
 LIBBGP_TEST(fsm_state_change_same_state_and_cleared_callback_are_noops)
 {
     libbgp_fsm_t fsm;
@@ -12672,6 +12735,7 @@ int main(void)
         { "fsm_state_change_callback_observes_transitions", fsm_state_change_callback_observes_transitions },
         { "fsm_state_change_queue_coalesces_overflow_to_latest_state", fsm_state_change_queue_coalesces_overflow_to_latest_state },
         { "fsm_null_handles_are_safe_noops", fsm_null_handles_are_safe_noops },
+        { "fsm_destroyed_handle_setters_are_safe_noops", fsm_destroyed_handle_setters_are_safe_noops },
         { "fsm_state_change_same_state_and_cleared_callback_are_noops", fsm_state_change_same_state_and_cleared_callback_are_noops },
         { "fsm_state_change_dispatch_stops_after_callback_cleared", fsm_state_change_dispatch_stops_after_callback_cleared },
         { "fsm_state_change_dispatch_stops_after_callback_context_changes", fsm_state_change_dispatch_stops_after_callback_context_changes },
