@@ -1030,6 +1030,24 @@ LIBBGP_TEST(filter_add_rule_reports_realloc_failure_and_preserves_rules)
     libbgp_filter_destroy(&filter);
 }
 
+LIBBGP_TEST(filter_route6_match_any_permits_non_null_route)
+{
+    static const uint8_t addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u };
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib6_route_t rt = route6(p6(addr, 32u));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_ANY;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route6(&filter, &rt, LIBBGP_FILTER_DENY));
+    libbgp_filter_destroy(&filter);
+}
+
 LIBBGP_TEST(filter_clear_keeps_capacity_for_reuse_without_allocator)
 {
     libbgp_filter_t filter;
@@ -1099,7 +1117,8 @@ int main(void)
         { "filter_clear_and_rule_count", filter_clear_and_rule_count },
         { "filter_operations_after_destroy_use_null_behavior", filter_operations_after_destroy_use_null_behavior },
         { "filter_add_rule_reports_realloc_failure_and_preserves_rules", filter_add_rule_reports_realloc_failure_and_preserves_rules },
-        { "filter_clear_keeps_capacity_for_reuse_without_allocator", filter_clear_keeps_capacity_for_reuse_without_allocator }
+        { "filter_clear_keeps_capacity_for_reuse_without_allocator", filter_clear_keeps_capacity_for_reuse_without_allocator },
+        { "filter_route6_match_any_permits_non_null_route", filter_route6_match_any_permits_non_null_route }
     };
 
     return libbgp_run_tests("filter", tests, LIBBGP_ARRAY_LEN(tests));

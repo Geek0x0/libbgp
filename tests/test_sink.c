@@ -468,6 +468,49 @@ LIBBGP_TEST(sink_reuses_packet_queue_slots_after_partial_pop)
     libbgp_sink_destroy(&sink);
 }
 
+/* Test that sink_compact_buf is triggered when tail space is exhausted.
+ * Covers src/sink.c lines 61 and 80-82 (compact path in sink_reserve_buf). */
+LIBBGP_TEST(sink_compacts_buffer_when_tail_space_exhausted)
+{
+    /* keepalive (19 bytes) + 5 bytes of a second keepalive = 24 bytes.
+     * Initial buf_cap grows from 0 -> 19 -> 38 to fit 24 bytes.
+     * After processing the first keepalive: buf_off=19, buf_len=5, buf_cap=38.
+     * Tail space = 38 - 19 - 5 = 14.
+     * Feed 15 bytes: needed=20, 15 > 14 (no tail room), 20 <= 38 (fits after compact).
+     * This triggers sink_compact_buf via the sink_reserve_buf compact path. */
+    uint8_t batch[24];
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    memcpy(batch, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    memcpy(batch + LIBBGP_FIXTURE_KEEPALIVE_LEN, LIBBGP_FIXTURE_KEEPALIVE, 5u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, batch, sizeof(batch)));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(5u, libbgp_sink_buffered_len(&sink));
+
+    /* Pop the first keepalive to verify it was parsed correctly */
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+
+    /* Feed 15 bytes: remaining 14 bytes of keepalive (indices 5-18) + 1 extra byte.
+     * This triggers the compact path because 15 > tail_space(14) but needed(20) <= buf_cap(38). */
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE + 5u,
+            LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u + 1u));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_buffered_len(&sink));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -490,7 +533,8 @@ int main(void)
         { "sink_as4_context_parses_four_octet_as_path", sink_as4_context_parses_four_octet_as_path },
         { "sink_feeds_and_pops_1k_keepalive_batch", sink_feeds_and_pops_1k_keepalive_batch },
         { "sink_feeds_and_pops_10k_keepalive_batch", sink_feeds_and_pops_10k_keepalive_batch },
-        { "sink_reuses_packet_queue_slots_after_partial_pop", sink_reuses_packet_queue_slots_after_partial_pop }
+        { "sink_reuses_packet_queue_slots_after_partial_pop", sink_reuses_packet_queue_slots_after_partial_pop },
+        { "sink_compacts_buffer_when_tail_space_exhausted", sink_compacts_buffer_when_tail_space_exhausted }
     };
 
     return libbgp_run_tests("sink", tests, LIBBGP_ARRAY_LEN(tests));
