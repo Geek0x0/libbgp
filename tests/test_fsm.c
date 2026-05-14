@@ -7711,6 +7711,38 @@ LIBBGP_TEST(fsm_established_rejects_duplicate_mandatory_attrs)
     libbgp_packet_destroy(&duplicate_origin);
 }
 
+LIBBGP_TEST(fsm_established_rejects_unknown_attr_shadowing_next_hop_type_code)
+{
+    const uint8_t unknown_value[] = { 0u, 0u, 0u, 0u };
+    libbgp_prefix4_t prefix = p4(203u, 0u, 113u, 0u, 24u);
+    libbgp_packet_t invalid;
+    libbgp_pattr_t *unknown = unknown_attr(
+        LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_TRANSITIVE,
+        unknown_value,
+        sizeof(unknown_value));
+    libbgp_pattr_t *origin = origin_attr(0u);
+    libbgp_pattr_t *path = as_path_attr(65010u);
+    libbgp_pattr_t *next_hop = next_hop_attr(ip4(192u, 0u, 2u, 254u));
+
+    unknown->type_code = LIBBGP_PATTR_CODE_NEXT_HOP;
+    libbgp_packet_init(&invalid);
+    invalid.type = LIBBGP_PACKET_UPDATE;
+    libbgp_update_init(&invalid.data.update);
+    update_append_attr_unchecked(&invalid.data.update, unknown);
+    update_append_attr_unchecked(&invalid.data.update, origin);
+    update_append_attr_unchecked(&invalid.data.update, path);
+    update_append_attr_unchecked(&invalid.data.update, next_hop);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_nlri(&invalid.data.update, &prefix));
+
+    assert_invalid_update_no_route_effects(&invalid, 1u);
+
+    libbgp_pattr_unref(next_hop);
+    libbgp_pattr_unref(path);
+    libbgp_pattr_unref(origin);
+    libbgp_pattr_unref(unknown);
+    libbgp_packet_destroy(&invalid);
+}
+
 /*
  * RFC basis: RFC 4271 §4.3 + §6.3.
  * Targeted branch point(s): fsm_validate_update() withdrawn prefix length > 32
@@ -12687,6 +12719,7 @@ int main(void)
         { "fsm_established_rejects_ipv4_advertisements_missing_mandatory_attrs", fsm_established_rejects_ipv4_advertisements_missing_mandatory_attrs },
         { "fsm_established_rejects_ipv6_advertisements_missing_common_mandatory_attrs", fsm_established_rejects_ipv6_advertisements_missing_common_mandatory_attrs },
         { "fsm_established_rejects_duplicate_mandatory_attrs", fsm_established_rejects_duplicate_mandatory_attrs },
+        { "fsm_established_rejects_unknown_attr_shadowing_next_hop_type_code", fsm_established_rejects_unknown_attr_shadowing_next_hop_type_code },
         { "fsm_established_update_withdraws_route_and_event", fsm_established_update_withdraws_route_and_event },
         { "fsm_established_withdraw_active_route_publishes_replacement", fsm_established_withdraw_active_route_publishes_replacement },
         { "fsm_withdraw_best_publishes_replacement_not_withdraw", fsm_withdraw_best_publishes_replacement_not_withdraw },

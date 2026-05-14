@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "attr_view.h"
 #include "internal.h"
 #include "libbgp/capability.h"
 #include "libbgp/filter.h"
@@ -1834,33 +1835,35 @@ static void fsm_fill_route_attrs(
     int32_t weight,
     bool is_ibgp)
 {
-    libbgp_pattr_t *attr;
+    bgp_attr_view_t attr_view;
+    const libbgp_pattr_t *attr;
 
     route->attrs = update->attrs;
     route->attr_count = update->attr_count;
     route->weight = weight;
     route->local_pref = 100u;
 
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_NEXT_HOP);
+    bgp_attr_view_build(&attr_view, update->attrs, update->attr_count);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_NEXT_HOP);
     if (attr != NULL) {
         route->next_hop = attr->data.next_hop.next_hop;
     }
     /* RFC 4271 §5.1.5: LOCAL_PREF is only meaningful on iBGP sessions. */
     if (is_ibgp) {
-        attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
+        attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_LOCAL_PREF);
         if (attr != NULL) {
             route->local_pref = attr->data.local_pref.value;
         }
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_ORIGIN);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_ORIGIN);
     if (attr != NULL) {
         route->origin = attr->data.origin.origin;
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_MED);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_MED);
     if (attr != NULL) {
         route->med = attr->data.med.value;
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_AS_PATH);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_AS_PATH);
     route->as_path_len = fsm_as_path_len_and_origin_as(attr, &route->origin_as);
 }
 
@@ -1886,7 +1889,8 @@ static void fsm_fill_route6_attrs(
     int32_t weight,
     bool is_ibgp)
 {
-    libbgp_pattr_t *attr;
+    bgp_attr_view_t attr_view;
+    const libbgp_pattr_t *attr;
 
     route->weight = weight;
     route->local_pref = 100u;
@@ -1899,21 +1903,22 @@ static void fsm_fill_route6_attrs(
     }
 
     /* RFC 4271 §5.1.5: LOCAL_PREF is only meaningful on iBGP sessions. */
+    bgp_attr_view_build(&attr_view, update->attrs, update->attr_count);
     if (is_ibgp) {
-        attr = libbgp_update_find_attr(update, LIBBGP_PATTR_LOCAL_PREF);
+        attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_LOCAL_PREF);
         if (attr != NULL) {
             route->local_pref = attr->data.local_pref.value;
         }
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_ORIGIN);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_ORIGIN);
     if (attr != NULL) {
         route->origin = attr->data.origin.origin;
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_MED);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_MED);
     if (attr != NULL) {
         route->med = attr->data.med.value;
     }
-    attr = libbgp_update_find_attr(update, LIBBGP_PATTR_AS_PATH);
+    attr = bgp_attr_view_get(&attr_view, LIBBGP_PATTR_CODE_AS_PATH);
     route->as_path_len = fsm_as_path_len_and_origin_as(attr, &route->origin_as);
 }
 
@@ -2049,6 +2054,7 @@ static bool fsm_semantic_duplicate_attr(libbgp_pattr_type_t type)
 
 static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update, uint8_t *notify_subcode)
 {
+    bgp_attr_view_t attr_view;
     size_t i;
     size_t origin_count = 0u;
     size_t as_path_count = 0u;
@@ -2084,10 +2090,17 @@ static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update, uint8
         }
     }
     memset(attr_counts, 0, sizeof(attr_counts));
+    bgp_attr_view_init(&attr_view);
     for (i = 0u; i < update->attr_count; i++) {
         libbgp_pattr_type_t type;
 
         if (update->attrs[i] == NULL) {
+            if (notify_subcode != NULL) {
+                *notify_subcode = FSM_UPDATE_ERR_MALFORMED_ATTR_LIST;
+            }
+            return LIBBGP_ERR_INVALID;
+        }
+        if (!bgp_attr_view_add(&attr_view, update->attrs[i])) {
             if (notify_subcode != NULL) {
                 *notify_subcode = FSM_UPDATE_ERR_MALFORMED_ATTR_LIST;
             }
