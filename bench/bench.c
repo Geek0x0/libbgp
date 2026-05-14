@@ -126,48 +126,93 @@ static int bench_rib_lookup(size_t routes, size_t lookups)
     return 0;
 }
 
-static bool count_best_route(const libbgp_rib4_route_t *route, void *ctx)
-{
-    size_t *count = (size_t *)ctx;
-
-    if (route != NULL) {
-        (*count)++;
-        bench_sink_value += route->source_router_id;
-    }
-    return true;
-}
-
-static int bench_rib_foreach_best(size_t prefixes)
+static int bench_rib_lookup_scoped(size_t n_sources, size_t routes_per_source, size_t lookups)
 {
     libbgp_rib4_t rib;
-    size_t i;
-    size_t best_count = 0u;
-    uint64_t start;
-    uint64_t elapsed;
+    uint64_t start, elapsed;
+    size_t i, s;
+    const libbgp_rib4_route_t *found = NULL;
 
     if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
         return 1;
     }
-    for (i = 0u; i < prefixes; i++) {
-        libbgp_prefix4_t prefix = p4(10u, (uint8_t)(i >> 8), (uint8_t)i, 0u, 24u);
-        libbgp_rib4_route_t route_a = route4(prefix, 1u, 100u);
-        libbgp_rib4_route_t route_b = route4(prefix, 2u, 200u);
 
-        if (libbgp_rib4_insert(&rib, &route_a) != LIBBGP_OK ||
-            libbgp_rib4_insert(&rib, &route_b) != LIBBGP_OK) {
-            libbgp_rib4_destroy(&rib);
-            return 1;
+    for (s = 0u; s < n_sources; s++) {
+        uint32_t source = ip4(10u, 0u, (uint8_t)((s >> 8) & 0xffu), (uint8_t)(s & 0xffu));
+        for (i = 0u; i < routes_per_source; i++) {
+            libbgp_prefix4_t prefix = p4(
+                (uint8_t)((i >> 8) & 0xffu),
+                (uint8_t)(i & 0xffu), 0u, 0u, 16u);
+            libbgp_rib4_route_t r = route4(prefix, source, 100u);
+            if (libbgp_rib4_insert(&rib, &r) != LIBBGP_OK) {
+                libbgp_rib4_destroy(&rib);
+                return 1;
+            }
         }
     }
 
     start = now_ns();
-    if (bgp_rib4_foreach_best_route(&rib, count_best_route, &best_count) != LIBBGP_OK) {
+    for (i = 0u; i < lookups; i++) {
+        uint32_t dest = ip4((uint8_t)((i >> 8) & 0xffu), (uint8_t)(i & 0xffu), 1u, 1u);
+        uint32_t source = ip4(10u, 0u, 0u, 0u);
+        found = NULL;
+        if (libbgp_rib4_lookup_scoped(&rib, source, dest, &found) == LIBBGP_OK && found != NULL) {
+            bench_sink_value += found->local_pref;
+        }
+    }
+    elapsed = now_ns() - start;
+    print_result("rib lookup_scoped", lookups, elapsed);
+
+    libbgp_rib4_destroy(&rib);
+    return 0;
+}
+
+static bool bench_count_iter(const libbgp_rib4_route_t *route, void *ctx)
+{
+    size_t *count = (size_t *)ctx;
+
+    (void)route;
+    (*count)++;
+    return true;
+}
+
+static int bench_rib_foreach_best(size_t prefix_count, size_t paths_per_prefix)
+{
+    libbgp_rib4_t rib;
+    uint64_t start, elapsed;
+    size_t i, p;
+    size_t count = 0u;
+
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+
+    for (i = 0u; i < prefix_count; i++) {
+        libbgp_prefix4_t prefix = p4(
+            (uint8_t)((i >> 8) & 0xffu),
+            (uint8_t)(i & 0xffu), 0u, 0u, 16u);
+        for (p = 0u; p < paths_per_prefix; p++) {
+            uint32_t source = ip4(10u, 0u, (uint8_t)((p >> 8) & 0xffu), (uint8_t)(p & 0xffu));
+            libbgp_rib4_route_t r = route4(prefix, source, 100u);
+            if (libbgp_rib4_insert(&rib, &r) != LIBBGP_OK) {
+                libbgp_rib4_destroy(&rib);
+                return 1;
+            }
+        }
+    }
+
+    start = now_ns();
+    if (bgp_rib4_foreach_best_route(&rib, bench_count_iter, &count) != LIBBGP_OK) {
         libbgp_rib4_destroy(&rib);
         return 1;
     }
     elapsed = now_ns() - start;
-    bench_sink_value += best_count;
-    print_result("rib foreach best", prefixes, elapsed);
+    if (count != prefix_count) {
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
+    bench_sink_value += count;
+    print_result("rib foreach_best", count, elapsed);
     libbgp_rib4_destroy(&rib);
     return 0;
 }
@@ -200,6 +245,47 @@ static int bench_rib_discard(size_t routes)
     elapsed = now_ns() - start;
     bench_sink_value += libbgp_rib4_route_count(&rib);
     print_result("rib discard", routes, elapsed);
+    libbgp_rib4_destroy(&rib);
+    return 0;
+}
+
+static int bench_rib_discard_collect(size_t routes_per_source)
+{
+    libbgp_rib4_t rib;
+    uint64_t start, elapsed;
+    uint32_t source = ip4(10u, 0u, 0u, 1u);
+    uint32_t source2 = ip4(10u, 0u, 0u, 2u);
+    bgp_rib4_discard_result_t result;
+    size_t i;
+
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+
+    for (i = 0u; i < routes_per_source; i++) {
+        libbgp_prefix4_t prefix = p4(
+            (uint8_t)((i >> 8) & 0xffu),
+            (uint8_t)(i & 0xffu), 0u, 0u, 16u);
+        libbgp_rib4_route_t r = route4(prefix, source, 100u);
+        libbgp_rib4_route_t r2 = route4(prefix, source2, 90u);
+        if (libbgp_rib4_insert(&rib, &r) != LIBBGP_OK ||
+            libbgp_rib4_insert(&rib, &r2) != LIBBGP_OK) {
+            libbgp_rib4_destroy(&rib);
+            return 1;
+        }
+    }
+
+    memset(&result, 0, sizeof(result));
+    start = now_ns();
+    if (bgp_rib4_discard_collect(&rib, source, &result) != LIBBGP_OK) {
+        bgp_rib4_discard_result_destroy(&result);
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
+    elapsed = now_ns() - start;
+    print_result("rib discard_collect", routes_per_source, elapsed);
+
+    bgp_rib4_discard_result_destroy(&result);
     libbgp_rib4_destroy(&rib);
     return 0;
 }
@@ -891,8 +977,10 @@ int main(void)
     
     printf("\n========== Basic Benchmarks ==========\n");
     rc |= bench_rib_lookup(small, large);
-    rc |= bench_rib_foreach_best(small);
+    rc |= bench_rib_lookup_scoped(4u, env_size("BENCH_ROUTES", 2500u), env_size("BENCH_LOOKUPS", 10000u));
+    rc |= bench_rib_foreach_best(env_size("BENCH_PREFIXES", 5000u), 4u);
     rc |= bench_rib_discard(small);
+    rc |= bench_rib_discard_collect(env_size("BENCH_ROUTES", 10000u));
     rc |= bench_sink_batch(large);
     rc |= bench_update_parse_write(large);
     rc |= bench_rib_insert(small);

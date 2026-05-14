@@ -25,7 +25,7 @@ CPPFLAGS_BASE += -DBGP_THREADSAFE
 LDFLAGS_EXTRA += -pthread
 endif
 
-CFLAGS := $(CFLAGS_BASE) $(CFLAGS_EXTRA)
+CFLAGS = $(CFLAGS_BASE) $(CFLAGS_EXTRA)
 CPPFLAGS := $(CPPFLAGS_BASE)
 export FLAG_STAMP_CONTENT
 
@@ -105,8 +105,10 @@ $(BUILD_DIR)/bench/%: $(BUILD_DIR)/bench/%.o $(STATIC_LIB)
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do $$t; done
 
+bench: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
 bench: $(BENCH_BINS)
-	@set -e; for b in $(BENCH_BINS); do $$b; done
+	@echo "Running benchmarks with -O2 -g -fno-omit-frame-pointer"
+	$(BUILD_DIR)/bench/bench
 
 examples: $(EXAMPLE_BINS)
 
