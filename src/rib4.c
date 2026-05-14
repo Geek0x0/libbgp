@@ -1376,6 +1376,7 @@ libbgp_err_t libbgp_rib4_lookup_scoped(
     const libbgp_rib4_route_t **out_route)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
+    rib4_source_entry_t *source;
     const libbgp_rib4_route_t *best = NULL;
     size_t i;
 
@@ -1384,19 +1385,29 @@ libbgp_err_t libbgp_rib4_lookup_scoped(
     }
 
     bgp_lock(&impl->lock);
-    for (i = 0u; i < impl->routes.bucket_count; i++) {
-        bgp_hashmap_entry_t *entry;
-        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
-            const libbgp_rib4_route_t *route = (const libbgp_rib4_route_t *)entry->value;
-            if (route->source_router_id != source_router_id || !rib4_addr_matches(&route->prefix, dest_addr)) {
-                continue;
-            }
-            if (best == NULL || route->prefix.len > best->prefix.len ||
-                (route->prefix.len == best->prefix.len && rib4_better(route, best))) {
-                best = route;
-            }
+    source = rib4_source_index_find(impl, source_router_id);
+    if (source == NULL) {
+        bgp_unlock(&impl->lock);
+        return LIBBGP_ERR_NOT_FOUND;
+    }
+
+    for (i = 0u; i < source->count; i++) {
+        bgp_hashmap_entry_t *entry = source->entries[i];
+        const libbgp_rib4_route_t *route;
+
+        if (entry == NULL || entry->value == NULL) {
+            continue;
+        }
+        route = (const libbgp_rib4_route_t *)entry->value;
+        if (!rib4_addr_matches(&route->prefix, dest_addr)) {
+            continue;
+        }
+        if (best == NULL || route->prefix.len > best->prefix.len ||
+            (route->prefix.len == best->prefix.len && rib4_better(route, best))) {
+            best = route;
         }
     }
+
     if (best == NULL) {
         bgp_unlock(&impl->lock);
         return LIBBGP_ERR_NOT_FOUND;

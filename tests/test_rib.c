@@ -3260,6 +3260,60 @@ LIBBGP_TEST(rib4_scoped_lookup_keeps_adj_rib_sources_separate)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_lookup_scoped_matches_global_single_source)
+{
+    libbgp_rib4_t rib;
+    uint32_t source = ip4(10u, 0u, 0u, 1u);
+    const libbgp_rib4_route_t *global_result = NULL;
+    const libbgp_rib4_route_t *scoped_result = NULL;
+    libbgp_prefix4_t p16 = p4(192u, 168u, 0u, 0u, 16u);
+    libbgp_prefix4_t p24 = p4(192u, 168u, 1u, 0u, 24u);
+    libbgp_rib4_route_t r16 = route4(p16, source);
+    libbgp_rib4_route_t r24 = route4(p24, source);
+    uint32_t dest = ip4(192u, 168u, 1u, 5u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r16));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r24));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup(&rib, dest, &global_result));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup_scoped(&rib, source, dest, &scoped_result));
+
+    LIBBGP_ASSERT(global_result != NULL);
+    LIBBGP_ASSERT(scoped_result != NULL);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&p24, &global_result->prefix));
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&p24, &scoped_result->prefix));
+
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_lookup_scoped_isolates_sources)
+{
+    libbgp_rib4_t rib;
+    uint32_t source1 = ip4(10u, 0u, 0u, 1u);
+    uint32_t source2 = ip4(10u, 0u, 0u, 2u);
+    const libbgp_rib4_route_t *result = NULL;
+    libbgp_prefix4_t p_a = p4(172u, 16u, 0u, 0u, 16u);
+    libbgp_prefix4_t p_b = p4(172u, 16u, 1u, 0u, 24u);
+    libbgp_rib4_route_t r_a = route4(p_a, source1);
+    libbgp_rib4_route_t r_b = route4(p_b, source2);
+    uint32_t dest = ip4(172u, 16u, 1u, 5u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r_a));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r_b));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup_scoped(&rib, source1, dest, &result));
+    LIBBGP_ASSERT(result != NULL);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&p_a, &result->prefix));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_lookup_scoped(&rib, source2, dest, &result));
+    LIBBGP_ASSERT(result != NULL);
+    LIBBGP_ASSERT(libbgp_prefix4_eq(&p_b, &result->prefix));
+
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib6_scoped_lookup_keeps_adj_rib_sources_separate)
 {
     libbgp_rib6_t rib;
@@ -5704,6 +5758,8 @@ int main(void)
         { "rib6_source_zero_exact_update_withdraw_edges", rib6_source_zero_exact_update_withdraw_edges },
         { "rib4_source_index_integrity_through_replace_withdraw_and_discard", rib4_source_index_integrity_through_replace_withdraw_and_discard },
         { "rib6_source_index_integrity_through_replace_withdraw_and_discard", rib6_source_index_integrity_through_replace_withdraw_and_discard },
+        { "rib4_lookup_scoped_matches_global_single_source", rib4_lookup_scoped_matches_global_single_source },
+        { "rib4_lookup_scoped_isolates_sources", rib4_lookup_scoped_isolates_sources },
         { "rib4_source_index_realloc_nomem_keeps_existing_routes", rib4_source_index_realloc_nomem_keeps_existing_routes },
         { "rib6_source_index_realloc_nomem_keeps_existing_routes", rib6_source_index_realloc_nomem_keeps_existing_routes },
         { "rib4_exact_update_id_guards_across_multiple_update_withdraw_cycles", rib4_exact_update_id_guards_across_multiple_update_withdraw_cycles },
