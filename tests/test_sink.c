@@ -479,6 +479,7 @@ LIBBGP_TEST(sink_compacts_buffer_when_tail_space_exhausted)
      * Feed 15 bytes: needed=20, 15 > 14 (no tail room), 20 <= 38 (fits after compact).
      * This triggers sink_compact_buf via the sink_reserve_buf compact path. */
     uint8_t batch[24];
+    uint8_t tail[15];
     libbgp_sink_t sink;
     libbgp_packet_t pkt;
 
@@ -498,9 +499,10 @@ LIBBGP_TEST(sink_compacts_buffer_when_tail_space_exhausted)
 
     /* Feed 15 bytes: remaining 14 bytes of keepalive (indices 5-18) + 1 extra byte.
      * This triggers the compact path because 15 > tail_space(14) but needed(20) <= buf_cap(38). */
+    memcpy(tail, LIBBGP_FIXTURE_KEEPALIVE + 5u, LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u);
+    tail[LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u] = 0xffu;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
-        libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE + 5u,
-            LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u + 1u));
+        libbgp_sink_feed(&sink, tail, sizeof(tail)));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_buffered_len(&sink));
 

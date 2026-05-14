@@ -836,21 +836,21 @@ static void rib6_lpm_group_remove_locked(rib6_impl_t *impl, rib6_lpm_entry_t *gr
 
 static void rib6_lpm_index_remove_locked(rib6_impl_t *impl, bgp_hashmap_entry_t *route_entry)
 {
-    libbgp_rib6_route_t *route;
+    rib6_key_t *key;
     rib6_lpm_entry_t *group;
     size_t i;
 
-    if (impl == NULL || route_entry == NULL || route_entry->value == NULL) {
+    if (impl == NULL || route_entry == NULL || route_entry->key == NULL) {
         return;
     }
-    route = (libbgp_rib6_route_t *)route_entry->value;
-    group = rib6_lpm_group_find_locked(impl, &route->prefix);
+    key = (rib6_key_t *)route_entry->key;
+    group = rib6_lpm_group_find_locked(impl, &key->prefix);
     if (group == NULL) {
         return;
     }
     for (i = 0u; i < group->count; i++) {
         if (group->entries[i] == route_entry) {
-            bool removed_best = group->best == route;
+            bool removed_best = group->best == (libbgp_rib6_route_t *)route_entry->value;
 
             group->count--;
             group->entries[i] = group->entries[group->count];
