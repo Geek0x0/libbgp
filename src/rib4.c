@@ -816,21 +816,21 @@ static void rib4_lpm_group_remove_locked(rib4_impl_t *impl, rib4_lpm_entry_t *gr
 
 static void rib4_lpm_index_remove_locked(rib4_impl_t *impl, bgp_hashmap_entry_t *route_entry)
 {
-    libbgp_rib4_route_t *route;
+    rib4_key_t *key;
     rib4_lpm_entry_t *group;
     size_t i;
 
-    if (impl == NULL || route_entry == NULL || route_entry->value == NULL) {
+    if (impl == NULL || route_entry == NULL || route_entry->key == NULL) {
         return;
     }
-    route = (libbgp_rib4_route_t *)route_entry->value;
-    group = rib4_lpm_group_find_locked(impl, &route->prefix);
+    key = (rib4_key_t *)route_entry->key;
+    group = rib4_lpm_group_find_locked(impl, &key->prefix);
     if (group == NULL) {
         return;
     }
     for (i = 0u; i < group->count; i++) {
         if (group->entries[i] == route_entry) {
-            bool removed_best = group->best == route;
+            bool removed_best = group->best == (libbgp_rib4_route_t *)route_entry->value;
 
             group->count--;
             group->entries[i] = group->entries[group->count];
