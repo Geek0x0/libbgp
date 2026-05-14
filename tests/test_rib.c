@@ -622,6 +622,34 @@ LIBBGP_TEST(rib4_discard_collect_preserves_replacement_correctness)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_discard_collect_large_replacement_batch)
+{
+    libbgp_rib4_t rib;
+    bgp_rib4_discard_result_t result;
+    size_t i;
+    const size_t n = 500u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    for (i = 0u; i < n; i++) {
+        libbgp_prefix4_t prefix = p4((uint8_t)(i >> 8), (uint8_t)(i & 0xffu), 0u, 0u, 16u);
+        libbgp_rib4_route_t r1 = route4(prefix, ip4(10u, 0u, 0u, 1u));
+        libbgp_rib4_route_t r2 = route4(prefix, ip4(10u, 0u, 0u, 2u));
+
+        r1.local_pref = 100u;
+        r2.local_pref = 90u;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r1));
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &r2));
+    }
+
+    memset(&result, 0, sizeof(result));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_discard_collect(&rib, ip4(10u, 0u, 0u, 1u), &result));
+    LIBBGP_ASSERT_EQ_U64(0u, result.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(n, result.replacement_count);
+
+    bgp_rib4_discard_result_destroy(&result);
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_discard_large)
 {
     libbgp_rib4_t rib;
@@ -5527,6 +5555,7 @@ int main(void)
         { "rib4_foreach_best_route_stops_stored_route_iteration_early", rib4_foreach_best_route_stops_stored_route_iteration_early },
         { "rib4_foreach_best_route_avoids_per_prefix_realloc", rib4_foreach_best_route_avoids_per_prefix_realloc },
         { "rib4_discard_collect_preserves_replacement_correctness", rib4_discard_collect_preserves_replacement_correctness },
+        { "rib4_discard_collect_large_replacement_batch", rib4_discard_collect_large_replacement_batch },
         { "rib4_discard_large", rib4_discard_large },
         { "rib4_med_comparison_uses_neighbor_as_from_as_path", rib4_med_comparison_uses_neighbor_as_from_as_path },
         { "rib4_med_not_compared_without_neighbor_as", rib4_med_not_compared_without_neighbor_as },
