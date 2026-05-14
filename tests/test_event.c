@@ -1,6 +1,8 @@
 #include "test_main.h"
 
+#include "libbgp/alloc.h"
 #include "libbgp/event.h"
+#include "../src/internal.h"
 
 typedef struct callback_record {
     size_t calls;
@@ -13,6 +15,8 @@ typedef struct callback_record {
 typedef struct callback_ctx {
     callback_record_t *record;
     int marker;
+    bool reject_on_next_retain;
+    unsigned int retain_calls;
 } callback_ctx_t;
 
 static void recording_cb(const libbgp_event_t *event, void *ctx)
@@ -384,6 +388,150 @@ LIBBGP_TEST(event_operations_after_destroy_use_null_behavior)
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_event_bus_publish(&bus, &event));
 }
 
+/* Test retain callback that rejects during subscribe.
+ * Covers src/event.c line 173 (retain returns false). */
+static bool reject_retain(void *ctx)
+{
+    (void)ctx;
+    return false;
+}
+
+static int release_calls;
+
+static void counting_release(void *ctx)
+{
+    (void)ctx;
+    release_calls++;
+}
+
+static void *event_fail_realloc(void *ptr, size_t size, void *ctx)
+{
+    (void)ptr;
+    (void)size;
+    (void)ctx;
+    return NULL;
+}
+
+LIBBGP_TEST(event_subscribe_retain_reject_returns_bad_len)
+{
+    libbgp_event_bus_t bus;
+    callback_ctx_t ctx;
+    uint64_t id = 0u;
+
+    memset(&ctx, 0, sizeof(ctx));
+    release_calls = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        bgp_event_bus_subscribe_retained(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            recording_cb, &ctx, reject_retain, counting_release, &id));
+    LIBBGP_ASSERT_EQ_U64(0u, id);
+    LIBBGP_ASSERT_EQ_I64(0, release_calls);
+    libbgp_event_bus_destroy(&bus);
+}
+
+/* Test subscribe to destroyed bus triggers release cleanup.
+ * Covers src/event.c lines 177-178. */
+LIBBGP_TEST(event_subscribe_retained_on_destroyed_bus_calls_release)
+{
+    libbgp_event_bus_t bus;
+    callback_ctx_t ctx;
+    uint64_t id = 0u;
+
+    memset(&ctx, 0, sizeof(ctx));
+    release_calls = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    libbgp_event_bus_destroy(&bus);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        bgp_event_bus_subscribe_retained(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            recording_cb, &ctx, NULL, counting_release, &id));
+    LIBBGP_ASSERT_EQ_U64(0u, id);
+    LIBBGP_ASSERT_EQ_I64(1, release_calls);
+}
+
+/* Test allocation failure during subscribe triggers release cleanup.
+ * Covers src/event.c lines 183-185. */
+LIBBGP_TEST(event_subscribe_alloc_failure_calls_release)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    callback_ctx_t ctx;
+    uint64_t id = 0u;
+    int i;
+
+    memset(&ctx, 0, sizeof(ctx));
+    release_calls = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+
+    /* Subscribe 4 to fill initial cap=4, then fail the growth realloc. */
+    for (i = 0; i < 4; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                recording_cb, &ctx, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.realloc = event_fail_realloc;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM,
+        bgp_event_bus_subscribe_retained(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            recording_cb, &ctx, NULL, counting_release, &id));
+    LIBBGP_ASSERT_EQ_U64(0u, id);
+    LIBBGP_ASSERT_EQ_I64(1, release_calls);
+
+    libbgp_set_alloc(NULL);
+    libbgp_event_bus_destroy(&bus);
+}
+
+static bool selective_retain(void *ctx)
+{
+    callback_ctx_t *cb_ctx = (callback_ctx_t *)ctx;
+
+    cb_ctx->retain_calls++;
+    return !cb_ctx->reject_on_next_retain || cb_ctx->retain_calls == 1u;
+}
+
+static void noop_release(void *ctx)
+{
+    (void)ctx;
+}
+
+LIBBGP_TEST(event_publish_retain_reject_skips_subscriber)
+{
+    libbgp_event_bus_t bus;
+    callback_record_t record;
+    callback_ctx_t ctx1, ctx2;
+    libbgp_event_t event;
+
+    memset(&record, 0, sizeof(record));
+    memset(&ctx1, 0, sizeof(ctx1));
+    memset(&ctx2, 0, sizeof(ctx2));
+    ctx1.record = &record;
+    ctx1.marker = 11;
+    ctx1.reject_on_next_retain = true;
+    ctx2.record = &record;
+    ctx2.marker = 22;
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        bgp_event_bus_subscribe_retained(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            recording_cb, &ctx1, selective_retain, noop_release, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        bgp_event_bus_subscribe_retained(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+            recording_cb, &ctx2, NULL, NULL, NULL));
+
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_U64(1u, record.calls);
+    LIBBGP_ASSERT_EQ_I64(22, record.order[0]);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -396,7 +544,11 @@ int main(void)
         { "event_publish_snapshot_excludes_subscriber_added_during_publish_until_next_publish", event_publish_snapshot_excludes_subscriber_added_during_publish_until_next_publish },
         { "event_unsubscribe_removes_subscriber_and_reports_absent_id", event_unsubscribe_removes_subscriber_and_reports_absent_id },
         { "event_publish_null_inputs_return_zero", event_publish_null_inputs_return_zero },
-        { "event_operations_after_destroy_use_null_behavior", event_operations_after_destroy_use_null_behavior }
+        { "event_operations_after_destroy_use_null_behavior", event_operations_after_destroy_use_null_behavior },
+        { "event_subscribe_retain_reject_returns_bad_len", event_subscribe_retain_reject_returns_bad_len },
+        { "event_subscribe_retained_on_destroyed_bus_calls_release", event_subscribe_retained_on_destroyed_bus_calls_release },
+        { "event_subscribe_alloc_failure_calls_release", event_subscribe_alloc_failure_calls_release },
+        { "event_publish_retain_reject_skips_subscriber", event_publish_retain_reject_skips_subscriber }
     };
 
     return libbgp_run_tests("event", tests, LIBBGP_ARRAY_LEN(tests));

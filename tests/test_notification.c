@@ -1,7 +1,9 @@
 #include "test_main.h"
 
+#include "fixtures/alloc_tracker.h"
 #include "fixtures/bgp_packets.h"
 
+#include "libbgp/alloc.h"
 #include "libbgp/notification.h"
 #include "libbgp/types.h"
 
@@ -108,6 +110,95 @@ LIBBGP_TEST(notification_write_rejects_null_data_with_nonzero_length)
     libbgp_notification_destroy(&msg);
 }
 
+/* RFC 4271 Section 4.5: notification init/destroy with NULL is a no-op.
+ * Covers src/notification.c lines 9, 17. */
+LIBBGP_TEST(notification_init_destroy_null_is_noop)
+{
+    libbgp_notification_init(NULL);
+    libbgp_notification_destroy(NULL);
+}
+
+/* RFC 4271 Section 4.5: parse with data triggers malloc for data copy.
+ * Covers src/notification.c line 43 (malloc failure path). */
+static void *failing_malloc(size_t size, void *ctx)
+{
+    (void)size;
+    (void)ctx;
+    return NULL;
+}
+
+static void *passthrough_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)ctx;
+    return calloc(nmemb, size);
+}
+
+static void *passthrough_realloc(void *ptr, size_t size, void *ctx)
+{
+    (void)ctx;
+    return realloc(ptr, size);
+}
+
+static void passthrough_free(void *ptr, void *ctx)
+{
+    (void)ctx;
+    free(ptr);
+}
+
+LIBBGP_TEST(notification_parse_alloc_failure_returns_nomem)
+{
+    libbgp_alloc_t alloc;
+    const uint8_t body[] = { 2u, 3u, 0xaau };
+    libbgp_notification_msg_t msg;
+    size_t used = 99u;
+
+    alloc.malloc = failing_malloc;
+    alloc.calloc = passthrough_calloc;
+    alloc.realloc = passthrough_realloc;
+    alloc.free = passthrough_free;
+    alloc.ctx = NULL;
+    libbgp_set_alloc(&alloc);
+
+    libbgp_notification_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, libbgp_notification_parse(&msg, body, sizeof(body), &used));
+    LIBBGP_ASSERT_EQ_U64(99u, used);
+    libbgp_notification_destroy(&msg);
+    libbgp_set_alloc(NULL);
+}
+
+/* RFC 4271 Section 4.5: write with no data covers data_len==0 branch at line 84. */
+LIBBGP_TEST(notification_write_no_data_skip_memcpy)
+{
+    const uint8_t expected[] = { 5u, 0u };
+    uint8_t out[8];
+    size_t out_len = 99u;
+    libbgp_notification_msg_t msg;
+
+    libbgp_notification_init(&msg);
+    msg.err_code = 5u;
+    msg.err_subcode = 0u;
+    msg.data = NULL;
+    msg.data_len = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_notification_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(2u, out_len);
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, 2u);
+    libbgp_notification_destroy(&msg);
+}
+
+/* RFC 4271 Section 4.5: parse with NULL consumed pointer covers line 54. */
+LIBBGP_TEST(notification_parse_null_consumed)
+{
+    const uint8_t *body = LIBBGP_FIXTURE_NOTIFICATION_CEASE + LIBBGP_BGP_HEADER_LEN;
+    libbgp_notification_msg_t msg;
+
+    libbgp_notification_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_notification_parse(&msg, body, 2u, NULL));
+    LIBBGP_ASSERT_EQ_U64(6u, msg.err_code);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.err_subcode);
+    libbgp_notification_destroy(&msg);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -115,7 +206,11 @@ int main(void)
         { "notification_parse_copies_data_and_destroy_clears_it", notification_parse_copies_data_and_destroy_clears_it },
         { "notification_rejects_bad_lengths_and_small_output", notification_rejects_bad_lengths_and_small_output },
         { "notification_write_allows_null_data_when_length_zero_and_exact_buffer", notification_write_allows_null_data_when_length_zero_and_exact_buffer },
-        { "notification_write_rejects_null_data_with_nonzero_length", notification_write_rejects_null_data_with_nonzero_length }
+        { "notification_write_rejects_null_data_with_nonzero_length", notification_write_rejects_null_data_with_nonzero_length },
+        { "notification_init_destroy_null_is_noop", notification_init_destroy_null_is_noop },
+        { "notification_parse_alloc_failure_returns_nomem", notification_parse_alloc_failure_returns_nomem },
+        { "notification_write_no_data_skip_memcpy", notification_write_no_data_skip_memcpy },
+        { "notification_parse_null_consumed", notification_parse_null_consumed }
     };
 
     return libbgp_run_tests("notification", tests, LIBBGP_ARRAY_LEN(tests));

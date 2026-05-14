@@ -308,6 +308,58 @@ LIBBGP_TEST(packet_write_known_body_failure_leaves_output_unchanged)
     libbgp_packet_destroy(&pkt);
 }
 
+/* RFC 4271 Section 4: packet init/destroy with NULL is a no-op.
+ * Covers src/packet.c lines 10, 20. */
+LIBBGP_TEST(packet_init_destroy_null_is_noop)
+{
+    libbgp_packet_init(NULL);
+    libbgp_packet_destroy(NULL);
+}
+
+/* RFC 4271 Section 4.5: parsing a notification body that is too short (len=1) triggers
+ * body parse error via packet_parse_map_body_error NOTIFICATION/KEEPALIVE path.
+ * Covers src/packet.c line 107. */
+LIBBGP_TEST(packet_parse_short_notification_body_sets_header_error)
+{
+    const uint8_t short_notif[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x13, 0x03
+    };
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_packet_parse(&pkt, short_notif, sizeof(short_notif), NULL));
+    libbgp_packet_destroy(&pkt);
+}
+
+/* RFC 4271 Section 4: packet write with NULL out_len pointer covers line 309. */
+LIBBGP_TEST(packet_write_null_out_len_still_writes)
+{
+    uint8_t out[LIBBGP_BGP_HEADER_LEN];
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    pkt.type = LIBBGP_PACKET_KEEPALIVE;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, out, sizeof(out), NULL));
+    LIBBGP_ASSERT_EQ_I64(0xff, out[0]);
+    libbgp_packet_destroy(&pkt);
+}
+
+/* Covers parsing with NULL consumed pointer (line 200). */
+LIBBGP_TEST(packet_parse_null_consumed)
+{
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -321,7 +373,11 @@ int main(void)
         { "packet_write_unknown_allows_zero_length_body", packet_write_unknown_allows_zero_length_body },
         { "packet_parse_known_body_failure_preserves_existing_packet", packet_parse_known_body_failure_preserves_existing_packet },
         { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },
-        { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged }
+        { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged },
+        { "packet_init_destroy_null_is_noop", packet_init_destroy_null_is_noop },
+        { "packet_parse_short_notification_body_sets_header_error", packet_parse_short_notification_body_sets_header_error },
+        { "packet_write_null_out_len_still_writes", packet_write_null_out_len_still_writes },
+        { "packet_parse_null_consumed", packet_parse_null_consumed }
     };
 
     return libbgp_run_tests("packet", tests, LIBBGP_ARRAY_LEN(tests));

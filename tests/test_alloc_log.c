@@ -243,6 +243,19 @@ LIBBGP_TEST(set_default_logger_null_resets_defaults)
     LIBBGP_ASSERT_EQ_U64(0u, capture.calls);
 }
 
+/* RFC: N/A -- libbgp_logger_init(NULL) is a defensive no-op (line 32 of log.c) */
+LIBBGP_TEST(logger_init_null_is_noop)
+{
+    libbgp_logger_init(NULL);
+}
+
+/* RFC: N/A -- covers libbgp_log with NULL logger, NULL fmt, and default logger with NULL log_fn */
+LIBBGP_TEST(log_with_null_default_logger_is_noop)
+{
+    libbgp_set_default_logger(NULL);
+    libbgp_log(NULL, LIBBGP_LOG_ERROR, "should not crash");
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -255,7 +268,9 @@ int main(void)
         { "null_logger_uses_default_logger", null_logger_uses_default_logger },
         { "null_format_is_noop", null_format_is_noop },
         { "set_default_logger_copies_by_value", set_default_logger_copies_by_value },
-        { "set_default_logger_null_resets_defaults", set_default_logger_null_resets_defaults }
+        { "set_default_logger_null_resets_defaults", set_default_logger_null_resets_defaults },
+        { "logger_init_null_is_noop", logger_init_null_is_noop },
+        { "log_with_null_default_logger_is_noop", log_with_null_default_logger_is_noop }
     };
 
     return libbgp_run_tests("alloc_log", tests, LIBBGP_ARRAY_LEN(tests));
