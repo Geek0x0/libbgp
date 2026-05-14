@@ -6,6 +6,8 @@
 #include "libbgp/types.h"
 #include "libbgp/alloc.h"
 
+#include "../src/attr_view.h"
+
 #include <stdlib.h>
 
 static libbgp_pattr_t *make_as_path_attr(libbgp_pattr_type_t type, bool is_4b, const uint32_t *asns, size_t count)
@@ -38,6 +40,31 @@ static uint32_t update_ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
     bytes[3] = d;
     memcpy(&value, bytes, sizeof(value));
     return value;
+}
+
+static void test_attr_view_basic(void)
+{
+    bgp_attr_view_t view;
+    libbgp_pattr_t origin = {0};
+    libbgp_pattr_t as_path = {0};
+    libbgp_pattr_t origin_dup = {0};
+
+    origin.type_code = LIBBGP_PATTR_CODE_ORIGIN;
+    origin.type = LIBBGP_PATTR_ORIGIN;
+    as_path.type_code = LIBBGP_PATTR_CODE_AS_PATH;
+    as_path.type = LIBBGP_PATTR_AS_PATH;
+    origin_dup.type_code = LIBBGP_PATTR_CODE_ORIGIN;
+    origin_dup.type = LIBBGP_PATTR_ORIGIN;
+
+    bgp_attr_view_init(&view);
+    LIBBGP_ASSERT(bgp_attr_view_add(&view, &origin));
+    LIBBGP_ASSERT(bgp_attr_view_add(&view, &as_path));
+    LIBBGP_ASSERT(!bgp_attr_view_add(&view, &origin_dup));
+    LIBBGP_ASSERT(view.duplicate_found);
+
+    LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_ORIGIN) == &origin);
+    LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_AS_PATH) == &as_path);
+    LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_NEXT_HOP) == NULL);
 }
 
 static size_t test_as_path_asn_count(const libbgp_pattr_t *attr)
@@ -1815,6 +1842,34 @@ LIBBGP_TEST(update_validate_rejects_duplicate_semantic_attrs_in_public_state)
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_validate(&msg));
 
+    libbgp_pattr_unref(second);
+    libbgp_pattr_unref(first);
+    libbgp_update_destroy(&msg);
+}
+
+LIBBGP_TEST(update_validate_reports_duplicate_before_later_malformed_attr)
+{
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *first = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *second = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *bad_as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+
+    LIBBGP_ASSERT(first != NULL);
+    LIBBGP_ASSERT(second != NULL);
+    LIBBGP_ASSERT(bad_as_path != NULL);
+    bad_as_path->data.as_path.segment_count = 1u;
+    bad_as_path->data.as_path.segments = NULL;
+    libbgp_update_init(&msg);
+    msg.attrs = (libbgp_pattr_t **)calloc(3u, sizeof(msg.attrs[0]));
+    LIBBGP_ASSERT(msg.attrs != NULL);
+    msg.attr_count = 3u;
+    msg.attrs[0] = libbgp_pattr_ref(first);
+    msg.attrs[1] = libbgp_pattr_ref(second);
+    msg.attrs[2] = libbgp_pattr_ref(bad_as_path);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_validate(&msg));
+
+    libbgp_pattr_unref(bad_as_path);
     libbgp_pattr_unref(second);
     libbgp_pattr_unref(first);
     libbgp_update_destroy(&msg);
@@ -4257,6 +4312,7 @@ LIBBGP_TEST(update_validate_treats_mp_reach_without_nlri_as_non_nlri_rfc4760)
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
+        { "attr_view_basic", test_attr_view_basic },
         { "update_parse_write_empty_fixture_body", update_parse_write_empty_fixture_body },
         { "update_parse_write_with_withdrawn_attrs_and_nlri", update_parse_write_with_withdrawn_attrs_and_nlri },
         { "update_parse_write_many_nlri", update_parse_write_many_nlri },
@@ -4308,6 +4364,7 @@ int main(void)
         { "update_downgrade_allocation_failure_preserves_original_path", update_downgrade_allocation_failure_preserves_original_path },
         { "update_small_branch_regressions_cover_invalid_helpers", update_small_branch_regressions_cover_invalid_helpers },
         { "update_validate_rejects_duplicate_semantic_attrs_in_public_state", update_validate_rejects_duplicate_semantic_attrs_in_public_state },
+        { "update_validate_reports_duplicate_before_later_malformed_attr", update_validate_reports_duplicate_before_later_malformed_attr },
         { "update_restore_as_path_rejects_invalid_as4_shadow_state", update_restore_as_path_rejects_invalid_as4_shadow_state },
         { "update_restore_as_path_allocation_failure_preserves_shadow_attr", update_restore_as_path_allocation_failure_preserves_shadow_attr },
         { "update_prepend_rejects_invalid_first_segment_state", update_prepend_rejects_invalid_first_segment_state },

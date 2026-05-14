@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "attr_view.h"
 #include "internal.h"
 
 void libbgp_update_init(libbgp_update_msg_t *msg)
@@ -214,12 +215,15 @@ static bool update_mp_reach_has_nlri(const libbgp_pattr_t *attr)
 
 libbgp_err_t libbgp_update_validate(const libbgp_update_msg_t *msg)
 {
+    bgp_attr_view_t view;
+    size_t first_index[BGP_ATTR_TYPE_MAX];
     bool has_origin = false;
     bool has_as_path = false;
     bool has_next_hop = false;
     bool has_mp_reach_nlri = false;
+    size_t first_bad_index;
+    size_t first_duplicate_index;
     size_t i;
-    size_t j;
 
     if (msg == NULL) {
         return LIBBGP_ERR_BAD_LEN;
@@ -230,20 +234,31 @@ libbgp_err_t libbgp_update_validate(const libbgp_update_msg_t *msg)
         return LIBBGP_ERR_BAD_LEN;
     }
 
+    bgp_attr_view_init(&view);
+    first_bad_index = msg->attr_count;
+    first_duplicate_index = msg->attr_count;
     for (i = 0u; i < msg->attr_count; i++) {
         libbgp_pattr_t *attr = msg->attrs[i];
 
         if (attr == NULL) {
-            return LIBBGP_ERR_BAD_LEN;
+            if (first_bad_index == msg->attr_count) {
+                first_bad_index = i;
+            }
+            continue;
+        }
+        if (view.present[attr->type_code]) {
+            if (first_duplicate_index == msg->attr_count ||
+                first_index[attr->type_code] < first_duplicate_index) {
+                first_duplicate_index = first_index[attr->type_code];
+            }
+        } else {
+            first_index[attr->type_code] = i;
+            (void)bgp_attr_view_add(&view, attr);
         }
         if ((attr->type == LIBBGP_PATTR_AS_PATH || attr->type == LIBBGP_PATTR_AS4_PATH) &&
-            update_validate_as_path_data(attr, true, NULL) != LIBBGP_OK) {
-            return LIBBGP_ERR_BAD_LEN;
-        }
-        for (j = i + 1u; j < msg->attr_count; j++) {
-            if (update_attrs_same_semantic(attr, msg->attrs[j])) {
-                return LIBBGP_ERR_INVALID;
-            }
+            update_validate_as_path_data(attr, true, NULL) != LIBBGP_OK &&
+            first_bad_index == msg->attr_count) {
+            first_bad_index = i;
         }
         if (attr->type == LIBBGP_PATTR_ORIGIN) {
             has_origin = true;
@@ -254,6 +269,15 @@ libbgp_err_t libbgp_update_validate(const libbgp_update_msg_t *msg)
         } else if (update_mp_reach_has_nlri(attr)) {
             has_mp_reach_nlri = true;
         }
+    }
+    if (first_duplicate_index < first_bad_index) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (first_bad_index != msg->attr_count) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    if (first_duplicate_index != msg->attr_count) {
+        return LIBBGP_ERR_INVALID;
     }
 
     if (msg->nlri_count != 0u && (!has_origin || !has_as_path || !has_next_hop)) {
