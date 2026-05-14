@@ -937,21 +937,34 @@ static libbgp_err_t rib4_lpm_index_add_locked(rib4_impl_t *impl, bgp_hashmap_ent
 static libbgp_err_t rib4_prefix_array_push(
     libbgp_prefix4_t **items,
     size_t *count,
+    size_t *cap,
     const libbgp_prefix4_t *prefix)
 {
     libbgp_prefix4_t *next;
+    size_t new_cap;
 
-    if (items == NULL || count == NULL || prefix == NULL) {
+    if (items == NULL || count == NULL || cap == NULL || prefix == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (*count == SIZE_MAX || *count + 1u > SIZE_MAX / sizeof(**items)) {
-        return LIBBGP_ERR_NOMEM;
+    if (*count >= *cap) {
+        if (*cap == 0u) {
+            new_cap = 64u;
+        } else {
+            if (*cap > SIZE_MAX / 2u) {
+                return LIBBGP_ERR_NOMEM;
+            }
+            new_cap = *cap * 2u;
+        }
+        if (new_cap <= *count || new_cap > SIZE_MAX / sizeof(**items)) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        next = (libbgp_prefix4_t *)bgp_realloc(*items, new_cap * sizeof(**items));
+        if (next == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        *items = next;
+        *cap = new_cap;
     }
-    next = (libbgp_prefix4_t *)bgp_realloc(*items, (*count + 1u) * sizeof(**items));
-    if (next == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    *items = next;
     (*items)[*count] = *prefix;
     (*count)++;
     return LIBBGP_OK;
@@ -959,25 +972,43 @@ static libbgp_err_t rib4_prefix_array_push(
 
 static libbgp_err_t rib4_result_add_replacement(
     bgp_rib4_discard_result_t *result,
+    size_t *cap,
     const libbgp_rib4_route_t *route)
 {
     libbgp_rib4_route_t *next;
     libbgp_err_t err;
+    size_t old_cap;
+    size_t new_cap;
 
-    if (result == NULL || route == NULL) {
+    if (result == NULL || cap == NULL || route == NULL) {
         return LIBBGP_ERR_INVALID;
     }
-    if (result->replacement_count == SIZE_MAX ||
-        result->replacement_count + 1u > SIZE_MAX / sizeof(*result->replacements)) {
-        return LIBBGP_ERR_NOMEM;
+    if (result->replacement_count >= *cap) {
+        old_cap = *cap;
+        if (*cap == 0u) {
+            new_cap = 64u;
+        } else {
+            if (*cap > SIZE_MAX / 2u) {
+                return LIBBGP_ERR_NOMEM;
+            }
+            new_cap = *cap * 2u;
+        }
+        if (new_cap <= result->replacement_count || new_cap > SIZE_MAX / sizeof(*result->replacements)) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        next = (libbgp_rib4_route_t *)bgp_realloc(
+            result->replacements,
+            new_cap * sizeof(*result->replacements));
+        if (next == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        result->replacements = next;
+        memset(
+            &result->replacements[old_cap],
+            0,
+            (new_cap - old_cap) * sizeof(*result->replacements));
+        *cap = new_cap;
     }
-    next = (libbgp_rib4_route_t *)bgp_realloc(
-        result->replacements,
-        (result->replacement_count + 1u) * sizeof(*result->replacements));
-    if (next == NULL) {
-        return LIBBGP_ERR_NOMEM;
-    }
-    result->replacements = next;
     memset(&result->replacements[result->replacement_count], 0, sizeof(result->replacements[result->replacement_count]));
     err = bgp_rib4_route_snapshot_clone(route, &result->replacements[result->replacement_count]);
     if (err != LIBBGP_OK) {
@@ -1564,6 +1595,9 @@ libbgp_err_t bgp_rib4_discard_collect(
     rib4_impl_t *impl = rib4_impl_get(rib);
     libbgp_prefix4_t *active_prefixes = NULL;
     size_t active_count = 0u;
+    size_t active_cap = 0u;
+    size_t withdrawn_cap = 0u;
+    size_t replacement_cap = 0u;
     rib4_source_entry_t *source;
     size_t i;
     libbgp_err_t err = LIBBGP_OK;
@@ -1584,7 +1618,7 @@ libbgp_err_t bgp_rib4_discard_collect(
 
             if (route->source_router_id == source_router_id &&
                 rib4_best_exact_locked(impl, &route->prefix) == route) {
-                err = rib4_prefix_array_push(&active_prefixes, &active_count, &route->prefix);
+                err = rib4_prefix_array_push(&active_prefixes, &active_count, &active_cap, &route->prefix);
                 if (err != LIBBGP_OK) {
                     break;
                 }
@@ -1603,9 +1637,13 @@ libbgp_err_t bgp_rib4_discard_collect(
         libbgp_rib4_route_t *replacement = rib4_best_exact_locked(impl, &active_prefixes[i]);
 
         if (replacement == NULL) {
-            err = rib4_prefix_array_push(&result->withdrawn, &result->withdrawn_count, &active_prefixes[i]);
+            err = rib4_prefix_array_push(
+                &result->withdrawn,
+                &result->withdrawn_count,
+                &withdrawn_cap,
+                &active_prefixes[i]);
         } else {
-            err = rib4_result_add_replacement(result, replacement);
+            err = rib4_result_add_replacement(result, &replacement_cap, replacement);
         }
     }
     bgp_unlock(&impl->lock);
