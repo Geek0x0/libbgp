@@ -8,6 +8,7 @@
 #include "../src/radix4.h"
 #include "../src/radix6.h"
 #include "../src/rib_internal.h"
+#include "../src/vec.h"
 #include "fixtures/alloc_tracker.h"
 
 #include <stdbool.h>
@@ -168,6 +169,8 @@ typedef struct rib6_iter_count_ctx {
     uint32_t sources[8];
 } rib6_iter_count_ctx_t;
 
+typedef bgp_vec_t(libbgp_prefix4_t) rib4_prefix_vec_t;
+
 static bool record_rib4_source(const libbgp_rib4_route_t *route, void *ctx)
 {
     rib4_iter_count_ctx_t *record = (rib4_iter_count_ctx_t *)ctx;
@@ -186,6 +189,16 @@ static bool record_rib6_source(const libbgp_rib6_route_t *route, void *ctx)
     LIBBGP_ASSERT(record->count < LIBBGP_ARRAY_LEN(record->sources));
     record->sources[record->count++] = route->source_router_id;
     return record->limit == 0u || record->count < record->limit;
+}
+
+static bool collect_rib4_best_prefix(const libbgp_rib4_route_t *route, void *ctx)
+{
+    rib4_prefix_vec_t *prefixes = (rib4_prefix_vec_t *)ctx;
+    libbgp_err_t err;
+
+    LIBBGP_ASSERT(route != NULL);
+    bgp_vec_push(prefixes, route->prefix, &err);
+    return err == LIBBGP_OK;
 }
 
 static bool rib4_sources_contain(const rib4_iter_count_ctx_t *ctx, uint32_t source)
@@ -584,6 +597,54 @@ LIBBGP_TEST(rib4_foreach_best_route_avoids_per_prefix_realloc)
 
     LIBBGP_ASSERT_EQ_U64(8u, ctx.count);
     LIBBGP_ASSERT(tracker.realloc_calls <= 1u);
+    libbgp_rib4_destroy(&rib);
+}
+
+LIBBGP_TEST(rib4_foreach_best_route_many_prefixes_one_best_each)
+{
+    libbgp_rib4_t rib;
+    rib4_prefix_vec_t collected;
+    bool seen[100];
+    const size_t prefix_count = 100u;
+    const size_t paths_per_prefix = 4u;
+    size_t i;
+
+    memset(seen, 0, sizeof(seen));
+    bgp_vec_init(&collected);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+
+    for (i = 0u; i < prefix_count; i++) {
+        libbgp_prefix4_t prefix = p4((uint8_t)(i >> 8), (uint8_t)(i & 0xffu), 0u, 0u, 16u);
+        size_t p;
+
+        for (p = 0u; p < paths_per_prefix; p++) {
+            uint32_t source = ip4(10u, 0u, (uint8_t)(p >> 8), (uint8_t)(p & 0xffu));
+            libbgp_rib4_route_t route = route4(prefix, source);
+
+            route.local_pref = (uint32_t)(100u - p);
+            LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &route));
+        }
+    }
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_foreach_best_route(&rib, collect_rib4_best_prefix, &collected));
+    LIBBGP_ASSERT_EQ_U64(prefix_count, collected.len);
+    for (i = 0u; i < collected.len; i++) {
+        uint8_t bytes[4];
+        size_t index;
+
+        memcpy(bytes, &collected.data[i].addr, sizeof(bytes));
+        index = (size_t)bytes[1];
+        LIBBGP_ASSERT(collected.data[i].len == 16u);
+        LIBBGP_ASSERT(bytes[0] == 0u);
+        LIBBGP_ASSERT(index < prefix_count);
+        LIBBGP_ASSERT(!seen[index]);
+        seen[index] = true;
+    }
+    for (i = 0u; i < prefix_count; i++) {
+        LIBBGP_ASSERT(seen[i]);
+    }
+
+    bgp_vec_free(&collected);
     libbgp_rib4_destroy(&rib);
 }
 
@@ -5554,6 +5615,7 @@ int main(void)
         { "rib4_foreach_best_route_visits_one_route_per_prefix", rib4_foreach_best_route_visits_one_route_per_prefix },
         { "rib4_foreach_best_route_stops_stored_route_iteration_early", rib4_foreach_best_route_stops_stored_route_iteration_early },
         { "rib4_foreach_best_route_avoids_per_prefix_realloc", rib4_foreach_best_route_avoids_per_prefix_realloc },
+        { "rib4_foreach_best_route_many_prefixes_one_best_each", rib4_foreach_best_route_many_prefixes_one_best_each },
         { "rib4_discard_collect_preserves_replacement_correctness", rib4_discard_collect_preserves_replacement_correctness },
         { "rib4_discard_collect_large_replacement_batch", rib4_discard_collect_large_replacement_batch },
         { "rib4_discard_large", rib4_discard_large },

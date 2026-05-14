@@ -1476,9 +1476,9 @@ libbgp_err_t bgp_rib4_foreach_best_route(
     void *ctx)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
-    libbgp_rib4_route_t *routes = NULL;
-    size_t route_count = 0u;
-    size_t route_capacity = 0u;
+    libbgp_rib4_route_t *snapshots = NULL;
+    size_t snap_count = 0u;
+    size_t snap_cap = 0u;
     size_t i;
     libbgp_err_t err = LIBBGP_OK;
     bool keep_going = true;
@@ -1488,51 +1488,50 @@ libbgp_err_t bgp_rib4_foreach_best_route(
     }
 
     bgp_lock(&impl->lock);
-    for (i = 0u; i < impl->routes.bucket_count && err == LIBBGP_OK; i++) {
+    for (i = 0u; i < impl->lpm_groups.bucket_count && err == LIBBGP_OK; i++) {
         bgp_hashmap_entry_t *entry;
 
-        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
-            const libbgp_rib4_route_t *current = (const libbgp_rib4_route_t *)entry->value;
-            const libbgp_rib4_route_t *best = rib4_best_exact_locked(impl, &current->prefix);
+        for (entry = impl->lpm_groups.buckets[i]; entry != NULL; entry = entry->next) {
+            rib4_lpm_entry_t *group = (rib4_lpm_entry_t *)entry->value;
 
-            if (best != current) {
+            if (group == NULL || group->best == NULL) {
                 continue;
             }
 
-            if (route_count == route_capacity) {
+            if (snap_count >= snap_cap) {
                 libbgp_rib4_route_t *next;
-                size_t next_capacity = route_capacity == 0u ? 8u : route_capacity * 2u;
+                size_t next_cap = snap_cap == 0u ? 64u : snap_cap * 2u;
 
-                if (route_capacity > SIZE_MAX / 2u ||
-                    next_capacity > SIZE_MAX / sizeof(*routes)) {
+                if (snap_cap > SIZE_MAX / 2u ||
+                    next_cap > SIZE_MAX / sizeof(*snapshots)) {
                     err = LIBBGP_ERR_NOMEM;
                     break;
                 }
-                next = (libbgp_rib4_route_t *)bgp_realloc(routes, next_capacity * sizeof(*routes));
+                next = (libbgp_rib4_route_t *)bgp_realloc(snapshots, next_cap * sizeof(*snapshots));
                 if (next == NULL) {
                     err = LIBBGP_ERR_NOMEM;
                     break;
                 }
-                routes = next;
-                memset(&routes[route_capacity], 0, (next_capacity - route_capacity) * sizeof(*routes));
-                route_capacity = next_capacity;
+                snapshots = next;
+                memset(&snapshots[snap_cap], 0, (next_cap - snap_cap) * sizeof(*snapshots));
+                snap_cap = next_cap;
             }
-            err = bgp_rib4_route_snapshot_clone(current, &routes[route_count]);
+            err = bgp_rib4_route_snapshot_clone(group->best, &snapshots[snap_count]);
             if (err != LIBBGP_OK) {
                 break;
             }
-            route_count++;
+            snap_count++;
         }
     }
     bgp_unlock(&impl->lock);
 
-    for (i = 0u; i < route_count && keep_going; i++) {
-        keep_going = fn(&routes[i], ctx);
+    for (i = 0u; i < snap_count && keep_going; i++) {
+        keep_going = fn(&snapshots[i], ctx);
     }
-    for (i = 0u; i < route_count; i++) {
-        rib4_route_snapshot_clear(&routes[i]);
+    for (i = 0u; i < snap_count; i++) {
+        rib4_route_snapshot_clear(&snapshots[i]);
     }
-    bgp_free(routes);
+    bgp_free(snapshots);
     return err;
 }
 
