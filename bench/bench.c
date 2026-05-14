@@ -429,6 +429,250 @@ static int bench_event_publish(size_t subscribers, size_t publishes)
     return 0;
 }
 
+/* ========== 性能分析基准测试 ========== */
+
+/* 计算统计数据的辅助函数 */
+static void compute_stats(uint64_t *times, size_t count,
+                         uint64_t *min, uint64_t *max, uint64_t *avg,
+                         uint64_t *p50, uint64_t *p99)
+{
+    if (count == 0) return;
+    
+    uint64_t sum = 0;
+    *min = times[0];
+    *max = times[0];
+    
+    for (size_t i = 0; i < count; i++) {
+        sum += times[i];
+        if (times[i] < *min) *min = times[i];
+        if (times[i] > *max) *max = times[i];
+    }
+    
+    *avg = sum / count;
+    
+    /* 简单排序计算百分位数 */
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = i + 1; j < count; j++) {
+            if (times[j] < times[i]) {
+                uint64_t tmp = times[i];
+                times[i] = times[j];
+                times[j] = tmp;
+            }
+        }
+    }
+    
+    *p50 = times[count / 2];
+    *p99 = times[(count * 99) / 100];
+}
+
+/* PRNG 用于生成伪随机地址 */
+static uint32_t prng_next(uint32_t *seed)
+{
+    *seed = *seed * 1103515245 + 12345;
+    return (*seed >> 16) & 0x7fff;
+}
+
+static uint32_t generate_random_ipv4(uint32_t *seed)
+{
+    uint32_t a = prng_next(seed);
+    uint32_t b = prng_next(seed);
+    uint32_t c = prng_next(seed);
+    uint32_t d = prng_next(seed);
+    return (a << 24) | (b << 16) | (c << 8) | d;
+}
+
+static libbgp_prefix4_t bench_route_prefix4(size_t index)
+{
+    return p4(
+        (uint8_t)(10u + (index >> 16)),
+        (uint8_t)(index >> 8),
+        (uint8_t)index,
+        0u,
+        24u);
+}
+
+/* 详细的RIB lookup延迟分析 - 可配置规模 */
+static int bench_rib_lookup_detailed(size_t num_routes)
+{
+    libbgp_rib4_t rib;
+    const libbgp_rib4_route_t *found = NULL;
+    uint64_t *timings;
+    size_t lookups = num_routes < 1000 ? 5000 : (num_routes < 10000 ? 2000 : 500);
+    uint32_t seed = 12345;
+    size_t i;
+    uint64_t start;
+    
+    uint64_t min_ns, max_ns, avg_ns, p50_ns, p99_ns;
+    double ms_total;
+    
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        fprintf(stderr, "ERROR: rib4_init failed\n");
+        return 1;
+    }
+    
+    /* 插入路由 */
+    printf("\n--- Inserting %zu routes ---\n", num_routes);
+    fflush(stdout);
+    for (i = 0u; i < num_routes; i++) {
+        libbgp_prefix4_t prefix = bench_route_prefix4(i);
+        
+        if (libbgp_rib4_insert_local(&rib, &prefix, ip4(192u, 0u, 2u, 1u), 100) != LIBBGP_OK) {
+            fprintf(stderr, "ERROR: rib4_insert_local failed at index %zu\n", i);
+            libbgp_rib4_destroy(&rib);
+            return 1;
+        }
+    }
+    
+    timings = (uint64_t *)malloc(lookups * sizeof(uint64_t));
+    if (timings == NULL) {
+        fprintf(stderr, "ERROR: malloc timings failed\n");
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
+    
+    /* 执行lookups并计时 */
+    printf("--- Performing %zu lookups ---\n", lookups);
+    fflush(stdout);
+    seed = 67890;
+    for (i = 0u; i < lookups; i++) {
+        uint32_t query_addr = generate_random_ipv4(&seed);
+        
+        start = now_ns();
+        libbgp_rib4_lookup(&rib, query_addr, &found);
+        timings[i] = now_ns() - start;
+    }
+    
+    compute_stats(timings, lookups, &min_ns, &max_ns, &avg_ns, &p50_ns, &p99_ns);
+    
+    ms_total = (double)(avg_ns * lookups) / 1000000.0;
+    printf("rib lookup @ %zu routes: %llu/%llu/%llu (min/avg/max) ns, "
+           "p50=%llu p99=%llu (%.1f ms total for %zu ops)\n",
+           num_routes,
+           (unsigned long long)min_ns,
+           (unsigned long long)avg_ns,
+           (unsigned long long)max_ns,
+           (unsigned long long)p50_ns,
+           (unsigned long long)p99_ns,
+           ms_total, lookups);
+    fflush(stdout);
+    
+    free(timings);
+    libbgp_rib4_destroy(&rib);
+    bench_sink_value += min_ns;
+    return 0;
+}
+
+/* HashMap性能分析 - 插入扩容跟踪 */
+static int bench_hashmap_load_factor(void)
+{
+    printf("\n--- HashMap Load Factor Analysis ---\n");
+    printf("Testing insert performance and resize patterns\n");
+    printf("Threshold: 75%% load factor\n\n");
+    fflush(stdout);
+    
+    libbgp_rib4_t rib;
+    uint64_t *insert_times;
+    uint64_t start;
+    size_t i, num_inserts = 2000;
+    
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+    
+    insert_times = (uint64_t *)malloc(num_inserts * sizeof(uint64_t));
+    if (insert_times == NULL) {
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
+    
+    uint64_t min_time = UINT64_MAX, max_time = 0, sum_time = 0;
+    uint64_t resize_penalties = 0;
+    
+    for (i = 0u; i < num_inserts; i++) {
+        libbgp_prefix4_t prefix = bench_route_prefix4(i);
+        
+        start = now_ns();
+        if (libbgp_rib4_insert_local(&rib, &prefix, ip4(192u, 0u, 2u, 1u), 100) != LIBBGP_OK) {
+            free(insert_times);
+            libbgp_rib4_destroy(&rib);
+            return 1;
+        }
+        insert_times[i] = now_ns() - start;
+        
+        sum_time += insert_times[i];
+        if (insert_times[i] < min_time) min_time = insert_times[i];
+        if (insert_times[i] > max_time) max_time = insert_times[i];
+        
+        if (insert_times[i] > 10000) {
+            resize_penalties++;
+        }
+    }
+    
+    printf("Insert operations:\n");
+    printf("  Total ops:     %zu\n", num_inserts);
+    printf("  Min latency:   %llu ns\n", (unsigned long long)min_time);
+    printf("  Max latency:   %llu ns (resize penalty)\n", (unsigned long long)max_time);
+    printf("  Avg latency:   %llu ns\n", (unsigned long long)(sum_time / num_inserts));
+    printf("  Resize events: %zu (>10us latency)\n", resize_penalties);
+    printf("  Total time:    %.2f ms\n\n", (double)sum_time / 1000000.0);
+    
+    free(insert_times);
+    libbgp_rib4_destroy(&rib);
+    bench_sink_value += min_time;
+    return 0;
+}
+
+/* Sink缓冲区吞吐量分析 */
+static int bench_sink_throughput_analysis(void)
+{
+    printf("\n--- Sink Buffer Throughput Analysis ---\n");
+    
+    libbgp_sink_t sink;
+    uint64_t *timings;
+    uint64_t start, total_bytes = 0;
+    uint64_t min_ns, max_ns, avg_ns, p50_ns, p99_ns;
+    size_t i, num_packets = 5000;
+    
+    if (libbgp_sink_init(&sink) != LIBBGP_OK) {
+        return 1;
+    }
+    
+    timings = (uint64_t *)malloc(num_packets * sizeof(uint64_t));
+    if (timings == NULL) {
+        libbgp_sink_destroy(&sink);
+        return 1;
+    }
+    
+    printf("Test: Small packets (keepalive-like)\n");
+    fflush(stdout);
+    for (i = 0u; i < num_packets; i++) {
+        start = now_ns();
+        if (libbgp_sink_feed(&sink, (const uint8_t *)LIBBGP_FIXTURE_KEEPALIVE,
+                            LIBBGP_FIXTURE_KEEPALIVE_LEN) != LIBBGP_OK) {
+            free(timings);
+            libbgp_sink_destroy(&sink);
+            return 1;
+        }
+        timings[i] = now_ns() - start;
+        total_bytes += LIBBGP_FIXTURE_KEEPALIVE_LEN;
+    }
+    
+    compute_stats(timings, num_packets, &min_ns, &max_ns, &avg_ns, &p50_ns, &p99_ns);
+    
+    double throughput_mbps = (double)total_bytes * 8.0 / (double)(avg_ns * num_packets) * 1000.0;
+    printf("  Feed latency: %llu/%llu/%llu (min/avg/max) ns\n",
+           (unsigned long long)min_ns, (unsigned long long)avg_ns, (unsigned long long)max_ns);
+    printf("  P50: %llu ns, P99: %llu ns\n",
+           (unsigned long long)p50_ns, (unsigned long long)p99_ns);
+    printf("  Throughput: %.1f Mbps\n\n", throughput_mbps);
+    fflush(stdout);
+    
+    free(timings);
+    libbgp_sink_destroy(&sink);
+    bench_sink_value += min_ns;
+    return 0;
+}
+
 int main(void)
 {
     size_t small = env_size("LIBBGP_BENCH_SMALL", 1000u);
@@ -437,6 +681,8 @@ int main(void)
     int rc = 0;
 
     printf("libbgp bench: small=%zu large=%zu subscribers=%zu\n", small, large, subscribers);
+    
+    printf("\n========== Basic Benchmarks ==========\n");
     rc |= bench_rib_lookup(small, large);
     rc |= bench_rib_foreach_best(small);
     rc |= bench_rib_discard(small);
@@ -445,6 +691,13 @@ int main(void)
     rc |= bench_rib_insert(small);
     rc |= bench_update_parse_large(large);
     rc |= bench_event_publish(subscribers, small);
+    
+    printf("\n========== Detailed Performance Analysis ==========\n");
+    rc |= bench_rib_lookup_detailed(1000);
+    rc |= bench_rib_lookup_detailed(10000);
+    rc |= bench_hashmap_load_factor();
+    rc |= bench_sink_throughput_analysis();
+    
     printf("bench guard: %" PRIu64 "\n", bench_sink_value);
     return rc == 0 ? 0 : 1;
 }

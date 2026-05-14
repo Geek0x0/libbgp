@@ -3229,6 +3229,1031 @@ LIBBGP_TEST(update_parse_malformed_as_path_preserves_state_rfc7606_style)
     libbgp_update_destroy(&msg);
 }
 
+/* RFC 7606 §2 + RFC 4271 §4.3/§5.1:
+   malformed NLRI (prefix length > 32) in a syntactically complete UPDATE must
+   be rejected, and a failed parse must not clobber previously parsed state.
+   Branch target: parse NLRI failure path in libbgp_update_parse_as4().
+   Expected: INVALID and pre-existing message remains unchanged. */
+LIBBGP_TEST(update_parse_rejects_bad_nlri_len_preserves_state_rfc7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_nlri_len[] = {
+        0u, 0u,
+        0u, 18u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfcu, 0u,
+        0x40u, 3u, 4u, 192u, 0u, 2u, 1u,
+        33u, 203u, 0u, 113u, 0u, 0u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 55u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID,
+        libbgp_update_parse(&msg, malformed_nlri_len, sizeof(malformed_nlri_len), &used));
+    LIBBGP_ASSERT_EQ_U64(55u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1: each path attribute semantic type can appear at most once.
+   Branch target: duplicate-attribute rejection in parser attr assembly
+   (update_add_attr_with_cap via libbgp_update_parse_as4) with state preservation.
+   Expected: EXISTS and prior message contents remain intact. */
+LIBBGP_TEST(update_parse_rejects_duplicate_next_hop_preserves_state_rfc4271)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t duplicate_next_hop[] = {
+        0u, 0u,
+        0u, 14u,
+        0x40u, 3u, 4u, 192u, 0u, 2u, 1u,
+        0x40u, 3u, 4u, 192u, 0u, 2u, 2u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 66u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS,
+        libbgp_update_parse(&msg, duplicate_next_hop, sizeof(duplicate_next_hop), &used));
+    LIBBGP_ASSERT_EQ_U64(66u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1: IPv4 NLRI requires ORIGIN, AS_PATH, NEXT_HOP.
+   Branch target: validator mandatory-attribute rejection from parser path
+   where NEXT_HOP alone is missing; parse failure must preserve old state.
+   Expected: INVALID and caller-visible state unchanged. */
+LIBBGP_TEST(update_parse_rejects_ipv4_nlri_missing_next_hop_preserves_state_rfc4271)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t missing_next_hop[] = {
+        0u, 0u,
+        0u, 11u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfcu, 0u,
+        24u, 203u, 0u, 113u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 77u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID,
+        libbgp_update_parse(&msg, missing_next_hop, sizeof(missing_next_hop), &used));
+    LIBBGP_ASSERT_EQ_U64(77u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §4.3/§5.1 boundary and state-preservation behavior for writer:
+   message has mandatory IPv4 attrs so validate() passes, but malformed NLRI
+   length (>32) must still be rejected by write length accounting.
+   Branch target: libbgp_update_write() nlri length error return.
+   Expected: BAD_LEN, out_len unchanged, and attrs/state preserved. */
+LIBBGP_TEST(update_write_rejects_malformed_nlri_len_after_validate_rfc4271)
+{
+    uint32_t asns[] = { 64512u };
+    uint8_t out[64];
+    size_t out_len = 91u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, asns, 1u);
+    libbgp_pattr_t *next_hop = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+
+    LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(next_hop != NULL);
+    origin->data.origin.origin = 0u;
+    next_hop->data.next_hop.next_hop = update_ip4(192u, 0u, 2u, 1u);
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, origin));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, next_hop));
+    msg.nlri = (libbgp_prefix4_t *)calloc(1u, sizeof(msg.nlri[0]));
+    LIBBGP_ASSERT(msg.nlri != NULL);
+    msg.nlri_count = 1u;
+    msg.nlri[0].len = 33u;
+    msg.nlri[0].addr = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(91u, out_len);
+    LIBBGP_ASSERT_EQ_U64(3u, msg.attr_count);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_ORIGIN) == origin);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH) == as_path);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_NEXT_HOP) == next_hop);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(33u, msg.nlri[0].len);
+
+    libbgp_pattr_unref(next_hop);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(origin);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §4.3: Total Path Attribute Length is a 2-octet field (max 65535).
+   Branch target: libbgp_update_write() attrs_len > 65535 guard.
+   Expected: BAD_LEN, unchanged out_len, and attribute state preserved. */
+LIBBGP_TEST(update_write_rejects_total_attr_len_over_65535_rfc4271)
+{
+    const size_t attr_count = 255u;
+    const size_t attr_value_len = 255u;
+    uint8_t out[16];
+    size_t out_len = 55u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *first = NULL;
+    libbgp_pattr_t *last = NULL;
+    size_t i;
+
+    libbgp_update_init(&msg);
+    for (i = 0u; i < attr_count; i++) {
+        libbgp_pattr_t *unknown = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+
+        LIBBGP_ASSERT(unknown != NULL);
+        unknown->flags = LIBBGP_PATTR_FLAG_OPTIONAL | LIBBGP_PATTR_FLAG_TRANSITIVE;
+        unknown->type_code = (uint8_t)(i + 1u);
+        unknown->data.unknown.len = attr_value_len;
+        unknown->data.unknown.value = (uint8_t *)calloc(attr_value_len, sizeof(unknown->data.unknown.value[0]));
+        LIBBGP_ASSERT(unknown->data.unknown.value != NULL);
+        memset(unknown->data.unknown.value, (int)(i + 1u), attr_value_len);
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, unknown));
+        if (i == 0u) {
+            first = unknown;
+        }
+        last = unknown;
+        libbgp_pattr_unref(unknown);
+    }
+
+    LIBBGP_ASSERT_EQ_U64(attr_count, msg.attr_count);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(55u, out_len);
+    LIBBGP_ASSERT_EQ_U64(attr_count, msg.attr_count);
+    LIBBGP_ASSERT(msg.attrs[0] == first);
+    LIBBGP_ASSERT(msg.attrs[attr_count - 1u] == last);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: AS4_PATH augments AS_PATH and must not exceed the
+   corresponding original AS_PATH cardinality in prepend merge context.
+   Branch target: libbgp_update_prepend_asn() as4_count > original_as_path_count.
+   Expected: INVALID and caller-visible AS_PATH/AS4_PATH remain unchanged. */
+LIBBGP_TEST(update_prepend_rejects_as4_path_longer_than_original_path_rfc6793)
+{
+    uint32_t as_path_asns[] = { 64512u };
+    uint32_t as4_path_asns[] = { 65551u, 65552u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, as_path_asns, 1u);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, as4_path_asns, 2u);
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_update_prepend_asn(&msg, 70000u, false));
+    LIBBGP_ASSERT_EQ_U64(2u, msg.attr_count);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH) == as_path);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == as4_path);
+    LIBBGP_ASSERT_EQ_U64(1u, as_path->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(1u, as_path->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, as_path->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(1u, as4_path->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(2u, as4_path->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65551u, as4_path->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(65552u, as4_path->data.as_path.segments[0].asns[1]);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4760 §3 + RFC 7606 §2: malformed MP_REACH in a mixed MP attribute block
+   must be rejected without clobbering previously parsed UPDATE state.
+   Branch target: parse loop path where one attribute parses, later MP_REACH
+   attribute fails (non-zero SNPA count) and parse_as4() preserves old state.
+   Expected: INVALID, consumed unchanged, and prior message contents intact. */
+LIBBGP_TEST(update_parse_rejects_malformed_mp_reach_after_mp_unreach_preserves_state_rfc4760_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_combo[] = {
+        0u, 0u,
+        0u, 40u,
+        0x80u, 15u, 8u,
+        0u, 2u, 1u,
+        32u, 0x20u, 0x01u, 0x0du, 0xb8u,
+        0x80u, 14u, 26u,
+        0u, 2u, 1u, 16u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u,
+        1u,
+        32u, 0x20u, 0x01u, 0x0du, 0xb8u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 77u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID,
+        libbgp_update_parse(&msg, malformed_combo, sizeof(malformed_combo), &used));
+    LIBBGP_ASSERT_EQ_U64(77u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1.1: ORIGIN value is one of {0,1,2}. A syntactically present
+   but semantically invalid ORIGIN must be blocked by write-time attr encoding.
+   Branch target: libbgp_update_write() update_attrs_len()/pattr_wire_len error.
+   Expected: validate() passes structural checks, write() returns BAD_LEN, state
+   and out_len remain unchanged. */
+LIBBGP_TEST(update_write_rejects_invalid_origin_value_after_validate_rfc4271)
+{
+    uint8_t out[16];
+    size_t out_len = 88u;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+
+    LIBBGP_ASSERT(origin != NULL);
+    origin->data.origin.origin = 3u;
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, origin));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_write(&msg, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(88u, out_len);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.attr_count);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_ORIGIN) == origin);
+    LIBBGP_ASSERT_EQ_U64(3u, origin->data.origin.origin);
+
+    libbgp_pattr_unref(origin);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: AS4_PATH restore matching is based on AS_PATH suffix
+   cardinality; empty AS4 segments are valid and must not break suffix walking.
+   Branch target: update_as_path_suffix_matches_as4() segment-skip while branch.
+   Expected: restore succeeds, AS4_PATH removed, rebuilt AS_PATH keeps prefix and
+   restores suffix ASN correctly. */
+LIBBGP_TEST(update_restore_suffix_match_skips_empty_as4_segments_rfc6793)
+{
+    uint32_t as_path_asns[] = { 64512u, LIBBGP_AS_TRANS };
+    libbgp_as_path_segment_t *as4_segments;
+    uint32_t *as4_asns;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, as_path_asns, 2u);
+    libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    as4_path->data.as_path.is_4b = true;
+    as4_path->data.as_path.segment_count = 2u;
+    as4_segments = (libbgp_as_path_segment_t *)calloc(2u, sizeof(as4_segments[0]));
+    LIBBGP_ASSERT(as4_segments != NULL);
+    as4_asns = (uint32_t *)calloc(1u, sizeof(as4_asns[0]));
+    LIBBGP_ASSERT(as4_asns != NULL);
+    as4_asns[0] = 65551u;
+    as4_segments[0].type = 2u;
+    as4_segments[0].asn_count = 0u;
+    as4_segments[0].asns = NULL;
+    as4_segments[1].type = 2u;
+    as4_segments[1].asn_count = 1u;
+    as4_segments[1].asns = as4_asns;
+    as4_path->data.as_path.segments = as4_segments;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(3u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(0u, found->data.as_path.segments[1].asn_count);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[2].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[2].asns[0]);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1: path attribute semantic types are unique in one UPDATE.
+   Branch target: duplicate mandatory AS_PATH rejection via parse attr assembly
+   (update_add_attr_with_cap through libbgp_update_parse_as4) with state
+   preservation on failure.
+   Expected: EXISTS and previously parsed message remains unchanged. */
+LIBBGP_TEST(update_parse_rejects_duplicate_as_path_preserves_state_rfc4271)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t duplicate_as_path[] = {
+        0u, 0u,
+        0u, 18u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfdu, 0xe8u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfdu, 0xe9u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 61u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS,
+        libbgp_update_parse(&msg, duplicate_as_path, sizeof(duplicate_as_path), &used));
+    LIBBGP_ASSERT_EQ_U64(61u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §4.3/§5.1 + RFC 7606 §2: malformed AS_PATH segment length (declared
+   ASN count exceeds payload) must be rejected, and failed parse must preserve
+   prior caller state.
+   Branch target: parse attr error return from libbgp_update_parse_as4().
+   Expected: BAD_LEN and unchanged pre-existing message content. */
+LIBBGP_TEST(update_parse_rejects_truncated_as_path_sequence_preserves_state_rfc4271_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_as_path[] = {
+        0u, 0u,
+        0u, 8u,
+        0x40u, 2u, 5u, 2u, 2u, 0xfdu, 0xe8u, 0xfdu
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 62u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, malformed_as_path, sizeof(malformed_as_path), &used));
+    LIBBGP_ASSERT_EQ_U64(62u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §4.3/§5.1 + RFC 7606 §2: AS_SET segment header without required
+   ASN payload is malformed and must be rejected without clobbering old state.
+   Branch target: parse malformed AS_PATH segment boundary in attr loop.
+   Expected: BAD_LEN and caller-visible state preserved. */
+LIBBGP_TEST(update_parse_rejects_as_set_header_without_payload_preserves_state_rfc4271_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_as_set[] = {
+        0u, 0u,
+        0u, 5u,
+        0x40u, 2u, 2u, 1u, 1u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 63u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, malformed_as_set, sizeof(malformed_as_set), &used));
+    LIBBGP_ASSERT_EQ_U64(63u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4760 §3 + RFC 7606 §2: malformed MP_UNREACH_NLRI length encoding
+   (prefix payload shorter than stated prefix length) must be rejected and must
+   not overwrite previously parsed state.
+   Branch target: parse attr failure path in libbgp_update_parse_as4().
+   Expected: BAD_LEN and old message state unchanged. */
+LIBBGP_TEST(update_parse_rejects_truncated_mp_unreach_prefix_preserves_state_rfc4760_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_mp_unreach[] = {
+        0u, 0u,
+        0u, 10u,
+        0x80u, 15u, 7u,
+        0u, 2u, 1u,
+        32u, 0x20u, 0x01u, 0x0du
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 64u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, malformed_mp_unreach, sizeof(malformed_mp_unreach), &used));
+    LIBBGP_ASSERT_EQ_U64(64u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4760 §3 + RFC 7606 §2: MP_REACH_NLRI next-hop length must match encoded
+   payload; truncated next-hop is malformed and must be rejected while keeping
+   previous caller-visible state intact.
+   Branch target: malformed MP_REACH parse error return path.
+   Expected: BAD_LEN and state preservation. */
+LIBBGP_TEST(update_parse_rejects_truncated_mp_reach_nexthop_preserves_state_rfc4760_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_mp_reach[] = {
+        0u, 0u,
+        0u, 23u,
+        0x80u, 14u, 20u,
+        0u, 2u, 1u, 16u,
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 65u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, malformed_mp_reach, sizeof(malformed_mp_reach), &used));
+    LIBBGP_ASSERT_EQ_U64(65u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: sparse AS4 restoration replaces AS_TRANS positions, and
+   empty AS4_PATH segments are legal delimiters that must be skipped safely.
+   Branch target: update_restore_as_path_sparse() empty-segment skip loop.
+   Expected: successful restore, AS4_PATH removed, AS_PATH preserved except
+   positional AS_TRANS replacement. */
+LIBBGP_TEST(update_restore_sparse_skips_empty_as4_segment_rfc6793)
+{
+    uint32_t as_path_asns[] = { 64512u, LIBBGP_AS_TRANS, 64513u };
+    libbgp_as_path_segment_t *as4_segments;
+    uint32_t *as4_asns;
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, as_path_asns, 3u);
+    libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    as4_path->data.as_path.is_4b = true;
+    as4_path->data.as_path.segment_count = 2u;
+    as4_segments = (libbgp_as_path_segment_t *)calloc(2u, sizeof(as4_segments[0]));
+    LIBBGP_ASSERT(as4_segments != NULL);
+    as4_asns = (uint32_t *)calloc(1u, sizeof(as4_asns[0]));
+    LIBBGP_ASSERT(as4_asns != NULL);
+    as4_asns[0] = 65551u;
+    as4_segments[0].type = 2u;
+    as4_segments[0].asn_count = 0u;
+    as4_segments[0].asns = NULL;
+    as4_segments[1].type = 2u;
+    as4_segments[1].asn_count = 1u;
+    as4_segments[1].asns = as4_asns;
+    as4_path->data.as_path.segments = as4_segments;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(3u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[0].asns[1]);
+    LIBBGP_ASSERT_EQ_U64(64513u, found->data.as_path.segments[0].asns[2]);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: AS4_PATH is only required when downgraded 2-octet AS_PATH
+   loses 4-octet information. Empty 4-octet AS_PATH has no loss and should not
+   retain stale AS4_PATH shadow state.
+   Branch target: downgrade guard path where AS_PATH has zero segments and
+   update_path_needs_as4_shadow() returns false.
+   Expected: successful downgrade, AS_PATH becomes 2-octet mode, AS4_PATH removed. */
+LIBBGP_TEST(update_downgrade_empty_4byte_as_path_removes_as4_shadow_rfc6793)
+{
+    uint32_t as4_asns[] = { 65551u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, as4_asns, 1u);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    as_path->data.as_path.is_4b = true;
+    as_path->data.as_path.segment_count = 0u;
+    as_path->data.as_path.segments = NULL;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_downgrade_as_path(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(!found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(0u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT(found->data.as_path.segments == NULL);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.attr_count);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §4.3 + RFC 7606 §2: when a later attribute in the attribute block
+   has an invalid declared length, parse must fail and keep caller state from
+   the previous successful UPDATE parse.
+   Branch target: update_parse_attrs nested parse error after one valid attr.
+   Expected: BAD_LEN and preserved pre-existing message state. */
+LIBBGP_TEST(update_parse_rejects_truncated_second_attr_after_valid_attr_preserves_state_rfc4271_7606)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t malformed_body[] = {
+        0u, 0u,
+        0u, 11u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 5u, 2u, 1u, 0xfdu, 0xe8u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 91u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_update_parse(&msg, malformed_body, sizeof(malformed_body), &used));
+    LIBBGP_ASSERT_EQ_U64(91u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1: path attribute semantic types are unique regardless of order.
+   Branch target: duplicate ORIGIN rejection when duplicate appears after a
+   complete mandatory triplet.
+   Expected: EXISTS and preserved pre-existing parsed message state. */
+LIBBGP_TEST(update_parse_rejects_duplicate_origin_after_mandatory_triplet_preserves_state_rfc4271)
+{
+    const uint8_t stable_body[] = {
+        0u, 4u,
+        24u, 198u, 51u, 100u,
+        0u, 0u
+    };
+    const uint8_t duplicate_origin_body[] = {
+        0u, 0u,
+        0u, 22u,
+        0x40u, 1u, 1u, 0u,
+        0x40u, 2u, 4u, 2u, 1u, 0xfdu, 0xe8u,
+        0x40u, 3u, 4u, 203u, 0u, 113u, 1u,
+        0x40u, 1u, 1u, 2u
+    };
+    size_t used = 0u;
+    libbgp_update_msg_t msg;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_parse(&msg, stable_body, sizeof(stable_body), &used));
+    LIBBGP_ASSERT_EQ_U64(sizeof(stable_body), used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+
+    used = 92u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_EXISTS,
+        libbgp_update_parse(&msg, duplicate_origin_body, sizeof(duplicate_origin_body), &used));
+    LIBBGP_ASSERT_EQ_U64(92u, used);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.withdrawn_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.attr_count);
+    LIBBGP_ASSERT_EQ_U64(0u, msg.nlri_count);
+    LIBBGP_ASSERT_EQ_U64(24u, msg.withdrawn[0].len);
+
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: AS4_PATH shadow data must be structurally valid before
+   prepend merge. Malformed shadow path must reject prepend and preserve state.
+   Branch target: libbgp_update_prepend_asn() guard where update_count_path_asns
+   fails for AS4_PATH before rebuild.
+   Expected: BAD_LEN, unchanged AS_PATH/AS4_PATH and attr_count. */
+LIBBGP_TEST(update_prepend_rejects_malformed_as4_shadow_state_preserves_paths_rfc6793)
+{
+    uint32_t as_path_asns[] = { 64512u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, as_path_asns, 1u);
+    libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
+    libbgp_as_path_segment_t *segments;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    as4_path->data.as_path.is_4b = true;
+    as4_path->data.as_path.segment_count = 1u;
+    segments = (libbgp_as_path_segment_t *)calloc(1u, sizeof(segments[0]));
+    LIBBGP_ASSERT(segments != NULL);
+    segments[0].type = 2u;
+    segments[0].asn_count = 1u;
+    segments[0].asns = NULL;
+    as4_path->data.as_path.segments = segments;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_update_prepend_asn(&msg, 70000u, false));
+    LIBBGP_ASSERT_EQ_U64(2u, msg.attr_count);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH) == as_path);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == as4_path);
+    LIBBGP_ASSERT_EQ_U64(1u, as_path->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(1u, as_path->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, as_path->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(1u, as4_path->data.as_path.segment_count);
+    LIBBGP_ASSERT(as4_path->data.as_path.segments[0].asns == NULL);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: sparse restoration uses AS_TRANS replacement by position,
+   and must handle normal (non-empty) AS4_PATH segments without skip-loop
+   over-advancing.
+   Branch target: sparse restore path with non-empty AS4 segment and suffix
+   mismatch trigger.
+   Expected: restore succeeds, AS_TRANS replaced, AS4_PATH removed. */
+LIBBGP_TEST(update_restore_sparse_nonempty_as4_segment_replaces_as_trans_rfc6793)
+{
+    uint32_t as_path_asns[] = { LIBBGP_AS_TRANS, 64512u };
+    uint32_t as4_asns[] = { 65551u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, false, as_path_asns, 2u);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, as4_asns, 1u);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[1]);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.2: when only a 2-octet AGGREGATOR is present, restore should
+   upgrade representation to 4-octet mode without fabricating AS4_AGGREGATOR.
+   Branch target: restore_aggregator path where AS4_AGGREGATOR is absent.
+   Expected: AGGREGATOR preserved with is_4b=true and no shadow attr created. */
+LIBBGP_TEST(update_restore_aggregator_without_shadow_keeps_values_rfc6793)
+{
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *aggregator = make_aggregator_attr(LIBBGP_PATTR_AGGREGATOR, 64512u, update_ip4(192u, 0u, 2u, 1u), false);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(aggregator != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, aggregator));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_aggregator(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AGGREGATOR);
+    LIBBGP_ASSERT(found == aggregator);
+    LIBBGP_ASSERT(found->data.aggregator.is_4b);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.aggregator.asn);
+    LIBBGP_ASSERT_EQ_U64(update_ip4(192u, 0u, 2u, 1u), found->data.aggregator.router_id);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_AGGREGATOR) == NULL);
+
+    libbgp_pattr_unref(aggregator);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.2: 2-octet AGGREGATOR values that already fit 16 bits must not
+   emit AS4_AGGREGATOR on downgrade.
+   Branch target: downgrade_aggregator branch where no shadow attr is needed.
+   Expected: AGGREGATOR kept in 2-octet form, no AS4_AGGREGATOR emitted. */
+LIBBGP_TEST(update_downgrade_aggregator_without_shadow_for_2byte_asn_rfc6793)
+{
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *aggregator = make_aggregator_attr(LIBBGP_PATTR_AGGREGATOR, 64512u, update_ip4(198u, 51u, 100u, 1u), false);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(aggregator != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, aggregator));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_downgrade_aggregator(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AGGREGATOR);
+    LIBBGP_ASSERT(found == aggregator);
+    LIBBGP_ASSERT(!found->data.aggregator.is_4b);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.aggregator.asn);
+    LIBBGP_ASSERT_EQ_U64(update_ip4(198u, 51u, 100u, 1u), found->data.aggregator.router_id);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_AGGREGATOR) == NULL);
+
+    libbgp_pattr_unref(aggregator);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4271 §5.1.2 + RFC 6793 §4.2.3: prepending a new AS to AS_PATH must
+   create/extend an AS_SEQUENCE and must not rewrite an existing leading AS_SET.
+   Branch target: prepend path where first segment type is AS_SET (type 1).
+   Expected: new AS_SEQUENCE inserted before AS_SET; original AS_SET unchanged. */
+LIBBGP_TEST(update_prepend_inserts_sequence_before_leading_as_set_rfc4271_6793)
+{
+    uint32_t set_asns[] = { 64512u };
+    const uint32_t *asns_ptrs[] = { set_asns };
+    size_t counts[] = { 1u };
+    uint8_t types[] = { 1u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr_segments(
+        LIBBGP_PATTR_AS_PATH, false, types, asns_ptrs, counts, 1u);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_prepend_asn(&msg, 64511u, false));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segments[0].type);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64511u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[1].type);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[1].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[1].asns[0]);
+
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: suffix rebuild must tolerate zero-count prefix segments and
+   only copy non-empty prefix data before appending AS4 suffix.
+   Branch target: rebuild path where a prefix segment contributes keep=0.
+   Expected: restore succeeds, zero-count prefix segment skipped, AS4_PATH removed. */
+LIBBGP_TEST(update_restore_rebuild_skips_zero_count_prefix_segment_rfc6793)
+{
+    uint32_t path_seg1[] = { 64512u, LIBBGP_AS_TRANS };
+    uint32_t as4_asns[] = { 65551u };
+    const uint32_t *path_asns[] = { NULL, path_seg1 };
+    size_t path_counts[] = { 0u, 2u };
+    uint8_t path_types[] = { 2u, 2u };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = make_as_path_attr_segments(
+        LIBBGP_PATTR_AS_PATH, false, path_types, path_asns, path_counts, 2u);
+    libbgp_pattr_t *as4_path = make_as_path_attr(LIBBGP_PATTR_AS4_PATH, true, as4_asns, 1u);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(2u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(64512u, found->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(1u, found->data.as_path.segments[1].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65551u, found->data.as_path.segments[1].asns[0]);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 6793 §4.2.3: empty AS_PATH and empty AS4_PATH are a legal no-op restore
+   case and should clear AS4 shadow metadata without error.
+   Branch target: rebuild path with out_count==0 allocation skip.
+   Expected: restore OK, AS_PATH remains empty in 4-byte mode, AS4_PATH removed. */
+LIBBGP_TEST(update_restore_empty_as_path_and_as4_path_rfc6793)
+{
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
+    libbgp_pattr_t *found;
+
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
+    as_path->data.as_path.is_4b = false;
+    as_path->data.as_path.segment_count = 0u;
+    as_path->data.as_path.segments = NULL;
+    as4_path->data.as_path.is_4b = true;
+    as4_path->data.as_path.segment_count = 0u;
+    as4_path->data.as_path.segments = NULL;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as4_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_restore_as_path(&msg));
+
+    found = libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS_PATH);
+    LIBBGP_ASSERT(found != NULL);
+    LIBBGP_ASSERT(found->data.as_path.is_4b);
+    LIBBGP_ASSERT_EQ_U64(0u, found->data.as_path.segment_count);
+    LIBBGP_ASSERT(found->data.as_path.segments == NULL);
+    LIBBGP_ASSERT(libbgp_update_find_attr(&msg, LIBBGP_PATTR_AS4_PATH) == NULL);
+    LIBBGP_ASSERT_EQ_U64(1u, msg.attr_count);
+
+    libbgp_pattr_unref(as4_path);
+    libbgp_pattr_unref(as_path);
+    libbgp_update_destroy(&msg);
+}
+
+/* RFC 4760 §3: MP_REACH_NLRI with zero NLRI entries carries no reachable NLRI
+   contribution for mandatory-attribute checks.
+   Branch target: update_mp_reach_has_nlri() false branch with MP_REACH attr.
+   Expected: validate succeeds when ORIGIN+AS_PATH are present and nlri_count=0. */
+LIBBGP_TEST(update_validate_treats_mp_reach_without_nlri_as_non_nlri_rfc4760)
+{
+    uint32_t asns[] = { 64512u };
+    const uint8_t nexthop[] = {
+        0x20u, 0x01u, 0x0du, 0xb8u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u, 0u, 0u, 0u, 1u
+    };
+    libbgp_update_msg_t msg;
+    libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+    libbgp_pattr_t *as_path = make_as_path_attr(LIBBGP_PATTR_AS_PATH, true, asns, 1u);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+
+    LIBBGP_ASSERT(origin != NULL);
+    LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    origin->data.origin.origin = 0u;
+    memcpy(mp_reach->data.mp_reach_ipv6.nexthop, nexthop, sizeof(nexthop));
+    mp_reach->data.mp_reach_ipv6.nexthop_len = sizeof(nexthop);
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+    mp_reach->data.mp_reach_ipv6.nlri_count = 0u;
+
+    libbgp_update_init(&msg);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, origin));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, as_path));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_add_attr(&msg, mp_reach));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_update_validate(&msg));
+
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(origin);
+    libbgp_update_destroy(&msg);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -3336,6 +4361,32 @@ int main(void)
         { "update_restore_rejects_invalid_as4_segment_type_rfc6793", update_restore_rejects_invalid_as4_segment_type_rfc6793 },
         { "update_parse_mp_reach_unsupported_afi_safi_becomes_unknown_rfc4760", update_parse_mp_reach_unsupported_afi_safi_becomes_unknown_rfc4760 },
         { "update_parse_malformed_as_path_preserves_state_rfc7606_style", update_parse_malformed_as_path_preserves_state_rfc7606_style },
+        { "update_parse_rejects_bad_nlri_len_preserves_state_rfc7606", update_parse_rejects_bad_nlri_len_preserves_state_rfc7606 },
+        { "update_parse_rejects_duplicate_next_hop_preserves_state_rfc4271", update_parse_rejects_duplicate_next_hop_preserves_state_rfc4271 },
+        { "update_parse_rejects_ipv4_nlri_missing_next_hop_preserves_state_rfc4271", update_parse_rejects_ipv4_nlri_missing_next_hop_preserves_state_rfc4271 },
+        { "update_write_rejects_malformed_nlri_len_after_validate_rfc4271", update_write_rejects_malformed_nlri_len_after_validate_rfc4271 },
+        { "update_write_rejects_total_attr_len_over_65535_rfc4271", update_write_rejects_total_attr_len_over_65535_rfc4271 },
+        { "update_prepend_rejects_as4_path_longer_than_original_path_rfc6793", update_prepend_rejects_as4_path_longer_than_original_path_rfc6793 },
+        { "update_parse_rejects_malformed_mp_reach_after_mp_unreach_preserves_state_rfc4760_7606", update_parse_rejects_malformed_mp_reach_after_mp_unreach_preserves_state_rfc4760_7606 },
+        { "update_write_rejects_invalid_origin_value_after_validate_rfc4271", update_write_rejects_invalid_origin_value_after_validate_rfc4271 },
+        { "update_restore_suffix_match_skips_empty_as4_segments_rfc6793", update_restore_suffix_match_skips_empty_as4_segments_rfc6793 },
+        { "update_parse_rejects_duplicate_as_path_preserves_state_rfc4271", update_parse_rejects_duplicate_as_path_preserves_state_rfc4271 },
+        { "update_parse_rejects_truncated_as_path_sequence_preserves_state_rfc4271_7606", update_parse_rejects_truncated_as_path_sequence_preserves_state_rfc4271_7606 },
+        { "update_parse_rejects_as_set_header_without_payload_preserves_state_rfc4271_7606", update_parse_rejects_as_set_header_without_payload_preserves_state_rfc4271_7606 },
+        { "update_parse_rejects_truncated_mp_unreach_prefix_preserves_state_rfc4760_7606", update_parse_rejects_truncated_mp_unreach_prefix_preserves_state_rfc4760_7606 },
+        { "update_parse_rejects_truncated_mp_reach_nexthop_preserves_state_rfc4760_7606", update_parse_rejects_truncated_mp_reach_nexthop_preserves_state_rfc4760_7606 },
+        { "update_restore_sparse_skips_empty_as4_segment_rfc6793", update_restore_sparse_skips_empty_as4_segment_rfc6793 },
+        { "update_downgrade_empty_4byte_as_path_removes_as4_shadow_rfc6793", update_downgrade_empty_4byte_as_path_removes_as4_shadow_rfc6793 },
+        { "update_parse_rejects_truncated_second_attr_after_valid_attr_preserves_state_rfc4271_7606", update_parse_rejects_truncated_second_attr_after_valid_attr_preserves_state_rfc4271_7606 },
+        { "update_parse_rejects_duplicate_origin_after_mandatory_triplet_preserves_state_rfc4271", update_parse_rejects_duplicate_origin_after_mandatory_triplet_preserves_state_rfc4271 },
+        { "update_prepend_rejects_malformed_as4_shadow_state_preserves_paths_rfc6793", update_prepend_rejects_malformed_as4_shadow_state_preserves_paths_rfc6793 },
+        { "update_restore_sparse_nonempty_as4_segment_replaces_as_trans_rfc6793", update_restore_sparse_nonempty_as4_segment_replaces_as_trans_rfc6793 },
+        { "update_restore_aggregator_without_shadow_keeps_values_rfc6793", update_restore_aggregator_without_shadow_keeps_values_rfc6793 },
+        { "update_downgrade_aggregator_without_shadow_for_2byte_asn_rfc6793", update_downgrade_aggregator_without_shadow_for_2byte_asn_rfc6793 },
+        { "update_prepend_inserts_sequence_before_leading_as_set_rfc4271_6793", update_prepend_inserts_sequence_before_leading_as_set_rfc4271_6793 },
+        { "update_restore_rebuild_skips_zero_count_prefix_segment_rfc6793", update_restore_rebuild_skips_zero_count_prefix_segment_rfc6793 },
+        { "update_restore_empty_as_path_and_as4_path_rfc6793", update_restore_empty_as_path_and_as4_path_rfc6793 },
+        { "update_validate_treats_mp_reach_without_nlri_as_non_nlri_rfc4760", update_validate_treats_mp_reach_without_nlri_as_non_nlri_rfc4760 },
 
     };
 
