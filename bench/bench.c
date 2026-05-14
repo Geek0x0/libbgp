@@ -3,7 +3,9 @@
 #include "libbgp/event.h"
 #include "libbgp/packet.h"
 #include "libbgp/prefix4.h"
+#include "libbgp/prefix6.h"
 #include "libbgp/rib4.h"
+#include "libbgp/rib6.h"
 #include "libbgp/sink.h"
 #include "libbgp/update.h"
 #include "../src/rib_internal.h"
@@ -491,6 +493,29 @@ static libbgp_prefix4_t bench_route_prefix4(size_t index)
         24u);
 }
 
+static libbgp_prefix6_t bench_route_prefix6(size_t index)
+{
+    libbgp_prefix6_t prefix;
+
+    memset(&prefix, 0, sizeof(prefix));
+    prefix.addr[0] = 0x20u;
+    prefix.addr[1] = 0x01u;
+    prefix.addr[2] = 0x0du;
+    prefix.addr[3] = 0xb8u;
+    prefix.addr[6] = (uint8_t)(index >> 8);
+    prefix.addr[7] = (uint8_t)index;
+    prefix.len = 64u;
+    return prefix;
+}
+
+static void bench_dest6(size_t index, uint8_t out[16])
+{
+    libbgp_prefix6_t prefix = bench_route_prefix6(index);
+
+    memcpy(out, prefix.addr, sizeof(prefix.addr));
+    out[15] = (uint8_t)(index | 1u);
+}
+
 /* 详细的RIB lookup延迟分析 - 可配置规模 */
 static int bench_rib_lookup_detailed(size_t num_routes)
 {
@@ -562,6 +587,105 @@ static int bench_rib_lookup_detailed(size_t num_routes)
     return 0;
 }
 
+static int bench_rib6_lookup_detailed(size_t num_routes, size_t lookups)
+{
+    libbgp_rib6_t rib;
+    const libbgp_rib6_route_t *found = NULL;
+    static const uint8_t next_hop[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0xffu, 0xffu };
+    uint8_t (*dests)[16];
+    size_t i;
+    uint64_t start;
+    uint64_t elapsed;
+
+    if (num_routes == 0u || libbgp_rib6_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+    if (lookups > SIZE_MAX / sizeof(*dests)) {
+        libbgp_rib6_destroy(&rib);
+        return 1;
+    }
+    dests = (uint8_t (*)[16])malloc(lookups * sizeof(*dests));
+    if (dests == NULL) {
+        libbgp_rib6_destroy(&rib);
+        return 1;
+    }
+    for (i = 0u; i < num_routes; i++) {
+        libbgp_prefix6_t prefix = bench_route_prefix6(i);
+
+        if (libbgp_rib6_insert_local(&rib, &prefix, next_hop, 100) != LIBBGP_OK) {
+            free(dests);
+            libbgp_rib6_destroy(&rib);
+            return 1;
+        }
+    }
+    for (i = 0u; i < lookups; i++) {
+        bench_dest6(i % num_routes, dests[i]);
+    }
+
+    start = now_ns();
+    for (i = 0u; i < lookups; i++) {
+        if (libbgp_rib6_lookup(&rib, dests[i], &found) == LIBBGP_OK && found != NULL) {
+            bench_sink_value += found->local_pref;
+        }
+    }
+    elapsed = now_ns() - start;
+    printf("rib6 lookup @ %-8zu %8zu ops %10.3f ms %10.1f ns/op\n",
+           num_routes,
+           lookups,
+           (double)elapsed / 1000000.0,
+           lookups == 0u ? 0.0 : (double)elapsed / (double)lookups);
+    free(dests);
+    libbgp_rib6_destroy(&rib);
+    return 0;
+}
+
+static int bench_rib4_maintenance_after_radix(size_t routes)
+{
+    libbgp_rib4_t rib;
+    size_t i;
+    uint64_t start;
+    uint64_t insert_elapsed;
+    uint64_t discard_elapsed;
+
+    if (routes == 0u || libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        return 1;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < routes; i++) {
+        libbgp_prefix4_t prefix = bench_route_prefix4(i);
+        libbgp_rib4_route_t route = route4(prefix, 42u, 100u);
+
+        if (libbgp_rib4_insert(&rib, &route) != LIBBGP_OK) {
+            libbgp_rib4_destroy(&rib);
+            return 1;
+        }
+    }
+    insert_elapsed = now_ns() - start;
+
+    start = now_ns();
+    if (libbgp_rib4_discard(&rib, 42u) != LIBBGP_OK) {
+        libbgp_rib4_destroy(&rib);
+        return 1;
+    }
+    discard_elapsed = now_ns() - start;
+    bench_sink_value += libbgp_rib4_route_count(&rib);
+
+    printf("rib4 insert @ %-8zu %8zu ops %10.3f ms %10.1f ns/op\n",
+           routes,
+           routes,
+           (double)insert_elapsed / 1000000.0,
+           (double)insert_elapsed / (double)routes);
+    printf("rib4 discard @ %-7zu %8zu ops %10.3f ms %10.1f ns/op\n",
+           routes,
+           routes,
+           (double)discard_elapsed / 1000000.0,
+           (double)discard_elapsed / (double)routes);
+
+    libbgp_rib4_destroy(&rib);
+    return 0;
+}
+
 /* HashMap性能分析 - 插入扩容跟踪 */
 static int bench_hashmap_load_factor(void)
 {
@@ -619,6 +743,89 @@ static int bench_hashmap_load_factor(void)
     free(insert_times);
     libbgp_rib4_destroy(&rib);
     bench_sink_value += min_time;
+    return 0;
+}
+
+static int bench_sink_pop_packets(libbgp_sink_t *sink, libbgp_packet_t *pkt, size_t count)
+{
+    size_t i;
+
+    for (i = 0u; i < count; i++) {
+        if (libbgp_sink_pop(sink, pkt) != LIBBGP_OK) {
+            return 1;
+        }
+        bench_sink_value += (uint64_t)pkt->type;
+        libbgp_packet_destroy(pkt);
+        libbgp_packet_init(pkt);
+    }
+    return 0;
+}
+
+static int bench_sink_fragmented_feed(size_t cycles)
+{
+    enum {
+        KEEPALIVE_SPLIT = 10u,
+        FIRST_FRAGMENT = LIBBGP_BGP_HEADER_LEN + KEEPALIVE_SPLIT,
+        SECOND_FRAGMENT = (LIBBGP_BGP_HEADER_LEN - KEEPALIVE_SPLIT) + (2u * LIBBGP_BGP_HEADER_LEN)
+    };
+    uint8_t first[FIRST_FRAGMENT];
+    uint8_t second[SECOND_FRAGMENT];
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+    size_t i;
+    uint64_t start;
+    uint64_t elapsed;
+    size_t packets;
+
+    if (cycles > SIZE_MAX / 4u) {
+        return 1;
+    }
+    packets = cycles * 4u;
+
+    memcpy(first, LIBBGP_FIXTURE_KEEPALIVE, BENCH_KEEPALIVE_BYTES);
+    memcpy(first + BENCH_KEEPALIVE_BYTES, LIBBGP_FIXTURE_KEEPALIVE, 10u);
+    memcpy(second, LIBBGP_FIXTURE_KEEPALIVE + 10u, BENCH_KEEPALIVE_BYTES - 10u);
+    memcpy(second + (BENCH_KEEPALIVE_BYTES - 10u), LIBBGP_FIXTURE_KEEPALIVE, BENCH_KEEPALIVE_BYTES);
+    memcpy(
+        second + (BENCH_KEEPALIVE_BYTES - 10u) + BENCH_KEEPALIVE_BYTES,
+        LIBBGP_FIXTURE_KEEPALIVE,
+        BENCH_KEEPALIVE_BYTES);
+
+    if (libbgp_sink_init(&sink) != LIBBGP_OK) {
+        return 1;
+    }
+    libbgp_packet_init(&pkt);
+
+    if (libbgp_sink_feed(&sink, first, sizeof(first)) != LIBBGP_OK ||
+        bench_sink_pop_packets(&sink, &pkt, 1u) != 0 ||
+        libbgp_sink_feed(&sink, second, sizeof(second)) != LIBBGP_OK ||
+        bench_sink_pop_packets(&sink, &pkt, 3u) != 0) {
+        libbgp_packet_destroy(&pkt);
+        libbgp_sink_destroy(&sink);
+        return 1;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < cycles; i++) {
+        if (libbgp_sink_feed(&sink, first, sizeof(first)) != LIBBGP_OK ||
+            bench_sink_pop_packets(&sink, &pkt, 1u) != 0) {
+            libbgp_packet_destroy(&pkt);
+            libbgp_sink_destroy(&sink);
+            return 1;
+        }
+
+        if (libbgp_sink_feed(&sink, second, sizeof(second)) != LIBBGP_OK ||
+            bench_sink_pop_packets(&sink, &pkt, 3u) != 0) {
+            libbgp_packet_destroy(&pkt);
+            libbgp_sink_destroy(&sink);
+            return 1;
+        }
+    }
+    elapsed = now_ns() - start;
+
+    print_result("sink fragmented memmove", packets, elapsed);
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
     return 0;
 }
 
@@ -695,7 +902,12 @@ int main(void)
     printf("\n========== Detailed Performance Analysis ==========\n");
     rc |= bench_rib_lookup_detailed(1000);
     rc |= bench_rib_lookup_detailed(10000);
+    rc |= bench_rib6_lookup_detailed(1000, small);
+    rc |= bench_rib6_lookup_detailed(10000, small);
+    rc |= bench_rib4_maintenance_after_radix(1000);
+    rc |= bench_rib4_maintenance_after_radix(10000);
     rc |= bench_hashmap_load_factor();
+    rc |= bench_sink_fragmented_feed(small);
     rc |= bench_sink_throughput_analysis();
     
     printf("bench guard: %" PRIu64 "\n", bench_sink_value);

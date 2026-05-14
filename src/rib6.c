@@ -22,9 +22,22 @@ typedef struct rib6_source_entry {
     size_t cap;
 } rib6_source_entry_t;
 
+typedef struct rib6_lpm_key {
+    libbgp_prefix6_t prefix;
+} rib6_lpm_key_t;
+
+typedef struct rib6_lpm_entry {
+    libbgp_prefix6_t prefix;
+    bgp_hashmap_entry_t **entries;
+    size_t count;
+    size_t cap;
+    libbgp_rib6_route_t *best;
+} rib6_lpm_entry_t;
+
 typedef struct rib6_impl {
     bgp_hashmap_t routes;
     bgp_hashmap_t sources;
+    bgp_hashmap_t lpm_groups;
     bgp_radix6_t lpm_tree;
     bgp_lock_t lock;
     uint64_t next_update_id;
@@ -75,6 +88,46 @@ static bool rib6_source_key_eq(const void *a, const void *b, void *ctx)
     BGP_UNUSED(ctx);
     return ((const rib6_source_key_t *)a)->source_router_id ==
            ((const rib6_source_key_t *)b)->source_router_id;
+}
+
+static libbgp_prefix6_t rib6_lpm_normalize_prefix(const libbgp_prefix6_t *prefix)
+{
+    libbgp_prefix6_t normalized;
+    uint8_t mask[16];
+    size_t i;
+
+    memset(&normalized, 0, sizeof(normalized));
+    if (prefix == NULL || prefix->len > 128u) {
+        return normalized;
+    }
+    normalized = *prefix;
+    libbgp_cidr6_to_mask(prefix->len, mask);
+    for (i = 0u; i < sizeof(normalized.addr); i++) {
+        normalized.addr[i] &= mask[i];
+    }
+    return normalized;
+}
+
+static uint64_t rib6_lpm_hash(const void *key, void *ctx)
+{
+    const rib6_lpm_key_t *k = (const rib6_lpm_key_t *)key;
+    uint64_t h = k->prefix.len;
+    size_t i;
+
+    BGP_UNUSED(ctx);
+    for (i = 0u; i < sizeof(k->prefix.addr); i++) {
+        h = (h ^ k->prefix.addr[i]) * 1099511628211ull;
+    }
+    return rib6_hash_mix(h);
+}
+
+static bool rib6_lpm_key_eq(const void *a, const void *b, void *ctx)
+{
+    const rib6_lpm_key_t *ka = (const rib6_lpm_key_t *)a;
+    const rib6_lpm_key_t *kb = (const rib6_lpm_key_t *)b;
+
+    BGP_UNUSED(ctx);
+    return libbgp_prefix6_eq(&ka->prefix, &kb->prefix);
 }
 
 static int bgp_router_id_cmp(uint32_t a, uint32_t b)
@@ -160,6 +213,18 @@ static void rib6_entry_free(void *key, void *value, void *ctx)
 static void rib6_source_entry_free(void *key, void *value, void *ctx)
 {
     rib6_source_entry_t *entry = (rib6_source_entry_t *)value;
+
+    BGP_UNUSED(ctx);
+    bgp_free(key);
+    if (entry != NULL) {
+        bgp_free(entry->entries);
+        bgp_free(entry);
+    }
+}
+
+static void rib6_lpm_entry_free(void *key, void *value, void *ctx)
+{
+    rib6_lpm_entry_t *entry = (rib6_lpm_entry_t *)value;
 
     BGP_UNUSED(ctx);
     bgp_free(key);
@@ -430,14 +495,6 @@ static bool rib6_addr_matches(const libbgp_prefix6_t *prefix, const uint8_t dest
     return true;
 }
 
-static bool rib6_same_lpm_prefix(const libbgp_prefix6_t *a, const libbgp_prefix6_t *b)
-{
-    if (a == NULL || b == NULL || a->len > 128u || a->len != b->len) {
-        return false;
-    }
-    return rib6_addr_matches(a, b->addr);
-}
-
 static libbgp_rib6_route_t *rib6_find_locked(
     rib6_impl_t *impl,
     uint32_t source_router_id,
@@ -447,18 +504,13 @@ static libbgp_rib6_route_t *rib6_best_exact_locked(
     rib6_impl_t *impl,
     const libbgp_prefix6_t *prefix);
 
-static libbgp_rib6_route_t *rib6_best_lpm_prefix_locked(
+static libbgp_err_t rib6_lpm_index_add_locked(
     rib6_impl_t *impl,
-    const libbgp_prefix6_t *prefix);
+    bgp_hashmap_entry_t *route_entry);
 
-static libbgp_err_t rib6_lpm_update_prefix_locked(
+static void rib6_lpm_index_remove_locked(
     rib6_impl_t *impl,
-    const libbgp_prefix6_t *prefix);
-
-static void rib6_lpm_restore_prefix_locked(
-    rib6_impl_t *impl,
-    const libbgp_prefix6_t *prefix,
-    libbgp_rib6_route_t *previous_best);
+    bgp_hashmap_entry_t *route_entry);
 
 static bool rib6_route_entry_unlink_locked(rib6_impl_t *impl, bgp_hashmap_entry_t *entry)
 {
@@ -521,16 +573,14 @@ static size_t rib6_remove_source_locked(rib6_impl_t *impl, uint32_t source_route
     }
     for (i = 0u; i < source->count; i++) {
         bgp_hashmap_entry_t *entry = source->entries[i];
-        libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)entry->value;
-        libbgp_prefix6_t prefix = route->prefix;
 
         if (rib6_route_entry_unlink_locked(impl, entry)) {
+            rib6_lpm_index_remove_locked(impl, entry);
             if (impl->routes.free_entry != NULL) {
                 impl->routes.free_entry(entry->key, entry->value, impl->routes.ctx);
             }
             bgp_free(entry);
             removed++;
-            (void)rib6_lpm_update_prefix_locked(impl, &prefix);
         }
     }
     (void)bgp_hashmap_remove_one(&impl->sources, &find_key, source);
@@ -565,10 +615,11 @@ static libbgp_err_t rib6_withdraw_locked(
         return LIBBGP_ERR_NOT_FOUND;
     }
     rib6_source_index_remove(impl, match_entry);
+    rib6_lpm_index_remove_locked(impl, match_entry);
     if (bgp_hashmap_remove_one(&impl->routes, &find_key, match) != LIBBGP_OK) {
         return LIBBGP_ERR_NOT_FOUND;
     }
-    return rib6_lpm_update_prefix_locked(impl, prefix);
+    return LIBBGP_OK;
 }
 
 static libbgp_err_t rib6_detach_locked(
@@ -602,8 +653,9 @@ static libbgp_err_t rib6_detach_locked(
             entry->next = NULL;
             impl->routes.len--;
             rib6_source_index_remove(impl, entry);
+            rib6_lpm_index_remove_locked(impl, entry);
             *out_entry = entry;
-            return rib6_lpm_update_prefix_locked(impl, prefix);
+            return LIBBGP_OK;
         }
         link = &entry->next;
     }
@@ -640,8 +692,9 @@ static libbgp_err_t rib6_detach_value_locked(
             entry->next = NULL;
             impl->routes.len--;
             rib6_source_index_remove(impl, entry);
+            rib6_lpm_index_remove_locked(impl, entry);
             *out_entry = entry;
-            return rib6_lpm_update_prefix_locked(impl, prefix);
+            return LIBBGP_OK;
         }
         link = &entry->next;
     }
@@ -651,10 +704,8 @@ static libbgp_err_t rib6_detach_value_locked(
 static libbgp_err_t rib6_attach_detached_locked(rib6_impl_t *impl, bgp_hashmap_entry_t *entry)
 {
     libbgp_rib6_route_t *route;
-    libbgp_rib6_route_t *previous_best;
     libbgp_rib6_route_t *old;
     size_t idx;
-    libbgp_err_t err;
 
     if (impl == NULL || entry == NULL || entry->key == NULL || entry->value == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -664,25 +715,21 @@ static libbgp_err_t rib6_attach_detached_locked(rib6_impl_t *impl, bgp_hashmap_e
     if (old != NULL) {
         return LIBBGP_ERR_EXISTS;
     }
-    previous_best = rib6_best_lpm_prefix_locked(impl, &route->prefix);
-    err = bgp_radix6_insert(
-        &impl->lpm_tree,
-        route->prefix.addr,
-        route->prefix.len,
-        previous_best);
-    if (err != LIBBGP_OK) {
-        return err;
-    }
     entry->hash = rib6_hash(entry->key, NULL);
-    if (rib6_source_index_add(impl, entry) != LIBBGP_OK) {
-        rib6_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
-        return LIBBGP_ERR_NOMEM;
-    }
     idx = (size_t)(entry->hash % (uint64_t)impl->routes.bucket_count);
     entry->next = impl->routes.buckets[idx];
     impl->routes.buckets[idx] = entry;
     impl->routes.len++;
-    return rib6_lpm_update_prefix_locked(impl, &route->prefix);
+    if (rib6_source_index_add(impl, entry) != LIBBGP_OK) {
+        (void)rib6_route_entry_unlink_locked(impl, entry);
+        return LIBBGP_ERR_NOMEM;
+    }
+    if (rib6_lpm_index_add_locked(impl, entry) != LIBBGP_OK) {
+        rib6_source_index_remove(impl, entry);
+        (void)rib6_route_entry_unlink_locked(impl, entry);
+        return LIBBGP_ERR_NOMEM;
+    }
+    return LIBBGP_OK;
 }
 
 static void rib6_detached_entry_free(bgp_hashmap_entry_t *entry)
@@ -745,62 +792,166 @@ static libbgp_rib6_route_t *rib6_best_exact_locked(
     return best;
 }
 
-static libbgp_rib6_route_t *rib6_best_lpm_prefix_locked(
+static rib6_lpm_entry_t *rib6_lpm_group_find_locked(
     rib6_impl_t *impl,
     const libbgp_prefix6_t *prefix)
 {
-    libbgp_rib6_route_t *best = NULL;
-    size_t i;
+    rib6_lpm_key_t find_key;
 
     if (impl == NULL || prefix == NULL || prefix->len > 128u) {
         return NULL;
     }
-    for (i = 0u; i < impl->routes.bucket_count; i++) {
-        bgp_hashmap_entry_t *entry;
+    find_key.prefix = rib6_lpm_normalize_prefix(prefix);
+    return (rib6_lpm_entry_t *)bgp_hashmap_find_first(&impl->lpm_groups, &find_key);
+}
 
-        for (entry = impl->routes.buckets[i]; entry != NULL; entry = entry->next) {
-            libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)entry->value;
+static libbgp_rib6_route_t *rib6_lpm_group_best_locked(const rib6_lpm_entry_t *group)
+{
+    libbgp_rib6_route_t *best = NULL;
+    size_t i;
 
-            if (rib6_same_lpm_prefix(&route->prefix, prefix) &&
-                (best == NULL || rib6_better(route, best))) {
-                best = route;
-            }
+    if (group == NULL) {
+        return NULL;
+    }
+    for (i = 0u; i < group->count; i++) {
+        libbgp_rib6_route_t *route = (libbgp_rib6_route_t *)group->entries[i]->value;
+
+        if (best == NULL || rib6_better(route, best)) {
+            best = route;
         }
     }
     return best;
 }
 
-static libbgp_err_t rib6_lpm_update_prefix_locked(
-    rib6_impl_t *impl,
-    const libbgp_prefix6_t *prefix)
+static void rib6_lpm_group_remove_locked(rib6_impl_t *impl, rib6_lpm_entry_t *group)
 {
-    libbgp_rib6_route_t *best;
-    libbgp_err_t err;
+    rib6_lpm_key_t find_key;
 
-    if (impl == NULL || prefix == NULL || prefix->len > 128u) {
-        return LIBBGP_ERR_INVALID;
+    if (impl == NULL || group == NULL) {
+        return;
     }
-    best = rib6_best_lpm_prefix_locked(impl, prefix);
-    if (best != NULL) {
-        return bgp_radix6_insert(&impl->lpm_tree, prefix->addr, prefix->len, best);
-    }
-    err = bgp_radix6_remove(&impl->lpm_tree, prefix->addr, prefix->len);
-    return err == LIBBGP_ERR_NOT_FOUND ? LIBBGP_OK : err;
+    find_key.prefix = group->prefix;
+    (void)bgp_hashmap_remove_one(&impl->lpm_groups, &find_key, group);
 }
 
-static void rib6_lpm_restore_prefix_locked(
-    rib6_impl_t *impl,
-    const libbgp_prefix6_t *prefix,
-    libbgp_rib6_route_t *previous_best)
+static void rib6_lpm_index_remove_locked(rib6_impl_t *impl, bgp_hashmap_entry_t *route_entry)
 {
-    if (impl == NULL || prefix == NULL || prefix->len > 128u) {
+    libbgp_rib6_route_t *route;
+    rib6_lpm_entry_t *group;
+    size_t i;
+
+    if (impl == NULL || route_entry == NULL || route_entry->value == NULL) {
         return;
     }
-    if (previous_best == NULL) {
-        (void)bgp_radix6_remove(&impl->lpm_tree, prefix->addr, prefix->len);
+    route = (libbgp_rib6_route_t *)route_entry->value;
+    group = rib6_lpm_group_find_locked(impl, &route->prefix);
+    if (group == NULL) {
         return;
     }
-    (void)bgp_radix6_insert(&impl->lpm_tree, prefix->addr, prefix->len, previous_best);
+    for (i = 0u; i < group->count; i++) {
+        if (group->entries[i] == route_entry) {
+            bool removed_best = group->best == route;
+
+            group->count--;
+            group->entries[i] = group->entries[group->count];
+            if (group->count == 0u) {
+                (void)bgp_radix6_remove(&impl->lpm_tree, group->prefix.addr, group->prefix.len);
+                rib6_lpm_group_remove_locked(impl, group);
+                return;
+            }
+            if (removed_best || group->best == NULL) {
+                group->best = rib6_lpm_group_best_locked(group);
+                if (group->best != NULL) {
+                    (void)bgp_radix6_insert(
+                        &impl->lpm_tree,
+                        group->prefix.addr,
+                        group->prefix.len,
+                        group->best);
+                }
+            }
+            return;
+        }
+    }
+}
+
+static libbgp_err_t rib6_lpm_index_add_locked(rib6_impl_t *impl, bgp_hashmap_entry_t *route_entry)
+{
+    libbgp_rib6_route_t *route;
+    rib6_lpm_key_t find_key;
+    rib6_lpm_entry_t *group;
+    bool created = false;
+
+    if (impl == NULL || route_entry == NULL || route_entry->value == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+    route = (libbgp_rib6_route_t *)route_entry->value;
+    find_key.prefix = rib6_lpm_normalize_prefix(&route->prefix);
+    group = (rib6_lpm_entry_t *)bgp_hashmap_find_first(&impl->lpm_groups, &find_key);
+    if (group == NULL) {
+        rib6_lpm_key_t *key;
+
+        key = (rib6_lpm_key_t *)bgp_malloc(sizeof(*key));
+        if (key == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        group = (rib6_lpm_entry_t *)bgp_calloc(1u, sizeof(*group));
+        if (group == NULL) {
+            bgp_free(key);
+            return LIBBGP_ERR_NOMEM;
+        }
+        group->entries = (bgp_hashmap_entry_t **)bgp_malloc(sizeof(*group->entries));
+        if (group->entries == NULL) {
+            bgp_free(group);
+            bgp_free(key);
+            return LIBBGP_ERR_NOMEM;
+        }
+        key->prefix = find_key.prefix;
+        group->prefix = find_key.prefix;
+        group->cap = 1u;
+        if (bgp_hashmap_insert(&impl->lpm_groups, key, group) != LIBBGP_OK) {
+            bgp_free(group->entries);
+            bgp_free(group);
+            bgp_free(key);
+            return LIBBGP_ERR_NOMEM;
+        }
+        created = true;
+    } else if (group->count >= group->cap) {
+        bgp_hashmap_entry_t **next;
+        size_t next_cap = group->cap == 0u ? 1u : group->cap * 2u;
+
+        if (group->cap > SIZE_MAX / 2u ||
+            next_cap > SIZE_MAX / sizeof(*group->entries)) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        next = (bgp_hashmap_entry_t **)bgp_realloc(
+            group->entries,
+            next_cap * sizeof(*group->entries));
+        if (next == NULL) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        group->entries = next;
+        group->cap = next_cap;
+    }
+
+    group->entries[group->count] = route_entry;
+    group->count++;
+    if (group->best == NULL || rib6_better(route, group->best)) {
+        libbgp_err_t err = bgp_radix6_insert(
+            &impl->lpm_tree,
+            group->prefix.addr,
+            group->prefix.len,
+            route);
+
+        if (err != LIBBGP_OK) {
+            group->count--;
+            if (created) {
+                rib6_lpm_group_remove_locked(impl, group);
+            }
+            return err;
+        }
+        group->best = route;
+    }
+    return LIBBGP_OK;
 }
 
 static libbgp_err_t rib6_prefix_array_push(
@@ -885,8 +1036,21 @@ libbgp_err_t libbgp_rib6_init(libbgp_rib6_t *rib)
         bgp_free(impl);
         return err;
     }
+    err = bgp_hashmap_init(
+        &impl->lpm_groups,
+        rib6_lpm_hash,
+        rib6_lpm_key_eq,
+        rib6_lpm_entry_free,
+        NULL);
+    if (err != LIBBGP_OK) {
+        bgp_hashmap_destroy(&impl->sources);
+        bgp_hashmap_destroy(&impl->routes);
+        bgp_free(impl);
+        return err;
+    }
     err = bgp_radix6_init(&impl->lpm_tree);
     if (err != LIBBGP_OK) {
+        bgp_hashmap_destroy(&impl->lpm_groups);
         bgp_hashmap_destroy(&impl->sources);
         bgp_hashmap_destroy(&impl->routes);
         bgp_free(impl);
@@ -906,6 +1070,7 @@ void libbgp_rib6_destroy(libbgp_rib6_t *rib)
     }
     bgp_lock(&impl->lock);
     bgp_radix6_destroy(&impl->lpm_tree);
+    bgp_hashmap_destroy(&impl->lpm_groups);
     bgp_hashmap_destroy(&impl->sources);
     bgp_hashmap_destroy(&impl->routes);
     bgp_unlock(&impl->lock);
@@ -976,7 +1141,6 @@ static libbgp_err_t rib6_insert_save_replaced_locked(
 {
     libbgp_rib6_route_t *copy = NULL;
     libbgp_rib6_route_t *old = NULL;
-    libbgp_rib6_route_t *previous_best = NULL;
     bgp_hashmap_entry_t *new_entry = NULL;
     rib6_key_t *key = NULL;
     libbgp_err_t err;
@@ -992,15 +1156,10 @@ static libbgp_err_t rib6_insert_save_replaced_locked(
         err = rib6_route_clone(impl, route, &copy, &key);
     }
     if (err == LIBBGP_OK) {
-        previous_best = rib6_best_lpm_prefix_locked(impl, &copy->prefix);
-        err = bgp_radix6_insert(&impl->lpm_tree, copy->prefix.addr, copy->prefix.len, previous_best);
-    }
-    if (err == LIBBGP_OK) {
         err = bgp_hashmap_insert(&impl->routes, key, copy);
         if (err != LIBBGP_OK) {
             bgp_free(key);
             rib6_route_free(copy);
-            rib6_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
         } else {
             new_entry = rib6_entry_find_value_locked(impl, &copy->prefix, copy);
             if (new_entry == NULL) {
@@ -1015,7 +1174,15 @@ static libbgp_err_t rib6_insert_save_replaced_locked(
                 } else {
                     (void)bgp_hashmap_remove_one(&impl->routes, key, copy);
                 }
-                rib6_lpm_restore_prefix_locked(impl, &route->prefix, previous_best);
+            } else {
+                err = rib6_lpm_index_add_locked(impl, new_entry);
+                if (err != LIBBGP_OK) {
+                    rib6_source_index_remove(impl, new_entry);
+                    if (rib6_route_entry_unlink_locked(impl, new_entry)) {
+                        rib6_entry_free(new_entry->key, new_entry->value, NULL);
+                        bgp_free(new_entry);
+                    }
+                }
             }
         }
         if (err == LIBBGP_OK && old != NULL) {
@@ -1036,9 +1203,6 @@ static libbgp_err_t rib6_insert_save_replaced_locked(
             }
         } else if (err == LIBBGP_OK && update_id != NULL) {
             *update_id = copy->update_id;
-        }
-        if (err == LIBBGP_OK) {
-            err = rib6_lpm_update_prefix_locked(impl, &copy->prefix);
         }
     } else if (copy != NULL) {
         bgp_free(key);
