@@ -266,10 +266,10 @@ libbgp_err_t libbgp_packet_write(
     size_t buf_len,
     size_t *out_len)
 {
-    uint8_t body[LIBBGP_BGP_MAX_PACKET_LEN - LIBBGP_BGP_HEADER_LEN];
     uint8_t raw_type = 0u;
     size_t body_len = 0u;
     size_t max_body_len = LIBBGP_BGP_MAX_PACKET_LEN - LIBBGP_BGP_HEADER_LEN;
+    size_t body_cap;
     size_t total_len;
     size_t i;
     libbgp_err_t err;
@@ -284,9 +284,30 @@ libbgp_err_t libbgp_packet_write(
         if (pkt->raw_body_len > max_body_len) {
             return LIBBGP_ERR_BAD_LEN;
         }
+        total_len = LIBBGP_BGP_HEADER_LEN + pkt->raw_body_len;
+        if (buf_len < total_len) {
+            return LIBBGP_ERR_BUFFER;
+        }
+    } else if (buf_len < LIBBGP_BGP_HEADER_LEN) {
+        uint8_t scratch = 0u;
+
+        err = packet_write_body(pkt, &scratch, 0u, &raw_type, &body_len);
+        if (err != LIBBGP_OK) {
+            return err;
+        }
+        return LIBBGP_ERR_BUFFER;
     }
 
-    err = packet_write_body(pkt, body, sizeof(body), &raw_type, &body_len);
+    body_cap = buf_len - LIBBGP_BGP_HEADER_LEN;
+    if (body_cap > max_body_len) {
+        body_cap = max_body_len;
+    }
+    err = packet_write_body(
+        pkt,
+        buf + LIBBGP_BGP_HEADER_LEN,
+        body_cap,
+        &raw_type,
+        &body_len);
     if (err != LIBBGP_OK) {
         return err;
     }
@@ -303,9 +324,6 @@ libbgp_err_t libbgp_packet_write(
     }
     bgp_put_be16(buf + 16u, (uint16_t)total_len);
     buf[18] = raw_type;
-    if (body_len != 0u) {
-        memcpy(buf + LIBBGP_BGP_HEADER_LEN, body, body_len);
-    }
     if (out_len != NULL) {
         *out_len = total_len;
     }

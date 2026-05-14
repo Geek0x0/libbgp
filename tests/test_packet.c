@@ -60,6 +60,33 @@ LIBBGP_TEST(packet_parse_write_known_fixtures)
     assert_packet_roundtrip(LIBBGP_FIXTURE_NOTIFICATION_CEASE, LIBBGP_FIXTURE_NOTIFICATION_CEASE_LEN, LIBBGP_PACKET_NOTIFICATION);
 }
 
+LIBBGP_TEST(packet_write_keepalive_is_byte_for_byte_deterministic)
+{
+    uint8_t first[LIBBGP_BGP_HEADER_LEN];
+    uint8_t second[LIBBGP_BGP_HEADER_LEN];
+    size_t first_len = 0u;
+    size_t second_len = 0u;
+    size_t i;
+    libbgp_packet_t pkt;
+
+    memset(first, 0xa5, sizeof(first));
+    memset(second, 0x5a, sizeof(second));
+    libbgp_packet_init(&pkt);
+    pkt.type = LIBBGP_PACKET_KEEPALIVE;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, first, sizeof(first), &first_len));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_BGP_HEADER_LEN, first_len);
+    for (i = 0u; i < LIBBGP_BGP_MARKER_LEN; i++) {
+        LIBBGP_ASSERT_EQ_I64(0xff, first[i]);
+    }
+    LIBBGP_ASSERT_BYTES_EQ(LIBBGP_FIXTURE_KEEPALIVE, first, first_len);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, second, sizeof(second), &second_len));
+    LIBBGP_ASSERT_EQ_U64(first_len, second_len);
+    LIBBGP_ASSERT_BYTES_EQ(first, second, first_len);
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(packet_parse_accepts_unsupported_open_version)
 {
     const uint8_t open_v3[] = {
@@ -365,6 +392,7 @@ int main(void)
     const libbgp_test_case_t tests[] = {
         { "keepalive_body_parse_write_and_packet_fixture", keepalive_body_parse_write_and_packet_fixture },
         { "packet_parse_write_known_fixtures", packet_parse_write_known_fixtures },
+        { "packet_write_keepalive_is_byte_for_byte_deterministic", packet_write_keepalive_is_byte_for_byte_deterministic },
         { "packet_parse_accepts_unsupported_open_version", packet_parse_accepts_unsupported_open_version },
         { "packet_parse_as4_uses_four_octet_update_context", packet_parse_as4_uses_four_octet_update_context },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
