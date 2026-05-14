@@ -87,6 +87,59 @@ LIBBGP_TEST(packet_write_keepalive_is_byte_for_byte_deterministic)
     libbgp_packet_destroy(&pkt);
 }
 
+/* Regression: non-zero-body packet (OPEN) must be byte-for-byte deterministic regardless of
+ * initial contents of the destination buffer. Ensures body is fully written into caller buffer
+ * and header backfilled without leftover bytes. */
+LIBBGP_TEST(packet_write_open_is_byte_for_byte_deterministic)
+{
+    uint8_t first[LIBBGP_FIXTURE_OPEN_AS2_LEN];
+    uint8_t second[LIBBGP_FIXTURE_OPEN_AS2_LEN];
+    size_t first_len = 0u;
+    size_t second_len = 0u;
+    libbgp_packet_t pkt;
+
+    memset(first, 0xa5, sizeof(first));
+    memset(second, 0x5a, sizeof(second));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_OPEN_AS2, LIBBGP_FIXTURE_OPEN_AS2_LEN, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_OPEN, pkt.type);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, first, sizeof(first), &first_len));
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FIXTURE_OPEN_AS2_LEN, first_len);
+    LIBBGP_ASSERT_BYTES_EQ(LIBBGP_FIXTURE_OPEN_AS2, first, first_len);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, second, sizeof(second), &second_len));
+    LIBBGP_ASSERT_EQ_U64(first_len, second_len);
+    LIBBGP_ASSERT_BYTES_EQ(first, second, first_len);
+    libbgp_packet_destroy(&pkt);
+}
+
+/* Regression: when the caller provides a buffer smaller than the BGP header for a known
+ * packet (e.g. OPEN), libbgp_packet_write must return LIBBGP_ERR_BUFFER and must not
+ * mutate the caller's buffer. */
+LIBBGP_TEST(packet_write_known_small_buffer_preserves_output_and_returns_buffer)
+{
+    uint8_t out[64];
+    uint8_t expected[sizeof(out)];
+    size_t out_len = 99u;
+    libbgp_packet_t pkt;
+
+    memset(out, 0x5au, sizeof(out));
+    memcpy(expected, out, sizeof(expected));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_OPEN_AS2, LIBBGP_FIXTURE_OPEN_AS2_LEN, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_OPEN, pkt.type);
+
+    /* Provide a buffer smaller than LIBBGP_BGP_HEADER_LEN to trigger the small-buffer path. */
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_packet_write(&pkt, out, LIBBGP_BGP_HEADER_LEN - 1u, &out_len));
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(out));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(packet_parse_accepts_unsupported_open_version)
 {
     const uint8_t open_v3[] = {
