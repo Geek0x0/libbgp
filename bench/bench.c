@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "libbgp/event.h"
+#include "libbgp/filter.h"
 #include "libbgp/fsm.h"
 #include "libbgp/out_handler.h"
 #include "libbgp/packet.h"
@@ -256,6 +257,44 @@ static bool bench_count_iter(const libbgp_rib4_route_t *route, void *ctx)
     (void)route;
     (*count)++;
     return true;
+}
+
+static int bench_filter_apply(size_t rule_count)
+{
+    libbgp_filter_t filter;
+    libbgp_rib4_route_t route;
+    uint64_t start, elapsed;
+    size_t i;
+    size_t lookups = env_size("LIBBGP_BENCH_FILTER_LOOKUPS", 10000u);
+
+    if (libbgp_filter_init(&filter) != LIBBGP_OK) {
+        return 1;
+    }
+    for (i = 0u; i < rule_count; i++) {
+        libbgp_filter_rule_t rule;
+
+        memset(&rule, 0, sizeof(rule));
+        rule.decision = LIBBGP_FILTER_PERMIT;
+        rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4;
+        rule.match.prefix4 = p4((uint8_t)(i & 0xffu), 0u, 0u, 0u, 8u);
+        if (libbgp_filter_add_rule(&filter, &rule) != LIBBGP_OK) {
+            libbgp_filter_destroy(&filter);
+            return 1;
+        }
+    }
+
+    memset(&route, 0, sizeof(route));
+    route.prefix = p4(192u, 168u, 0u, 0u, 16u);
+
+    start = now_ns();
+    for (i = 0u; i < lookups; i++) {
+        bench_sink_value += (uint64_t)libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY);
+    }
+    elapsed = now_ns() - start;
+    print_result("filter apply", lookups, elapsed);
+
+    libbgp_filter_destroy(&filter);
+    return 0;
 }
 
 static int bench_rib_foreach_best(size_t prefix_count, size_t paths_per_prefix)
@@ -1185,6 +1224,7 @@ int main(void)
     printf("\n========== Basic Benchmarks ==========\n");
     rc |= bench_rib_lookup(small, large);
     rc |= bench_rib_lookup_scoped(4u, env_size("BENCH_ROUTES", 2500u), env_size("BENCH_LOOKUPS", 10000u));
+    rc |= bench_filter_apply(env_size("LIBBGP_BENCH_FILTER_RULES", small));
     rc |= bench_rib_foreach_best(env_size("BENCH_PREFIXES", 5000u), 4u);
     rc |= bench_rib_discard(small);
     rc |= bench_rib_discard_collect(env_size("BENCH_ROUTES", 10000u));

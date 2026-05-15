@@ -178,6 +178,32 @@ LIBBGP_TEST(filter_rule_order_last_match_wins)
     libbgp_filter_destroy(&filter);
 }
 
+LIBBGP_TEST(filter_prefix_rule_priority_preserves_last_match_wins)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t deny;
+    libbgp_filter_rule_t permit;
+    libbgp_prefix4_t prefix = p4(10u, 0u, 0u, 0u, 8u);
+    libbgp_rib4_route_t route = route4(prefix);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&deny, 0, sizeof(deny));
+    deny.decision = LIBBGP_FILTER_DENY;
+    deny.match_type = LIBBGP_FILTER_MATCH_PREFIX4;
+    deny.match.prefix4 = prefix;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &deny));
+
+    memset(&permit, 0, sizeof(permit));
+    permit.decision = LIBBGP_FILTER_PERMIT;
+    permit.match_type = LIBBGP_FILTER_MATCH_PREFIX4;
+    permit.match.prefix4 = prefix;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &permit));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+    libbgp_filter_destroy(&filter);
+}
+
 LIBBGP_TEST(filter_default_decision_for_no_match_and_null_inputs)
 {
     libbgp_filter_t filter;
@@ -1092,6 +1118,7 @@ int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "filter_rule_order_last_match_wins", filter_rule_order_last_match_wins },
+        { "filter_prefix_rule_priority_preserves_last_match_wins", filter_prefix_rule_priority_preserves_last_match_wins },
         { "filter_default_decision_for_no_match_and_null_inputs", filter_default_decision_for_no_match_and_null_inputs },
         { "filter_prefix_rule_matches_included_route_prefix", filter_prefix_rule_matches_included_route_prefix },
         { "filter_prefix_rule_supports_legacy_match_operators", filter_prefix_rule_supports_legacy_match_operators },

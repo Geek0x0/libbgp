@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "attr_view.h"
 #include "internal.h"
 
 #ifdef BGP_THREADSAFE
@@ -149,94 +150,28 @@ static bool community_contains(const libbgp_pattr_t *attr, uint32_t community)
     return false;
 }
 
-static bool route_has_asn(const libbgp_rib4_route_t *route, uint32_t asn)
+static bool attr_view_has_asn(const bgp_attr_view_t *attr_view, uint32_t asn)
 {
-    size_t i;
+    const libbgp_pattr_t *as_path_attr = bgp_attr_view_get(attr_view, LIBBGP_PATTR_CODE_AS_PATH);
+    const libbgp_pattr_t *as4_path_attr = bgp_attr_view_get(attr_view, LIBBGP_PATTR_CODE_AS4_PATH);
 
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (as_path_contains(route->attrs[i], asn)) {
-            return true;
-        }
-    }
-    return false;
+    return as_path_contains(as_path_attr, asn) || as_path_contains(as4_path_attr, asn);
 }
 
-static bool route_has_community(const libbgp_rib4_route_t *route, uint32_t community)
+static bool attr_view_has_community(const bgp_attr_view_t *attr_view, uint32_t community)
 {
-    size_t i;
+    const libbgp_pattr_t *community_attr = bgp_attr_view_get(attr_view, LIBBGP_PATTR_CODE_COMMUNITY);
 
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (community_contains(route->attrs[i], community)) {
-            return true;
-        }
-    }
-    return false;
+    return community_contains(community_attr, community);
 }
 
-static bool route_origin_asn(const libbgp_rib4_route_t *route, uint32_t *origin_asn)
+static bool attr_view_origin_asn(const bgp_attr_view_t *attr_view, uint32_t *origin_asn)
 {
-    size_t i;
+    const libbgp_pattr_t *as_path_attr = bgp_attr_view_get(attr_view, LIBBGP_PATTR_CODE_AS_PATH);
+    const libbgp_pattr_t *as4_path_attr = bgp_attr_view_get(attr_view, LIBBGP_PATTR_CODE_AS4_PATH);
 
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (as_path_origin_asn(route->attrs[i], origin_asn)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool route6_has_asn(const libbgp_rib6_route_t *route, uint32_t asn)
-{
-    size_t i;
-
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (as_path_contains(route->attrs[i], asn)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool route6_has_community(const libbgp_rib6_route_t *route, uint32_t community)
-{
-    size_t i;
-
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (community_contains(route->attrs[i], community)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool route6_origin_asn(const libbgp_rib6_route_t *route, uint32_t *origin_asn)
-{
-    size_t i;
-
-    if (route->attr_count != 0u && route->attrs == NULL) {
-        return false;
-    }
-    for (i = 0u; i < route->attr_count; i++) {
-        if (as_path_origin_asn(route->attrs[i], origin_asn)) {
-            return true;
-        }
-    }
-    return false;
+    return as_path_origin_asn(as_path_attr, origin_asn) ||
+        as_path_origin_asn(as4_path_attr, origin_asn);
 }
 
 static bool prefix4_more_specific(const libbgp_prefix4_t *rule, const libbgp_prefix4_t *route)
@@ -259,7 +194,10 @@ static bool prefix6_less_specific(const libbgp_prefix6_t *rule, const libbgp_pre
     return route->len < rule->len && libbgp_prefix6_includes(route, rule);
 }
 
-static bool filter_rule_matches(const libbgp_filter_rule_t *rule, const libbgp_rib4_route_t *route)
+static bool filter_rule_matches(
+    const libbgp_filter_rule_t *rule,
+    const libbgp_rib4_route_t *route,
+    const bgp_attr_view_t *attr_view)
 {
     switch (rule->match_type) {
     case LIBBGP_FILTER_MATCH_PREFIX4:
@@ -274,23 +212,23 @@ static bool filter_rule_matches(const libbgp_filter_rule_t *rule, const libbgp_r
     case LIBBGP_FILTER_MATCH_PREFIX4_LESS_OR_EQUAL:
         return libbgp_prefix4_includes(&route->prefix, &rule->match.prefix4);
     case LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS:
-        return route_has_asn(route, rule->match.asn);
+        return attr_view_has_asn(attr_view, rule->match.asn);
     case LIBBGP_FILTER_MATCH_AS_PATH_NOT_CONTAINS:
-        return !route_has_asn(route, rule->match.asn);
+        return !attr_view_has_asn(attr_view, rule->match.asn);
     case LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN: {
         uint32_t origin_asn = 0u;
 
-        return route_origin_asn(route, &origin_asn) && origin_asn == rule->match.asn;
+        return attr_view_origin_asn(attr_view, &origin_asn) && origin_asn == rule->match.asn;
     }
     case LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN: {
         uint32_t origin_asn = 0u;
 
-        return route_origin_asn(route, &origin_asn) && origin_asn != rule->match.asn;
+        return attr_view_origin_asn(attr_view, &origin_asn) && origin_asn != rule->match.asn;
     }
     case LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS:
-        return route_has_community(route, rule->match.community);
+        return attr_view_has_community(attr_view, rule->match.community);
     case LIBBGP_FILTER_MATCH_COMMUNITY_NOT_CONTAINS:
-        return !route_has_community(route, rule->match.community);
+        return !attr_view_has_community(attr_view, rule->match.community);
     case LIBBGP_FILTER_MATCH_ANY:
         return true;
     default:
@@ -298,7 +236,10 @@ static bool filter_rule_matches(const libbgp_filter_rule_t *rule, const libbgp_r
     }
 }
 
-static bool filter_rule_matches6(const libbgp_filter_rule_t *rule, const libbgp_rib6_route_t *route)
+static bool filter_rule_matches6(
+    const libbgp_filter_rule_t *rule,
+    const libbgp_rib6_route_t *route,
+    const bgp_attr_view_t *attr_view)
 {
     switch (rule->match_type) {
     case LIBBGP_FILTER_MATCH_PREFIX6:
@@ -313,23 +254,23 @@ static bool filter_rule_matches6(const libbgp_filter_rule_t *rule, const libbgp_
     case LIBBGP_FILTER_MATCH_PREFIX6_LESS_OR_EQUAL:
         return libbgp_prefix6_includes(&route->prefix, &rule->match.prefix6);
     case LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS:
-        return route6_has_asn(route, rule->match.asn);
+        return attr_view_has_asn(attr_view, rule->match.asn);
     case LIBBGP_FILTER_MATCH_AS_PATH_NOT_CONTAINS:
-        return !route6_has_asn(route, rule->match.asn);
+        return !attr_view_has_asn(attr_view, rule->match.asn);
     case LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN: {
         uint32_t origin_asn = 0u;
 
-        return route6_origin_asn(route, &origin_asn) && origin_asn == rule->match.asn;
+        return attr_view_origin_asn(attr_view, &origin_asn) && origin_asn == rule->match.asn;
     }
     case LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN: {
         uint32_t origin_asn = 0u;
 
-        return route6_origin_asn(route, &origin_asn) && origin_asn != rule->match.asn;
+        return attr_view_origin_asn(attr_view, &origin_asn) && origin_asn != rule->match.asn;
     }
     case LIBBGP_FILTER_MATCH_COMMUNITY_CONTAINS:
-        return route6_has_community(route, rule->match.community);
+        return attr_view_has_community(attr_view, rule->match.community);
     case LIBBGP_FILTER_MATCH_COMMUNITY_NOT_CONTAINS:
-        return !route6_has_community(route, rule->match.community);
+        return !attr_view_has_community(attr_view, rule->match.community);
     case LIBBGP_FILTER_MATCH_ANY:
         return true;
     default:
@@ -419,11 +360,13 @@ libbgp_filter_decision_t libbgp_filter_apply_route(
 {
     filter_impl_t *impl;
     libbgp_filter_decision_t decision = default_decision;
+    bgp_attr_view_t attr_view;
     size_t i;
 
     if (route == NULL) {
         return default_decision;
     }
+    bgp_attr_view_build(&attr_view, route->attrs, route->attr_count);
     impl = filter_impl_lock_const(filter);
     if (impl == NULL) {
         return default_decision;
@@ -431,7 +374,7 @@ libbgp_filter_decision_t libbgp_filter_apply_route(
     for (i = impl->count; i > 0u; i--) {
         const libbgp_filter_rule_t *rule = &impl->rules[i - 1u];
 
-        if (filter_rule_matches(rule, route)) {
+        if (filter_rule_matches(rule, route, &attr_view)) {
             decision = rule->decision;
             break;
         }
@@ -447,11 +390,13 @@ libbgp_filter_decision_t libbgp_filter_apply_route6(
 {
     filter_impl_t *impl;
     libbgp_filter_decision_t decision = default_decision;
+    bgp_attr_view_t attr_view;
     size_t i;
 
     if (route == NULL) {
         return default_decision;
     }
+    bgp_attr_view_build(&attr_view, route->attrs, route->attr_count);
     impl = filter_impl_lock_const(filter);
     if (impl == NULL) {
         return default_decision;
@@ -459,7 +404,7 @@ libbgp_filter_decision_t libbgp_filter_apply_route6(
     for (i = impl->count; i > 0u; i--) {
         const libbgp_filter_rule_t *rule = &impl->rules[i - 1u];
 
-        if (filter_rule_matches6(rule, route)) {
+        if (filter_rule_matches6(rule, route, &attr_view)) {
             decision = rule->decision;
             break;
         }
