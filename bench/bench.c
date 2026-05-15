@@ -276,7 +276,7 @@ static int bench_filter_apply(size_t rule_count)
         memset(&rule, 0, sizeof(rule));
         rule.decision = LIBBGP_FILTER_PERMIT;
         rule.match_type = LIBBGP_FILTER_MATCH_PREFIX4;
-        rule.match.prefix4 = p4((uint8_t)(i & 0xffu), 0u, 0u, 0u, 8u);
+        rule.match.prefix4 = p4(10u, (uint8_t)(i & 0xffu), 0u, 0u, 16u);
         if (libbgp_filter_add_rule(&filter, &rule) != LIBBGP_OK) {
             libbgp_filter_destroy(&filter);
             return 1;
