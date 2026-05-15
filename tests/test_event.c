@@ -540,6 +540,97 @@ LIBBGP_TEST(event_publish_small_snapshot_uses_stack_when_calloc_fails)
     libbgp_event_bus_destroy(&bus);
 }
 
+LIBBGP_TEST(event_publish_exact_stack_limit_uses_stack_when_calloc_fails)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    libbgp_event_t event;
+    int i;
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    test_event_publish_count = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    for (i = 0; i < 64; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                test_event_publish_cb, NULL, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.calloc = event_fail_calloc;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_U64(64u, libbgp_event_bus_publish(&bus, &event));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(64, test_event_publish_count);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
+LIBBGP_TEST(event_publish_heap_snapshot_alloc_failure_returns_zero_and_keeps_bus_usable)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    libbgp_event_t event;
+    size_t published;
+    int i;
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    test_event_publish_count = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    for (i = 0; i < 65; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                test_event_publish_cb, NULL, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.calloc = event_fail_calloc;
+    libbgp_set_alloc(&alloc);
+    published = libbgp_event_bus_publish(&bus, &event);
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_U64(0u, published);
+    LIBBGP_ASSERT_EQ_I64(0, test_event_publish_count);
+
+    LIBBGP_ASSERT_EQ_U64(65u, libbgp_event_bus_publish(&bus, &event));
+    LIBBGP_ASSERT_EQ_I64(65, test_event_publish_count);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
+LIBBGP_TEST(event_publish_one_past_stack_limit_uses_heap)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    libbgp_event_t event;
+    int i;
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    test_event_publish_count = 0;
+    event_calloc_calls = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    for (i = 0; i < 65; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                test_event_publish_cb, NULL, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.calloc = event_counting_calloc;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_U64(65u, libbgp_event_bus_publish(&bus, &event));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(65, test_event_publish_count);
+    LIBBGP_ASSERT_EQ_U64(1u, event_calloc_calls);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
 LIBBGP_TEST(event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks)
 {
     libbgp_alloc_t alloc;
@@ -633,6 +724,9 @@ int main(void)
         { "event_subscribe_retained_on_destroyed_bus_calls_release", event_subscribe_retained_on_destroyed_bus_calls_release },
         { "event_subscribe_alloc_failure_calls_release", event_subscribe_alloc_failure_calls_release },
         { "event_publish_small_snapshot_uses_stack_when_calloc_fails", event_publish_small_snapshot_uses_stack_when_calloc_fails },
+        { "event_publish_exact_stack_limit_uses_stack_when_calloc_fails", event_publish_exact_stack_limit_uses_stack_when_calloc_fails },
+        { "event_publish_heap_snapshot_alloc_failure_returns_zero_and_keeps_bus_usable", event_publish_heap_snapshot_alloc_failure_returns_zero_and_keeps_bus_usable },
+        { "event_publish_one_past_stack_limit_uses_heap", event_publish_one_past_stack_limit_uses_heap },
         { "event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks", event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks },
         { "event_publish_retain_reject_skips_subscriber", event_publish_retain_reject_skips_subscriber }
     };
