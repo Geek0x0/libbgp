@@ -42,22 +42,50 @@ libbgp_err_t bgp_rib4_insert_track_best(
     const libbgp_rib4_route_t *route,
     bgp_rib4_change_t *change,
     uint64_t *update_id);
+libbgp_err_t bgp_rib4_insert_track_best_save_replaced(
+    libbgp_rib4_t *rib,
+    const libbgp_rib4_route_t *route,
+    bgp_rib4_change_t *change,
+    uint64_t *update_id,
+    bgp_rib4_saved_route_t *replaced,
+    bool *had_replaced);
 libbgp_err_t bgp_rib6_insert_track_best(
     libbgp_rib6_t *rib,
     const libbgp_rib6_route_t *route,
     bgp_rib6_change_t *change,
     uint64_t *update_id);
+libbgp_err_t bgp_rib6_insert_track_best_save_replaced(
+    libbgp_rib6_t *rib,
+    const libbgp_rib6_route_t *route,
+    bgp_rib6_change_t *change,
+    uint64_t *update_id,
+    bgp_rib6_saved_route_t *replaced,
+    bool *had_replaced);
 
 libbgp_err_t bgp_rib4_withdraw_track_best(
     libbgp_rib4_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix4_t *prefix,
     bgp_rib4_change_t *change);
+libbgp_err_t bgp_rib4_withdraw_track_best_save(
+    libbgp_rib4_t *rib,
+    uint32_t source_router_id,
+    const libbgp_prefix4_t *prefix,
+    bgp_rib4_change_t *change,
+    bgp_rib4_saved_route_t *saved,
+    bool *had_route);
 libbgp_err_t bgp_rib6_withdraw_track_best(
     libbgp_rib6_t *rib,
     uint32_t source_router_id,
     const libbgp_prefix6_t *prefix,
     bgp_rib6_change_t *change);
+libbgp_err_t bgp_rib6_withdraw_track_best_save(
+    libbgp_rib6_t *rib,
+    uint32_t source_router_id,
+    const libbgp_prefix6_t *prefix,
+    bgp_rib6_change_t *change,
+    bgp_rib6_saved_route_t *saved,
+    bool *had_route);
 
 typedef struct bgp_rib4_discard_result {
     libbgp_prefix4_t *withdrawn;

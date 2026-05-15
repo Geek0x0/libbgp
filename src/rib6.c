@@ -1248,6 +1248,17 @@ libbgp_err_t bgp_rib6_insert_track_best(
     bgp_rib6_change_t *change,
     uint64_t *update_id)
 {
+    return bgp_rib6_insert_track_best_save_replaced(rib, route, change, update_id, NULL, NULL);
+}
+
+libbgp_err_t bgp_rib6_insert_track_best_save_replaced(
+    libbgp_rib6_t *rib,
+    const libbgp_rib6_route_t *route,
+    bgp_rib6_change_t *change,
+    uint64_t *update_id,
+    bgp_rib6_saved_route_t *replaced,
+    bool *had_replaced)
+{
     rib6_impl_t *impl = rib6_impl_get(rib);
     const libbgp_rib6_route_t *before = NULL;
     const libbgp_rib6_route_t *after = NULL;
@@ -1258,13 +1269,25 @@ libbgp_err_t bgp_rib6_insert_track_best(
     if (change != NULL) {
         rib6_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, NULL);
     }
+    if (replaced != NULL) {
+        replaced->entry = NULL;
+    }
+    if (had_replaced != NULL) {
+        *had_replaced = false;
+    }
     if (impl == NULL || route == NULL || change == NULL) {
         return LIBBGP_ERR_INVALID;
     }
 
     bgp_lock(&impl->lock);
     before = rib6_best_exact_locked(impl, &route->prefix);
-    err = rib6_insert_save_replaced_locked(impl, route, NULL, NULL, update_id, &old_entry);
+    err = rib6_insert_save_replaced_locked(
+        impl,
+        route,
+        replaced,
+        had_replaced,
+        update_id,
+        &old_entry);
     if (err == LIBBGP_OK) {
         after = rib6_best_exact_locked(impl, &route->prefix);
         if (after == NULL) {
@@ -1319,6 +1342,60 @@ libbgp_err_t bgp_rib6_withdraw_track_best(
         }
     }
     bgp_unlock(&impl->lock);
+    return err;
+}
+
+libbgp_err_t bgp_rib6_withdraw_track_best_save(
+    libbgp_rib6_t *rib,
+    uint32_t source_router_id,
+    const libbgp_prefix6_t *prefix,
+    bgp_rib6_change_t *change,
+    bgp_rib6_saved_route_t *saved,
+    bool *had_route)
+{
+    rib6_impl_t *impl = rib6_impl_get(rib);
+    const libbgp_rib6_route_t *before = NULL;
+    const libbgp_rib6_route_t *after = NULL;
+    bgp_hashmap_entry_t *entry = NULL;
+    bool withdrew_best = false;
+    libbgp_err_t err;
+
+    if (change != NULL) {
+        rib6_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, NULL);
+    }
+    if (saved != NULL) {
+        saved->entry = NULL;
+    }
+    if (had_route != NULL) {
+        *had_route = false;
+    }
+    if (impl == NULL || prefix == NULL || change == NULL || saved == NULL) {
+        return LIBBGP_ERR_INVALID;
+    }
+
+    bgp_lock(&impl->lock);
+    before = rib6_best_exact_locked(impl, prefix);
+    withdrew_best = before != NULL && before->source_router_id == source_router_id;
+    err = rib6_detach_locked(impl, source_router_id, prefix, &entry);
+    if (err == LIBBGP_ERR_NOT_FOUND) {
+        err = LIBBGP_OK;
+    } else if (err == LIBBGP_OK) {
+        saved->entry = entry;
+        entry = NULL;
+        if (had_route != NULL) {
+            *had_route = true;
+        }
+        after = rib6_best_exact_locked(impl, prefix);
+        if (!withdrew_best) {
+            rib6_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, after);
+        } else if (after == NULL) {
+            rib6_change_set(change, BGP_RIB_CHANGE_UNREACHABLE, NULL);
+        } else {
+            rib6_change_set(change, BGP_RIB_CHANGE_REPLACEMENT_BEST, after);
+        }
+    }
+    bgp_unlock(&impl->lock);
+    rib6_detached_entry_free(entry);
     return err;
 }
 

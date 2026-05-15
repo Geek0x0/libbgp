@@ -1177,6 +1177,43 @@ LIBBGP_TEST(rib4_insert_reports_replacement_best_when_better_route_wins)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(rib4_insert_track_best_reports_change)
+{
+    libbgp_rib4_t rib;
+    bgp_rib4_change_t change;
+    uint64_t update_id = 0u;
+    libbgp_prefix4_t prefix = p4(10u, 0u, 0u, 0u, 24u);
+    uint32_t source1 = ip4(1u, 1u, 1u, 1u);
+    uint32_t source2 = ip4(2u, 2u, 2u, 2u);
+    libbgp_rib4_route_t r1 = route4(prefix, source1);
+    libbgp_rib4_route_t r2 = route4(prefix, source2);
+    libbgp_rib4_route_t r1_low;
+
+    r1.local_pref = 100u;
+    r2.local_pref = 200u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+
+    memset(&change, 0, sizeof(change));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &r1, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NEW_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+
+    memset(&change, 0, sizeof(change));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &r2, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_REPLACEMENT_BEST, change.kind);
+    LIBBGP_ASSERT(change.best != NULL);
+    LIBBGP_ASSERT_EQ_U64(200u, change.best->local_pref);
+
+    r1_low = route4(prefix, source1);
+    r1_low.local_pref = 50u;
+    memset(&change, 0, sizeof(change));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_rib4_insert_track_best(&rib, &r1_low, &change, &update_id));
+    LIBBGP_ASSERT_EQ_I64(BGP_RIB_CHANGE_NO_BEST_CHANGE, change.kind);
+
+    libbgp_rib4_destroy(&rib);
+}
+
 LIBBGP_TEST(rib4_insert_reports_same_update_id_best_replacement)
 {
     libbgp_rib4_t rib;
@@ -5684,6 +5721,7 @@ int main(void)
         { "rib4_insert_defaults_local_pref_and_update_id", rib4_insert_defaults_local_pref_and_update_id },
         { "rib4_insert_reports_only_best_path_changes", rib4_insert_reports_only_best_path_changes },
         { "rib4_insert_reports_replacement_best_when_better_route_wins", rib4_insert_reports_replacement_best_when_better_route_wins },
+        { "rib4_insert_track_best_reports_change", rib4_insert_track_best_reports_change },
         { "rib4_insert_reports_same_update_id_best_replacement", rib4_insert_reports_same_update_id_best_replacement },
         { "rib4_withdraw_reports_replacement_vs_unreachable", rib4_withdraw_reports_replacement_vs_unreachable },
         { "rib6_best_route_ordering_for_same_prefix", rib6_best_route_ordering_for_same_prefix },
