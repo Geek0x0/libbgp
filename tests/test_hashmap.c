@@ -200,7 +200,7 @@ LIBBGP_TEST(hashmap_resizes_and_preserves_entries)
     bgp_hashmap_destroy(&map);
 }
 
-LIBBGP_TEST(hashmap_reserve_prevents_resize_during_batch_insert)
+LIBBGP_TEST(test_hashmap_reserve_prevents_resize)
 {
     bgp_hashmap_t map;
     int keys[1000];
@@ -364,7 +364,7 @@ int main(void)
         { "hashmap_remove_one_by_value_and_by_key", hashmap_remove_one_by_value_and_by_key },
         { "hashmap_destroy_invokes_callback_for_all_entries", hashmap_destroy_invokes_callback_for_all_entries },
         { "hashmap_resizes_and_preserves_entries", hashmap_resizes_and_preserves_entries },
-        { "hashmap_reserve_prevents_resize_during_batch_insert", hashmap_reserve_prevents_resize_during_batch_insert },
+        { "test_hashmap_reserve_prevents_resize", test_hashmap_reserve_prevents_resize },
         { "hashmap_invalid_inputs_and_destroy_null_are_safe", hashmap_invalid_inputs_and_destroy_null_are_safe },
         { "hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator", hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator },
         { "hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator", hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator },

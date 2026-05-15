@@ -1099,13 +1099,20 @@ static int bench_hashmap_load_factor(void)
     return 0;
 }
 
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
 static int bench_hashmap_batch_insert(size_t count, bool use_reserve)
 {
     bgp_hashmap_t map;
-    uint64_t start;
     uint64_t elapsed;
     size_t i;
     char name[64];
+    uint64_t *samples;
 
     if (bgp_hashmap_init(&map, bench_u64_hash, bench_u64_eq, bench_u64_free, NULL) != LIBBGP_OK) {
         return 1;
@@ -1115,27 +1122,45 @@ static int bench_hashmap_batch_insert(size_t count, bool use_reserve)
         return 1;
     }
 
-    start = now_ns();
+    samples = (uint64_t *)libbgp_malloc(count * sizeof(*samples));
+    if (samples == NULL) {
+        bgp_hashmap_destroy(&map);
+        return 1;
+    }
+
     for (i = 0u; i < count; i++) {
+        uint64_t start = now_ns();
         uint64_t *key = (uint64_t *)libbgp_malloc(sizeof(*key));
 
         if (key == NULL) {
+            libbgp_free(samples);
             bgp_hashmap_destroy(&map);
             return 1;
         }
         *key = (uint64_t)i;
         if (bgp_hashmap_insert(&map, key, NULL) != LIBBGP_OK) {
             libbgp_free(key);
+            libbgp_free(samples);
             bgp_hashmap_destroy(&map);
             return 1;
         }
+        samples[i] = now_ns() - start;
     }
-    elapsed = now_ns() - start;
+
+    elapsed = 0u;
+    for (i = 0u; i < count; i++) {
+        elapsed += samples[i];
+    }
+
+    qsort(samples, count, sizeof(*samples), cmp_u64);
+    uint64_t p99 = samples[(size_t)(count * 0.99)];
 
     snprintf(name, sizeof(name), "hashmap insert %s", use_reserve ? "reserved" : "default");
     print_result(name, count, elapsed);
+    printf("%-24s            %10s %10" PRIu64 " ns/op\n", "", "p99:", p99);
     bench_sink_value += bgp_hashmap_len(&map);
 
+    libbgp_free(samples);
     bgp_hashmap_destroy(&map);
     return 0;
 }
