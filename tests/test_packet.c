@@ -446,6 +446,8 @@ int main(void)
         { "keepalive_body_parse_write_and_packet_fixture", keepalive_body_parse_write_and_packet_fixture },
         { "packet_parse_write_known_fixtures", packet_parse_write_known_fixtures },
         { "packet_write_keepalive_is_byte_for_byte_deterministic", packet_write_keepalive_is_byte_for_byte_deterministic },
+        { "packet_write_open_is_byte_for_byte_deterministic", packet_write_open_is_byte_for_byte_deterministic },
+        { "packet_write_known_small_buffer_preserves_output_and_returns_buffer", packet_write_known_small_buffer_preserves_output_and_returns_buffer },
         { "packet_parse_accepts_unsupported_open_version", packet_parse_accepts_unsupported_open_version },
         { "packet_parse_as4_uses_four_octet_update_context", packet_parse_as4_uses_four_octet_update_context },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
