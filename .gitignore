@@ -21,5 +21,6 @@ compile
 libtool
 missing
 .dirstamp
+docs/**/*.md
 docs/html/
 worktrees/
