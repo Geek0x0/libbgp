@@ -737,6 +737,66 @@ LIBBGP_TEST(rib4_discard_large)
     libbgp_rib4_destroy(&rib);
 }
 
+LIBBGP_TEST(test_rib4_med_comparison_same_neighbor_as)
+{
+    libbgp_rib4_t rib;
+    libbgp_prefix4_t same_prefix = p4(10u, 0u, 0u, 0u, 24u);
+    libbgp_prefix4_t different_prefix = p4(10u, 0u, 1u, 0u, 24u);
+    libbgp_rib4_route_t same_high_med = route4(same_prefix, 1u);
+    libbgp_rib4_route_t same_low_med = route4(same_prefix, 2u);
+    libbgp_rib4_route_t different_neighbor_old = route4(different_prefix, 3u);
+    libbgp_rib4_route_t different_neighbor_low_med = route4(different_prefix, 4u);
+    libbgp_pattr_t *same_high_path = test_as_path_attr(65001u, 65100u);
+    libbgp_pattr_t *same_low_path = test_as_path_attr(65001u, 65200u);
+    libbgp_pattr_t *different_old_path = test_as_path_attr(65001u, 65101u);
+    libbgp_pattr_t *different_low_path = test_as_path_attr(65002u, 65201u);
+    libbgp_pattr_t *same_high_attrs[1];
+    libbgp_pattr_t *same_low_attrs[1];
+    libbgp_pattr_t *different_old_attrs[1];
+    libbgp_pattr_t *different_low_attrs[1];
+
+    same_high_attrs[0] = same_high_path;
+    same_low_attrs[0] = same_low_path;
+    different_old_attrs[0] = different_old_path;
+    different_low_attrs[0] = different_low_path;
+
+    same_high_med.attrs = same_high_attrs;
+    same_high_med.attr_count = 1u;
+    same_high_med.as_path_len = 2u;
+    same_high_med.med = 200u;
+    same_high_med.update_id = 10u;
+    same_low_med.attrs = same_low_attrs;
+    same_low_med.attr_count = 1u;
+    same_low_med.as_path_len = 2u;
+    same_low_med.med = 100u;
+    same_low_med.update_id = 20u;
+    different_neighbor_old.attrs = different_old_attrs;
+    different_neighbor_old.attr_count = 1u;
+    different_neighbor_old.as_path_len = 2u;
+    different_neighbor_old.med = 200u;
+    different_neighbor_old.update_id = 10u;
+    different_neighbor_low_med.attrs = different_low_attrs;
+    different_neighbor_low_med.attr_count = 1u;
+    different_neighbor_low_med.as_path_len = 2u;
+    different_neighbor_low_med.med = 100u;
+    different_neighbor_low_med.update_id = 20u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_init(&rib));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &same_high_med));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &same_low_med));
+    assert_rib4_best_source(&rib, ip4(10u, 0u, 0u, 1u), 2u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &different_neighbor_old));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_rib4_insert(&rib, &different_neighbor_low_med));
+    assert_rib4_best_source(&rib, ip4(10u, 0u, 1u, 1u), 3u);
+
+    libbgp_rib4_destroy(&rib);
+    libbgp_pattr_unref(same_high_path);
+    libbgp_pattr_unref(same_low_path);
+    libbgp_pattr_unref(different_old_path);
+    libbgp_pattr_unref(different_low_path);
+}
+
 LIBBGP_TEST(rib4_med_comparison_uses_neighbor_as_from_as_path)
 {
     libbgp_rib4_t rib;
@@ -6020,6 +6080,7 @@ int main(void)
         { "rib4_discard_collect_preserves_replacement_correctness", rib4_discard_collect_preserves_replacement_correctness },
         { "rib4_discard_collect_large_replacement_batch", rib4_discard_collect_large_replacement_batch },
         { "rib4_discard_large", rib4_discard_large },
+        { "test_rib4_med_comparison_same_neighbor_as", test_rib4_med_comparison_same_neighbor_as },
         { "rib4_med_comparison_uses_neighbor_as_from_as_path", rib4_med_comparison_uses_neighbor_as_from_as_path },
         { "rib4_med_not_compared_without_neighbor_as", rib4_med_not_compared_without_neighbor_as },
         { "rib4_med_ignores_missing_wrong_type_and_different_neighbor_as", rib4_med_ignores_missing_wrong_type_and_different_neighbor_as },
