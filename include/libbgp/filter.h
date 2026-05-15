@@ -1,6 +1,12 @@
 #ifndef LIBBGP_FILTER_H
 #define LIBBGP_FILTER_H
 
+
+/**
+ * @file filter.h
+ * @brief Ordered IPv4 and IPv6 route filter rules.
+ * @ingroup libbgp_filter
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

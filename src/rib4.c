@@ -1,3 +1,7 @@
+/**
+ * @file rib4.c
+ * @brief IPv4 RIB storage, indexing, best-path, and snapshot implementation.
+ */
 #include "libbgp/rib4.h"
 
 #include <string.h>

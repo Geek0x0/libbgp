@@ -1,3 +1,7 @@
+/**
+ * @file fsm.c
+ * @brief BGP finite state machine implementation.
+ */
 #include "libbgp/fsm.h"
 
 #include <string.h>

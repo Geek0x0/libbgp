@@ -1,6 +1,11 @@
 #ifndef LIBBGP_VEC_H
 #define LIBBGP_VEC_H
 
+
+/**
+ * @file vec.h
+ * @brief Internal macro-based growable vector helpers.
+ */
 #include <stddef.h>
 #include "internal.h"
 

@@ -1,6 +1,12 @@
 #ifndef LIBBGP_PACKET_H
 #define LIBBGP_PACKET_H
 
+
+/**
+ * @file packet.h
+ * @brief Top-level BGP packet object parsing and serialization.
+ * @ingroup libbgp_packet
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

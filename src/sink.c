@@ -1,3 +1,7 @@
+/**
+ * @file sink.c
+ * @brief Incremental BGP stream framing and packet queue implementation.
+ */
 #include "libbgp/sink.h"
 
 #include <stdbool.h>

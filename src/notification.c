@@ -1,3 +1,7 @@
+/**
+ * @file notification.c
+ * @brief BGP NOTIFICATION message parse and write helpers.
+ */
 #include "libbgp/notification.h"
 
 #include <string.h>

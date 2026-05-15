@@ -1,3 +1,7 @@
+/**
+ * @file open.c
+ * @brief BGP OPEN message parse, write, and capability helpers.
+ */
 #include "libbgp/open.h"
 
 #include <string.h>

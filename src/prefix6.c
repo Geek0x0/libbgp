@@ -1,3 +1,7 @@
+/**
+ * @file prefix6.c
+ * @brief IPv6 prefix wire-format and comparison helpers.
+ */
 #include "libbgp/prefix6.h"
 
 #include <string.h>

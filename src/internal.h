@@ -1,6 +1,11 @@
 #ifndef LIBBGP_INTERNAL_H
 #define LIBBGP_INTERNAL_H
 
+
+/**
+ * @file internal.h
+ * @brief Internal allocation, locking, byte-order, and parser detail helpers.
+ */
 #include <stdint.h>
 #include <string.h>
 #include "libbgp/types.h"

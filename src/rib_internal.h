@@ -1,6 +1,11 @@
 #ifndef LIBBGP_RIB_INTERNAL_H
 #define LIBBGP_RIB_INTERNAL_H
 
+
+/**
+ * @file rib_internal.h
+ * @brief Internal RIB snapshot, journaling, iteration, and best-route helpers.
+ */
 #include <stdbool.h>
 #include <stdint.h>
 

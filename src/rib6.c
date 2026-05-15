@@ -1,3 +1,7 @@
+/**
+ * @file rib6.c
+ * @brief IPv6 RIB storage, indexing, best-path, and snapshot implementation.
+ */
 #include "libbgp/rib6.h"
 
 #include <string.h>

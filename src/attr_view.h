@@ -1,6 +1,11 @@
 #ifndef LIBBGP_ATTR_VIEW_H
 #define LIBBGP_ATTR_VIEW_H
 
+
+/**
+ * @file attr_view.h
+ * @brief Internal fixed-size path attribute lookup view.
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

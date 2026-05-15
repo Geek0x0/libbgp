@@ -1,6 +1,12 @@
 #ifndef LIBBGP_SINK_H
 #define LIBBGP_SINK_H
 
+
+/**
+ * @file sink.h
+ * @brief Incremental BGP stream framing and queued packet delivery.
+ * @ingroup libbgp_io
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

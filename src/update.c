@@ -1,3 +1,7 @@
+/**
+ * @file update.c
+ * @brief BGP UPDATE message parse, write, validation, and AS4 conversion implementation.
+ */
 #include "libbgp/update.h"
 
 #include <string.h>

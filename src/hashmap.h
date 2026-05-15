@@ -1,6 +1,11 @@
 #ifndef LIBBGP_HASHMAP_H
 #define LIBBGP_HASHMAP_H
 
+
+/**
+ * @file hashmap.h
+ * @brief Internal chained hashmap used by RIB and indexing code.
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

@@ -1,3 +1,7 @@
+/**
+ * @file log.c
+ * @brief Default logger and logging callback dispatch.
+ */
 #include <stdarg.h>
 
 #include "libbgp/log.h"

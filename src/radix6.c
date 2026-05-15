@@ -1,3 +1,7 @@
+/**
+ * @file radix6.c
+ * @brief Internal IPv6 radix tree implementation.
+ */
 #include "radix6.h"
 
 #include <stdbool.h>

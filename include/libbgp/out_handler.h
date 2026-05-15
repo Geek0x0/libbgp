@@ -1,6 +1,12 @@
 #ifndef LIBBGP_OUT_HANDLER_H
 #define LIBBGP_OUT_HANDLER_H
 
+
+/**
+ * @file out_handler.h
+ * @brief Output handler abstraction for file descriptors or caller-provided I/O callbacks.
+ * @ingroup libbgp_io
+ */
 #include <stddef.h>
 #include <stdint.h>
 
