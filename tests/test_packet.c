@@ -388,6 +388,31 @@ LIBBGP_TEST(packet_write_known_body_failure_leaves_output_unchanged)
     libbgp_packet_destroy(&pkt);
 }
 
+/* Regression: buf_len == LIBBGP_BGP_HEADER_LEN passes the initial size check but leaves zero
+ * body capacity. packet_write_body returns LIBBGP_ERR_BUFFER; Option B ensures the body area
+ * (0 bytes here) is cleared and the header is never backfilled, leaving the buffer unchanged. */
+LIBBGP_TEST(packet_write_open_header_only_buffer_returns_buffer_error)
+{
+    uint8_t out[LIBBGP_BGP_HEADER_LEN];
+    uint8_t expected[LIBBGP_BGP_HEADER_LEN];
+    size_t out_len = 99u;
+    libbgp_packet_t pkt;
+
+    memset(out, 0, sizeof(out));
+    memset(expected, 0, sizeof(expected));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_OPEN_AS2, LIBBGP_FIXTURE_OPEN_AS2_LEN, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_OPEN, pkt.type);
+
+    /* Exactly LIBBGP_BGP_HEADER_LEN: passes the < LIBBGP_BGP_HEADER_LEN branch but body_cap=0. */
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_packet_write(&pkt, out, LIBBGP_BGP_HEADER_LEN, &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(out));
+
+    libbgp_packet_destroy(&pkt);
+}
+
 /* RFC 4271 Section 4: packet init/destroy with NULL is a no-op.
  * Covers src/packet.c lines 10, 20. */
 LIBBGP_TEST(packet_init_destroy_null_is_noop)
@@ -457,6 +482,7 @@ int main(void)
         { "packet_parse_known_body_failure_preserves_existing_packet", packet_parse_known_body_failure_preserves_existing_packet },
         { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },
         { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged },
+        { "packet_write_open_header_only_buffer_returns_buffer_error", packet_write_open_header_only_buffer_returns_buffer_error },
         { "packet_init_destroy_null_is_noop", packet_init_destroy_null_is_noop },
         { "packet_parse_short_notification_body_sets_header_error", packet_parse_short_notification_body_sets_header_error },
         { "packet_write_null_out_len_still_writes", packet_write_null_out_len_still_writes },
