@@ -36,10 +36,6 @@ libbgp_err_t bgp_packet_parse_as4_detail(
     size_t *consumed,
     bgp_parse_error_detail_t *detail);
 
-bool bgp_as_path_segments_are_contiguous(
-    const libbgp_as_path_segment_t *segments,
-    size_t segment_count);
-
 void bgp_as_path_segments_free(
     libbgp_as_path_segment_t *segments,
     size_t segment_count);

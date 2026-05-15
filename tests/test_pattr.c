@@ -9,6 +9,11 @@ typedef struct fail_after_alloc_ctx {
     size_t fail_at;
 } fail_after_alloc_ctx_t;
 
+typedef struct counting_free_ctx {
+    size_t frees;
+    void *skip_free;
+} counting_free_ctx_t;
+
 static void *fail_after_malloc(size_t size, void *ctx)
 {
     fail_after_alloc_ctx_t *fail_ctx = (fail_after_alloc_ctx_t *)ctx;
@@ -48,6 +53,35 @@ static void fail_after_free(void *ptr, void *ctx)
     free(ptr);
 }
 
+static void *counting_malloc(size_t size, void *ctx)
+{
+    (void)ctx;
+    return malloc(size);
+}
+
+static void *counting_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)ctx;
+    return calloc(nmemb, size);
+}
+
+static void *counting_realloc(void *ptr, size_t size, void *ctx)
+{
+    (void)ctx;
+    return realloc(ptr, size);
+}
+
+static void counting_free(void *ptr, void *ctx)
+{
+    counting_free_ctx_t *free_ctx = (counting_free_ctx_t *)ctx;
+
+    free_ctx->frees++;
+    if (ptr == free_ctx->skip_free) {
+        return;
+    }
+    free(ptr);
+}
+
 static libbgp_alloc_t fail_after_alloc_make(fail_after_alloc_ctx_t *ctx)
 {
     libbgp_alloc_t alloc;
@@ -56,6 +90,18 @@ static libbgp_alloc_t fail_after_alloc_make(fail_after_alloc_ctx_t *ctx)
     alloc.calloc = fail_after_calloc;
     alloc.realloc = fail_after_realloc;
     alloc.free = fail_after_free;
+    alloc.ctx = ctx;
+    return alloc;
+}
+
+static libbgp_alloc_t counting_alloc_make(counting_free_ctx_t *ctx)
+{
+    libbgp_alloc_t alloc;
+
+    alloc.malloc = counting_malloc;
+    alloc.calloc = counting_calloc;
+    alloc.realloc = counting_realloc;
+    alloc.free = counting_free;
     alloc.ctx = ctx;
     return alloc;
 }
@@ -350,7 +396,7 @@ LIBBGP_TEST(pattr_as_path_contiguous_alloc_roundtrip)
         1u, 1u,
         0x00u, 0x00u, 0xfdu, 0xf2u,
         2u, 2u,
-        0x00u, 0x00u, 0xfdu, 0xf4u,
+        0x00u, 0x00u, 0xfdu, 0xfcu,
         0x00u, 0x00u, 0xfdu, 0xfdu
     };
     fail_after_alloc_ctx_t fail_ctx = { 0u, SIZE_MAX };
@@ -373,9 +419,36 @@ LIBBGP_TEST(pattr_as_path_contiguous_alloc_roundtrip)
     LIBBGP_ASSERT_EQ_U64(65001u, attr->data.as_path.segments[0].asns[0]);
     LIBBGP_ASSERT_EQ_U64(1u, attr->data.as_path.segments[1].asn_count);
     LIBBGP_ASSERT_EQ_U64(2u, attr->data.as_path.segments[2].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65020u, attr->data.as_path.segments[2].asns[0]);
     LIBBGP_ASSERT_EQ_U64(65021u, attr->data.as_path.segments[2].asns[1]);
 
     libbgp_pattr_unref(attr);
+}
+
+LIBBGP_TEST(pattr_as_path_manual_layout_match_still_frees_segment_asns)
+{
+    counting_free_ctx_t free_ctx = { 0u, NULL };
+    libbgp_alloc_t counting_alloc = counting_alloc_make(&free_ctx);
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_as_path_segment_t *segments;
+    uint32_t *asns;
+
+    LIBBGP_ASSERT(attr != NULL);
+    segments = (libbgp_as_path_segment_t *)malloc(sizeof(*segments));
+    LIBBGP_ASSERT(segments != NULL);
+    asns = (uint32_t *)((uint8_t *)segments + sizeof(*segments));
+    free_ctx.skip_free = asns;
+    segments[0].type = 2u;
+    segments[0].asn_count = 1u;
+    segments[0].asns = asns;
+    attr->data.as_path.segment_count = 1u;
+    attr->data.as_path.segments = segments;
+
+    libbgp_set_alloc(&counting_alloc);
+    libbgp_pattr_unref(attr);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_U64(3u, free_ctx.frees);
 }
 
 LIBBGP_TEST(pattr_parse_as_path_allocation_failure_cleans_partial_segments)
@@ -1487,6 +1560,7 @@ int main(void)
         { "pattr_parse_write_aggregator_community_and_as_paths", pattr_parse_write_aggregator_community_and_as_paths },
         { "pattr_parse_rejects_as_path_segment_count_overrun_variants", pattr_parse_rejects_as_path_segment_count_overrun_variants },
         { "pattr_as_path_contiguous_alloc_roundtrip", pattr_as_path_contiguous_alloc_roundtrip },
+        { "pattr_as_path_manual_layout_match_still_frees_segment_asns", pattr_as_path_manual_layout_match_still_frees_segment_asns },
         { "pattr_parse_as_path_allocation_failure_cleans_partial_segments", pattr_parse_as_path_allocation_failure_cleans_partial_segments },
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_wire_len_matches_write_and_rejects_invalid_write_state", pattr_wire_len_matches_write_and_rejects_invalid_write_state },
