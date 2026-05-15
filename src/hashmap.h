@@ -37,6 +37,7 @@ libbgp_err_t bgp_hashmap_init(
     bgp_entry_free_fn free_entry,
     void *ctx);
 void bgp_hashmap_destroy(bgp_hashmap_t *map);
+libbgp_err_t bgp_hashmap_reserve(bgp_hashmap_t *map, size_t count);
 libbgp_err_t bgp_hashmap_insert(bgp_hashmap_t *map, void *key, void *value);
 libbgp_err_t bgp_hashmap_remove_one(bgp_hashmap_t *map, const void *key, const void *value);
 void *bgp_hashmap_find_first(const bgp_hashmap_t *map, const void *key);

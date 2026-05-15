@@ -12,6 +12,8 @@
 #include "libbgp/rib6.h"
 #include "libbgp/sink.h"
 #include "libbgp/update.h"
+#include "libbgp/alloc.h"
+#include "../src/hashmap.h"
 #include "../src/rib_internal.h"
 #include "../tests/fixtures/bgp_packets.h"
 
@@ -90,6 +92,25 @@ static libbgp_rib4_route_t route4(libbgp_prefix4_t prefix, uint32_t source, uint
     route.local_pref = local_pref;
     route.origin = 0u;
     return route;
+}
+
+static uint64_t bench_u64_hash(const void *key, void *ctx)
+{
+    (void)ctx;
+    return *(const uint64_t *)key * 11400714819323198485ull;
+}
+
+static bool bench_u64_eq(const void *a, const void *b, void *ctx)
+{
+    (void)ctx;
+    return *(const uint64_t *)a == *(const uint64_t *)b;
+}
+
+static void bench_u64_free(void *key, void *value, void *ctx)
+{
+    (void)value;
+    (void)ctx;
+    libbgp_free(key);
 }
 
 static void print_result(const char *name, size_t ops, uint64_t elapsed_ns)
@@ -1078,6 +1099,47 @@ static int bench_hashmap_load_factor(void)
     return 0;
 }
 
+static int bench_hashmap_batch_insert(size_t count, bool use_reserve)
+{
+    bgp_hashmap_t map;
+    uint64_t start;
+    uint64_t elapsed;
+    size_t i;
+    char name[64];
+
+    if (bgp_hashmap_init(&map, bench_u64_hash, bench_u64_eq, bench_u64_free, NULL) != LIBBGP_OK) {
+        return 1;
+    }
+    if (use_reserve && bgp_hashmap_reserve(&map, count) != LIBBGP_OK) {
+        bgp_hashmap_destroy(&map);
+        return 1;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < count; i++) {
+        uint64_t *key = (uint64_t *)libbgp_malloc(sizeof(*key));
+
+        if (key == NULL) {
+            bgp_hashmap_destroy(&map);
+            return 1;
+        }
+        *key = (uint64_t)i;
+        if (bgp_hashmap_insert(&map, key, NULL) != LIBBGP_OK) {
+            libbgp_free(key);
+            bgp_hashmap_destroy(&map);
+            return 1;
+        }
+    }
+    elapsed = now_ns() - start;
+
+    snprintf(name, sizeof(name), "hashmap insert %s", use_reserve ? "reserved" : "default");
+    print_result(name, count, elapsed);
+    bench_sink_value += bgp_hashmap_len(&map);
+
+    bgp_hashmap_destroy(&map);
+    return 0;
+}
+
 static int bench_sink_pop_packets(libbgp_sink_t *sink, libbgp_packet_t *pkt, size_t count)
 {
     size_t i;
@@ -1276,6 +1338,7 @@ int main(void)
     size_t small = env_size("LIBBGP_BENCH_SMALL", 1000u);
     size_t large = env_size("LIBBGP_BENCH_LARGE", 10000u);
     size_t subscribers = env_size("LIBBGP_BENCH_SUBSCRIBERS", small);
+    size_t hashmap_inserts = env_size("LIBBGP_BENCH_HASHMAP_INSERTS", large);
     int rc = 0;
 
     printf("libbgp bench: small=%zu large=%zu subscribers=%zu\n", small, large, subscribers);
@@ -1304,6 +1367,8 @@ int main(void)
     rc |= bench_rib4_maintenance_after_radix(1000);
     rc |= bench_rib4_maintenance_after_radix(10000);
     rc |= bench_hashmap_load_factor();
+    rc |= bench_hashmap_batch_insert(hashmap_inserts, false);
+    rc |= bench_hashmap_batch_insert(hashmap_inserts, true);
     rc |= bench_sink_fragmented_feed(small);
     rc |= bench_sink_feed_chunks(1u);
     rc |= bench_sink_feed_chunks(10u);
