@@ -388,25 +388,22 @@ LIBBGP_TEST(packet_write_known_body_failure_leaves_output_unchanged)
     libbgp_packet_destroy(&pkt);
 }
 
-/* Regression: buf_len == LIBBGP_BGP_HEADER_LEN passes the initial size check but leaves zero
- * body capacity. packet_write_body returns LIBBGP_ERR_BUFFER; Option B ensures the body area
- * (0 bytes here) is cleared and the header is never backfilled, leaving the buffer unchanged. */
+/* Regression: a too-small OPEN output buffer must not be mutated on LIBBGP_ERR_BUFFER. */
 LIBBGP_TEST(packet_write_open_header_only_buffer_returns_buffer_error)
 {
-    uint8_t out[LIBBGP_BGP_HEADER_LEN];
-    uint8_t expected[LIBBGP_BGP_HEADER_LEN];
+    uint8_t out[LIBBGP_BGP_HEADER_LEN + 1u];
+    uint8_t expected[sizeof(out)];
     size_t out_len = 99u;
     libbgp_packet_t pkt;
 
-    memset(out, 0, sizeof(out));
-    memset(expected, 0, sizeof(expected));
+    memset(out, 0x5au, sizeof(out));
+    memcpy(expected, out, sizeof(expected));
 
     libbgp_packet_init(&pkt);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_parse(&pkt, LIBBGP_FIXTURE_OPEN_AS2, LIBBGP_FIXTURE_OPEN_AS2_LEN, NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_OPEN, pkt.type);
 
-    /* Exactly LIBBGP_BGP_HEADER_LEN: passes the < LIBBGP_BGP_HEADER_LEN branch but body_cap=0. */
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_packet_write(&pkt, out, LIBBGP_BGP_HEADER_LEN, &out_len));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(99u, out_len);
     LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(out));
 

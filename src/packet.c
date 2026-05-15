@@ -308,11 +308,6 @@ libbgp_err_t libbgp_packet_write(
         &raw_type,
         &body_len);
     if (err != LIBBGP_OK) {
-        if (err == LIBBGP_ERR_BUFFER) {
-            /* Clear any partial write: packet_write_body may have written bytes before
-             * detecting the overflow, so zero the body area to restore the caller's buffer. */
-            memset(buf + LIBBGP_BGP_HEADER_LEN, 0, buf_len - LIBBGP_BGP_HEADER_LEN);
-        }
         return err;
     }
     if (body_len > max_body_len) {
