@@ -268,7 +268,32 @@ LIBBGP_TEST(prefix6_mask_eq_includes_cmp)
     LIBBGP_ASSERT(libbgp_prefix6_cmp(&p64, &p64_high) < 0);
 }
 
-int main(void)
+LIBBGP_TEST(test_cidr_to_mask_all_values)
+{
+    uint8_t bytes32[4];
+    uint32_t mask32;
+    uint8_t bytes8[4];
+    uint32_t mask8;
+
+    /* /0 should be all zeros */
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_cidr_to_mask(0));
+    /* /32 should be all ones in NBO */
+    mask32 = libbgp_cidr_to_mask(32);
+    memcpy(bytes32, &mask32, 4);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[0]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[1]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[2]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[3]);
+    /* /8 */
+    mask8 = libbgp_cidr_to_mask(8);
+    memcpy(bytes8, &mask8, 4);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes8[0]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[1]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[2]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[3]);
+    /* /33 invalid */
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_cidr_to_mask(33));
+}int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "prefix4_parse_write_roundtrip_masks_partial", prefix4_parse_write_roundtrip_masks_partial },
@@ -278,7 +303,8 @@ int main(void)
         { "prefix6_parse_write_roundtrip_masks_partial", prefix6_parse_write_roundtrip_masks_partial },
         { "prefix6_rejects_invalid_lengths_and_buffers", prefix6_rejects_invalid_lengths_and_buffers },
         { "prefix6_parse_write_exact_128_boundary_and_nullable_lengths", prefix6_parse_write_exact_128_boundary_and_nullable_lengths },
-        { "prefix6_mask_eq_includes_cmp", prefix6_mask_eq_includes_cmp }
+        { "prefix6_mask_eq_includes_cmp", prefix6_mask_eq_includes_cmp },
+        { "test_cidr_to_mask_all_values", test_cidr_to_mask_all_values }
     };
 
     return libbgp_run_tests("prefix", tests, LIBBGP_ARRAY_LEN(tests));

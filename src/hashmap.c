@@ -9,7 +9,8 @@
 
 static size_t bucket_index(uint64_t hash, size_t bucket_count)
 {
-    return (size_t)(hash % (uint64_t)bucket_count);
+    /* bucket_count is always a power of two; bitmask is faster than modulo */
+    return (size_t)(hash & (uint64_t)(bucket_count - 1u));
 }
 
 static libbgp_err_t hashmap_alloc_buckets(bgp_hashmap_entry_t ***out, size_t count)

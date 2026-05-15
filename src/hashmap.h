@@ -21,6 +21,7 @@ typedef struct bgp_hashmap_entry {
 
 typedef struct bgp_hashmap {
     bgp_hashmap_entry_t **buckets;
+    /* bucket_count is always a power of two (starts at 16, doubles on resize) */
     size_t bucket_count;
     size_t len;
     bgp_hash_fn hash;
