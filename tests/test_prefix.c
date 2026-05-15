@@ -270,43 +270,27 @@ LIBBGP_TEST(prefix6_mask_eq_includes_cmp)
 
 LIBBGP_TEST(test_cidr_to_mask_all_values)
 {
-    uint8_t bytes32[4];
-    uint32_t mask32;
-    uint8_t bytes8[4];
-    uint32_t mask8;
+    uint8_t cidr;
 
-    /* /0 should be all zeros */
-    LIBBGP_ASSERT_EQ_U64(0u, libbgp_cidr_to_mask(0));
-    /* /32 should be all ones in NBO */
-    mask32 = libbgp_cidr_to_mask(32);
-    memcpy(bytes32, &mask32, 4);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[0]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[1]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[2]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes32[3]);
-    /* /8 */
-    mask8 = libbgp_cidr_to_mask(8);
-    memcpy(bytes8, &mask8, 4);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes8[0]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[1]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[2]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[3]);
-    /* /16 */
-    uint8_t bytes16[4];
-    uint32_t mask16 = libbgp_cidr_to_mask(16);
-    memcpy(bytes16, &mask16, 4);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes16[0]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes16[1]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes16[2]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes16[3]);
-    /* /24 */
-    uint8_t bytes24[4];
-    uint32_t mask24 = libbgp_cidr_to_mask(24);
-    memcpy(bytes24, &mask24, 4);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[0]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[1]);
-    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[2]);
-    LIBBGP_ASSERT_EQ_U64(0x00u, bytes24[3]);
+    for (cidr = 0u; cidr <= 32u; cidr++) {
+        uint8_t bytes[4];
+        uint8_t expected[4] = { 0u, 0u, 0u, 0u };
+        uint32_t mask = libbgp_cidr_to_mask(cidr);
+        uint8_t full = (uint8_t)(cidr / 8u);
+        uint8_t rem = (uint8_t)(cidr % 8u);
+        uint8_t i;
+
+        for (i = 0u; i < full; i++) {
+            expected[i] = 0xffu;
+        }
+        if (rem != 0u) {
+            expected[full] = (uint8_t)(0xffu << (8u - rem));
+        }
+
+        memcpy(bytes, &mask, sizeof(bytes));
+        LIBBGP_ASSERT_BYTES_EQ(expected, bytes, sizeof(bytes));
+    }
+
     /* /33 invalid */
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_cidr_to_mask(33));
 }
