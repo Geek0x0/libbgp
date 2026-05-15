@@ -14,32 +14,33 @@ static uint8_t partial_mask(uint8_t bits)
     return (uint8_t)(0xffu << (8u - bits));
 }
 
+static const uint32_t cidr_masks_nbo[33] = {
+    0x00000000u,
+    0x80000000u, 0xc0000000u, 0xe0000000u, 0xf0000000u,
+    0xf8000000u, 0xfc000000u, 0xfe000000u, 0xff000000u,
+    0xff800000u, 0xffc00000u, 0xffe00000u, 0xfff00000u,
+    0xfff80000u, 0xfffc0000u, 0xfffe0000u, 0xffff0000u,
+    0xffff8000u, 0xffffc000u, 0xffffe000u, 0xfffff000u,
+    0xfffff800u, 0xfffffc00u, 0xfffffe00u, 0xffffff00u,
+    0xffffff80u, 0xffffffc0u, 0xffffffe0u, 0xfffffff0u,
+    0xfffffff8u, 0xfffffffcu, 0xfffffffeu, 0xffffffffu
+};
+
 uint32_t libbgp_cidr_to_mask(uint8_t cidr)
 {
-    uint8_t bytes[4] = { 0u, 0u, 0u, 0u };
-    size_t full;
-    uint8_t rem;
-    size_t i;
-
     if (cidr > 32u) {
         return 0u;
     }
-
-    full = (size_t)cidr / 8u;
-    rem = (uint8_t)(cidr % 8u);
-
-    for (i = 0u; i < full; i++) {
-        bytes[i] = 0xffu;
-    }
-    if (rem != 0u) {
-        bytes[full] = partial_mask(rem);
-    }
-
-    {
-        uint32_t mask = 0u;
-        memcpy(&mask, bytes, sizeof(mask));
-        return mask;
-    }
+    /* cidr_masks_nbo holds host-order bit patterns; pack as NBO bytes via memcpy */
+    uint32_t hp = cidr_masks_nbo[cidr];
+    uint8_t bytes[4];
+    uint32_t result;
+    bytes[0] = (uint8_t)(hp >> 24);
+    bytes[1] = (uint8_t)(hp >> 16);
+    bytes[2] = (uint8_t)(hp >> 8);
+    bytes[3] = (uint8_t)(hp);
+    memcpy(&result, bytes, sizeof(result));
+    return result;
 }
 
 libbgp_err_t libbgp_prefix4_parse(
