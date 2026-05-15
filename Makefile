@@ -130,8 +130,8 @@ bench:
 profile-perf: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
 profile-perf: $(BENCH_BINS)
 	perf stat -d $(BUILD_DIR)/bench/bench
-	perf record -g -- $(BUILD_DIR)/bench/bench
-	@echo "Run 'perf report' to analyze"
+	perf record -g -o $(BUILD_DIR)/perf.data -- $(BUILD_DIR)/bench/bench
+	@echo "Run 'perf report -i $(BUILD_DIR)/perf.data' to analyze"
 
 profile-callgrind: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
 profile-callgrind: $(BENCH_BINS)
@@ -140,8 +140,8 @@ profile-callgrind: $(BENCH_BINS)
 
 profile-heaptrack: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
 profile-heaptrack: $(BENCH_BINS)
-	heaptrack $(BUILD_DIR)/bench/bench
-	@echo "Run 'heaptrack_print heaptrack.*.gz'"
+	heaptrack -o $(BUILD_DIR)/libbgp.heaptrack $(BUILD_DIR)/bench/bench
+	@echo "Run 'heaptrack_print $(BUILD_DIR)/libbgp.heaptrack.gz'"
 
 profile-cache: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
 profile-cache: $(BENCH_BINS)
