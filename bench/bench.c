@@ -1161,6 +1161,65 @@ static int bench_sink_fragmented_feed(size_t cycles)
     return 0;
 }
 
+static int bench_sink_feed_chunks(size_t chunk_size)
+{
+    libbgp_sink_t sink;
+    uint64_t start;
+    uint64_t elapsed;
+    size_t total_fed = 0u;
+    size_t packets_parsed = 0u;
+    size_t iterations = 1000u;
+    size_t i;
+    char name[64];
+
+    if (chunk_size == 0u) {
+        return 1;
+    }
+    if (libbgp_sink_init(&sink) != LIBBGP_OK) {
+        return 1;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < iterations; i++) {
+        size_t offset = 0u;
+
+        while (offset < BENCH_KEEPALIVE_BYTES) {
+            size_t feed_len = chunk_size;
+
+            if (offset + feed_len > BENCH_KEEPALIVE_BYTES) {
+                feed_len = BENCH_KEEPALIVE_BYTES - offset;
+            }
+            if (libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE + offset, feed_len) != LIBBGP_OK) {
+                libbgp_sink_destroy(&sink);
+                return 1;
+            }
+            offset += feed_len;
+            total_fed += feed_len;
+        }
+        {
+            libbgp_packet_t pkt;
+
+            libbgp_packet_init(&pkt);
+            if (libbgp_sink_pop(&sink, &pkt) != LIBBGP_OK) {
+                libbgp_packet_destroy(&pkt);
+                libbgp_sink_destroy(&sink);
+                return 1;
+            }
+            packets_parsed++;
+            bench_sink_value += (uint64_t)pkt.type;
+            libbgp_packet_destroy(&pkt);
+        }
+    }
+    elapsed = now_ns() - start;
+
+    snprintf(name, sizeof(name), "sink feed chunk=%zu", chunk_size);
+    print_result(name, iterations, elapsed);
+    bench_sink_value += total_fed + packets_parsed;
+
+    libbgp_sink_destroy(&sink);
+    return 0;
+}
+
 /* Sink缓冲区吞吐量分析 */
 static int bench_sink_throughput_analysis(void)
 {
@@ -1246,6 +1305,9 @@ int main(void)
     rc |= bench_rib4_maintenance_after_radix(10000);
     rc |= bench_hashmap_load_factor();
     rc |= bench_sink_fragmented_feed(small);
+    rc |= bench_sink_feed_chunks(1u);
+    rc |= bench_sink_feed_chunks(10u);
+    rc |= bench_sink_feed_chunks(19u);
     rc |= bench_sink_throughput_analysis();
     
     printf("bench guard: %" PRIu64 "\n", bench_sink_value);

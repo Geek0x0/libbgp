@@ -67,28 +67,54 @@ static void sink_compact_buf(sink_impl_t *impl)
 static bool sink_reserve_buf(sink_impl_t *impl, size_t len)
 {
     uint8_t *buf;
+    size_t available_at_tail;
     size_t needed;
+    size_t required_cap;
     size_t new_cap;
 
     if (len > SIZE_MAX - impl->buf_len) {
         return false;
     }
     needed = impl->buf_len + len;
-    if (impl->buf_off <= impl->buf_cap && len <= impl->buf_cap - impl->buf_off - impl->buf_len) {
+    if (impl->buf_off > impl->buf_cap || impl->buf_len > impl->buf_cap - impl->buf_off) {
+        return false;
+    }
+    available_at_tail = impl->buf_cap - impl->buf_off - impl->buf_len;
+    if (len <= available_at_tail) {
         return true;
     }
-    if (needed <= impl->buf_cap) {
+
+    if (impl->buf_off > 0u && impl->buf_off >= impl->buf_cap / 2u) {
+        sink_compact_buf(impl);
+        available_at_tail = impl->buf_cap - impl->buf_len;
+        if (len <= available_at_tail) {
+            return true;
+        }
+    } else if (impl->buf_off > 0u && needed <= impl->buf_cap) {
         sink_compact_buf(impl);
         return true;
     }
-    new_cap = impl->buf_cap == 0u ? LIBBGP_BGP_HEADER_LEN : impl->buf_cap * 2u;
-    while (new_cap < needed) {
+
+    required_cap = needed;
+    if (impl->buf_off > 0u) {
+        if (needed > SIZE_MAX - impl->buf_off) {
+            return false;
+        }
+        required_cap = impl->buf_off + needed;
+    }
+    if (impl->buf_cap == 0u) {
+        new_cap = LIBBGP_BGP_HEADER_LEN;
+    } else if (impl->buf_cap > SIZE_MAX / 2u) {
+        new_cap = required_cap;
+    } else {
+        new_cap = impl->buf_cap * 2u;
+    }
+    while (new_cap < required_cap) {
         if (new_cap > SIZE_MAX / 2u) {
             return false;
         }
         new_cap *= 2u;
     }
-    sink_compact_buf(impl);
     buf = (uint8_t *)bgp_realloc(impl->buf, new_cap);
     if (buf == NULL) {
         return false;
