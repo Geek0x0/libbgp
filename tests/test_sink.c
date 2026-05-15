@@ -13,6 +13,24 @@ typedef struct sink_fail_alloc_ctx {
     size_t fail_realloc_after;
 } sink_fail_alloc_ctx_t;
 
+typedef struct sink_impl_prefix {
+    uint8_t *buf;
+    size_t buf_off;
+    size_t buf_len;
+    size_t buf_cap;
+} sink_impl_prefix_t;
+
+static sink_impl_prefix_t sink_impl_prefix_copy(const libbgp_sink_t *sink)
+{
+    sink_impl_prefix_t prefix;
+
+    memset(&prefix, 0, sizeof(prefix));
+    if (sink != NULL && sink->impl != NULL) {
+        memcpy(&prefix, sink->impl, sizeof(prefix));
+    }
+    return prefix;
+}
+
 static void *sink_fail_alloc_malloc(size_t size, void *ctx)
 {
     (void)ctx;
@@ -513,6 +531,40 @@ LIBBGP_TEST(sink_compacts_buffer_when_tail_space_exhausted)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_delays_compact_when_growth_is_needed_before_half_offset)
+{
+    uint8_t first[100];
+    uint8_t more[80];
+    sink_impl_prefix_t prefix;
+    libbgp_sink_t sink;
+
+    memcpy(first, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    memset(first + LIBBGP_FIXTURE_KEEPALIVE_LEN, 0, sizeof(first) - LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    memset(first + LIBBGP_FIXTURE_KEEPALIVE_LEN, 0xff, LIBBGP_BGP_MARKER_LEN);
+    first[LIBBGP_FIXTURE_KEEPALIVE_LEN + 16u] = 0x10u;
+    first[LIBBGP_FIXTURE_KEEPALIVE_LEN + 17u] = 0x00u;
+    first[LIBBGP_FIXTURE_KEEPALIVE_LEN + 18u] = 0x63u;
+    memset(more, 0xa5, sizeof(more));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, first, sizeof(first)));
+
+    prefix = sink_impl_prefix_copy(&sink);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FIXTURE_KEEPALIVE_LEN, prefix.buf_off);
+    LIBBGP_ASSERT_EQ_U64(sizeof(first) - LIBBGP_FIXTURE_KEEPALIVE_LEN, prefix.buf_len);
+    LIBBGP_ASSERT(prefix.buf_off < prefix.buf_cap / 2u);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, more, sizeof(more)));
+
+    prefix = sink_impl_prefix_copy(&sink);
+    LIBBGP_ASSERT_EQ_U64(LIBBGP_FIXTURE_KEEPALIVE_LEN, prefix.buf_off);
+    LIBBGP_ASSERT_EQ_U64((sizeof(first) - LIBBGP_FIXTURE_KEEPALIVE_LEN) + sizeof(more), prefix.buf_len);
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(prefix.buf_len, libbgp_sink_buffered_len(&sink));
+
+    libbgp_sink_destroy(&sink);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -536,7 +588,8 @@ int main(void)
         { "sink_feeds_and_pops_1k_keepalive_batch", sink_feeds_and_pops_1k_keepalive_batch },
         { "sink_feeds_and_pops_10k_keepalive_batch", sink_feeds_and_pops_10k_keepalive_batch },
         { "sink_reuses_packet_queue_slots_after_partial_pop", sink_reuses_packet_queue_slots_after_partial_pop },
-        { "sink_compacts_buffer_when_tail_space_exhausted", sink_compacts_buffer_when_tail_space_exhausted }
+        { "sink_compacts_buffer_when_tail_space_exhausted", sink_compacts_buffer_when_tail_space_exhausted },
+        { "sink_delays_compact_when_growth_is_needed_before_half_offset", sink_delays_compact_when_growth_is_needed_before_half_offset }
     };
 
     return libbgp_run_tests("sink", tests, LIBBGP_ARRAY_LEN(tests));
