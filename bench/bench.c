@@ -374,6 +374,7 @@ static int bench_rib_discard_collect(size_t routes_per_source)
 
 static int bench_fsm_apply_update(size_t prefixes_per_update)
 {
+    const size_t max_prefixes_per_update = 900u;
     struct libbgp_fsm_config config;
     libbgp_fsm_t fsm;
     libbgp_out_handler_t out_handler;
@@ -394,6 +395,12 @@ static int bench_fsm_apply_update(size_t prefixes_per_update)
 
     if (prefixes_per_update == 0u) {
         return 1;
+    }
+    if (prefixes_per_update > max_prefixes_per_update) {
+        printf("fsm update import: clamping prefixes_per_update from %zu to %zu\n",
+               prefixes_per_update,
+               max_prefixes_per_update);
+        prefixes_per_update = max_prefixes_per_update;
     }
 
     memset(&config, 0, sizeof(config));

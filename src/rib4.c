@@ -1232,7 +1232,7 @@ libbgp_err_t bgp_rib4_insert_track_best(
     bgp_rib4_change_t *change,
     uint64_t *update_id)
 {
-    return bgp_rib4_insert_track_best_save_replaced(rib, route, change, update_id, NULL, NULL);
+    return bgp_rib4_insert_track_best_save_replaced(rib, route, change, update_id, NULL, NULL, NULL);
 }
 
 libbgp_err_t bgp_rib4_insert_track_best_save_replaced(
@@ -1241,7 +1241,8 @@ libbgp_err_t bgp_rib4_insert_track_best_save_replaced(
     bgp_rib4_change_t *change,
     uint64_t *update_id,
     bgp_rib4_saved_route_t *replaced,
-    bool *had_replaced)
+    bool *had_replaced,
+    libbgp_rib4_route_t *best_snapshot)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
     const libbgp_rib4_route_t *before = NULL;
@@ -1258,6 +1259,12 @@ libbgp_err_t bgp_rib4_insert_track_best_save_replaced(
     }
     if (had_replaced != NULL) {
         *had_replaced = false;
+    }
+    if (update_id != NULL) {
+        *update_id = 0u;
+    }
+    if (best_snapshot != NULL) {
+        memset(best_snapshot, 0, sizeof(*best_snapshot));
     }
     if (impl == NULL || route == NULL || change == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -1284,7 +1291,16 @@ libbgp_err_t bgp_rib4_insert_track_best_save_replaced(
             kind = BGP_RIB_CHANGE_REPLACEMENT_BEST;
         }
         if (err == LIBBGP_OK) {
-            rib4_change_set(change, kind, after);
+            if ((kind == BGP_RIB_CHANGE_NEW_BEST ||
+                 kind == BGP_RIB_CHANGE_REPLACEMENT_BEST) &&
+                best_snapshot != NULL) {
+                err = bgp_rib4_route_snapshot_clone(after, best_snapshot);
+                if (err == LIBBGP_OK) {
+                    rib4_change_set(change, kind, best_snapshot);
+                }
+            } else {
+                rib4_change_set(change, kind, after);
+            }
         }
     }
     bgp_unlock(&impl->lock);
@@ -1335,7 +1351,8 @@ libbgp_err_t bgp_rib4_withdraw_track_best_save(
     const libbgp_prefix4_t *prefix,
     bgp_rib4_change_t *change,
     bgp_rib4_saved_route_t *saved,
-    bool *had_route)
+    bool *had_route,
+    libbgp_rib4_route_t *best_snapshot)
 {
     rib4_impl_t *impl = rib4_impl_get(rib);
     const libbgp_rib4_route_t *before = NULL;
@@ -1352,6 +1369,9 @@ libbgp_err_t bgp_rib4_withdraw_track_best_save(
     }
     if (had_route != NULL) {
         *had_route = false;
+    }
+    if (best_snapshot != NULL) {
+        memset(best_snapshot, 0, sizeof(*best_snapshot));
     }
     if (impl == NULL || prefix == NULL || change == NULL || saved == NULL) {
         return LIBBGP_ERR_INVALID;
@@ -1374,6 +1394,11 @@ libbgp_err_t bgp_rib4_withdraw_track_best_save(
             rib4_change_set(change, BGP_RIB_CHANGE_NO_BEST_CHANGE, after);
         } else if (after == NULL) {
             rib4_change_set(change, BGP_RIB_CHANGE_UNREACHABLE, NULL);
+        } else if (best_snapshot != NULL) {
+            err = bgp_rib4_route_snapshot_clone(after, best_snapshot);
+            if (err == LIBBGP_OK) {
+                rib4_change_set(change, BGP_RIB_CHANGE_REPLACEMENT_BEST, best_snapshot);
+            }
         } else {
             rib4_change_set(change, BGP_RIB_CHANGE_REPLACEMENT_BEST, after);
         }

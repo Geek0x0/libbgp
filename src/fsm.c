@@ -1046,7 +1046,8 @@ static libbgp_err_t fsm_update_journal_record4(
     uint64_t update_id,
     bool restore_replaced,
     bgp_rib4_saved_route_t *replaced,
-    bgp_rib4_change_t *change)
+    bgp_rib4_change_t *change,
+    libbgp_rib4_route_t *best_snapshot)
 {
     libbgp_err_t err;
     fsm_applied_route4_t *entry;
@@ -1072,9 +1073,14 @@ static libbgp_err_t fsm_update_journal_record4(
         if ((change->kind == BGP_RIB_CHANGE_NEW_BEST ||
              change->kind == BGP_RIB_CHANGE_REPLACEMENT_BEST) &&
             change->best != NULL) {
-            err = bgp_rib4_route_snapshot_clone(change->best, &entry->best_route);
-            if (err != LIBBGP_OK) {
-                return err;
+            if (best_snapshot != NULL) {
+                entry->best_route = *best_snapshot;
+                memset(best_snapshot, 0, sizeof(*best_snapshot));
+            } else {
+                err = bgp_rib4_route_snapshot_clone(change->best, &entry->best_route);
+                if (err != LIBBGP_OK) {
+                    return err;
+                }
             }
         }
     }
@@ -1100,7 +1106,8 @@ static libbgp_err_t fsm_update_journal_record6(
     uint64_t update_id,
     bool restore_replaced,
     bgp_rib6_saved_route_t *replaced,
-    bgp_rib6_change_t *change)
+    bgp_rib6_change_t *change,
+    libbgp_rib6_route_t *best_snapshot)
 {
     libbgp_err_t err;
     fsm_applied_route6_t *entry;
@@ -1126,9 +1133,14 @@ static libbgp_err_t fsm_update_journal_record6(
         if ((change->kind == BGP_RIB_CHANGE_NEW_BEST ||
              change->kind == BGP_RIB_CHANGE_REPLACEMENT_BEST) &&
             change->best != NULL) {
-            err = bgp_rib6_route_snapshot_clone(change->best, &entry->best_route);
-            if (err != LIBBGP_OK) {
-                return err;
+            if (best_snapshot != NULL) {
+                entry->best_route = *best_snapshot;
+                memset(best_snapshot, 0, sizeof(*best_snapshot));
+            } else {
+                err = bgp_rib6_route_snapshot_clone(change->best, &entry->best_route);
+                if (err != LIBBGP_OK) {
+                    return err;
+                }
             }
         }
     }
@@ -1194,6 +1206,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw4(
 {
     libbgp_err_t err;
     bgp_rib4_change_t change;
+    libbgp_rib4_route_t best_snapshot;
     bool had_route = false;
     fsm_withdrawn_route4_t *entry;
 
@@ -1201,6 +1214,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw4(
         return LIBBGP_OK;
     }
     memset(&change, 0, sizeof(change));
+    memset(&best_snapshot, 0, sizeof(best_snapshot));
     err = fsm_update_journal_reserve_withdrawn4(journal);
     if (err != LIBBGP_OK) {
         return err;
@@ -1208,15 +1222,18 @@ static libbgp_err_t fsm_update_journal_record_withdraw4(
     entry = &journal->withdrawn4[journal->withdrawn4_count];
     memset(entry, 0, sizeof(*entry));
     entry->prefix = *prefix;
-    err = bgp_rib4_withdraw_track_best_save(rib4, peer_bgp_id, prefix, &change, &entry->saved, &had_route);
+    err = bgp_rib4_withdraw_track_best_save(
+        rib4,
+        peer_bgp_id,
+        prefix,
+        &change,
+        &entry->saved,
+        &had_route,
+        &best_snapshot);
     if (err == LIBBGP_OK && had_route) {
         if (change.kind == BGP_RIB_CHANGE_REPLACEMENT_BEST && change.best != NULL) {
-            err = bgp_rib4_route_snapshot_clone(change.best, &entry->replacement_route);
-            if (err != LIBBGP_OK) {
-                (void)bgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &entry->saved);
-                bgp_rib4_saved_route_destroy(&entry->saved);
-                return err;
-            }
+            entry->replacement_route = best_snapshot;
+            memset(&best_snapshot, 0, sizeof(best_snapshot));
             entry->publish_replacement = true;
         } else if (change.kind == BGP_RIB_CHANGE_UNREACHABLE) {
             entry->publish_withdrawn = true;
@@ -1237,6 +1254,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw4(
         (void)bgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &entry->saved);
         bgp_rib4_saved_route_destroy(&entry->saved);
     }
+    bgp_rib4_route_snapshot_destroy(&best_snapshot);
     return err;
 }
 
@@ -1248,6 +1266,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
 {
     libbgp_err_t err;
     bgp_rib6_change_t change;
+    libbgp_rib6_route_t best_snapshot;
     bool had_route = false;
     fsm_withdrawn_route6_t *entry;
 
@@ -1255,6 +1274,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
         return LIBBGP_OK;
     }
     memset(&change, 0, sizeof(change));
+    memset(&best_snapshot, 0, sizeof(best_snapshot));
     err = fsm_update_journal_reserve_withdrawn6(journal);
     if (err != LIBBGP_OK) {
         return err;
@@ -1262,15 +1282,18 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
     entry = &journal->withdrawn6[journal->withdrawn6_count];
     memset(entry, 0, sizeof(*entry));
     entry->prefix = *prefix;
-    err = bgp_rib6_withdraw_track_best_save(rib6, peer_bgp_id, prefix, &change, &entry->saved, &had_route);
+    err = bgp_rib6_withdraw_track_best_save(
+        rib6,
+        peer_bgp_id,
+        prefix,
+        &change,
+        &entry->saved,
+        &had_route,
+        &best_snapshot);
     if (err == LIBBGP_OK && had_route) {
         if (change.kind == BGP_RIB_CHANGE_REPLACEMENT_BEST && change.best != NULL) {
-            err = bgp_rib6_route_snapshot_clone(change.best, &entry->replacement_route);
-            if (err != LIBBGP_OK) {
-                (void)bgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &entry->saved);
-                bgp_rib6_saved_route_destroy(&entry->saved);
-                return err;
-            }
+            entry->replacement_route = best_snapshot;
+            memset(&best_snapshot, 0, sizeof(best_snapshot));
             entry->publish_replacement = true;
         } else if (change.kind == BGP_RIB_CHANGE_UNREACHABLE) {
             entry->publish_withdrawn = true;
@@ -1291,6 +1314,7 @@ static libbgp_err_t fsm_update_journal_record_withdraw6(
         (void)bgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &entry->saved);
         bgp_rib6_saved_route_destroy(&entry->saved);
     }
+    bgp_rib6_route_snapshot_destroy(&best_snapshot);
     return err;
 }
 
@@ -2208,12 +2232,14 @@ static libbgp_err_t fsm_apply_update(
     }
     for (i = 0u; impl->send_ipv4_routes && !ignore_advertisements && i < update->nlri_count; i++) {
         libbgp_rib4_route_t route;
+        libbgp_rib4_route_t best_snapshot;
         bgp_rib4_change_t change;
         bgp_rib4_saved_route_t replaced;
         bool had_replaced = false;
         bool restore_replaced = false;
         uint64_t update_id = 0u;
         err = LIBBGP_OK;
+        memset(&best_snapshot, 0, sizeof(best_snapshot));
         memset(&change, 0, sizeof(change));
         memset(&replaced, 0, sizeof(replaced));
 
@@ -2241,7 +2267,8 @@ static libbgp_err_t fsm_apply_update(
                 &change,
                 &update_id,
                 &replaced,
-                &had_replaced);
+                &had_replaced,
+                &best_snapshot);
             if (err == LIBBGP_OK && had_replaced) {
                 uint64_t replaced_update_id = 0u;
 
@@ -2258,12 +2285,14 @@ static libbgp_err_t fsm_apply_update(
                 update_id,
                 restore_replaced,
                 &replaced,
-                &change);
+                &change,
+                &best_snapshot);
         }
         if (err != LIBBGP_OK && rib4 != NULL) {
             (void)bgp_rib4_withdraw_exact_if_update_id(rib4, peer_bgp_id, &route.prefix, update_id);
             (void)bgp_rib4_restore_saved_if_absent(rib4, peer_bgp_id, &replaced);
         }
+        bgp_rib4_route_snapshot_destroy(&best_snapshot);
         bgp_rib4_saved_route_destroy(&replaced);
         if (err != LIBBGP_OK) {
             return err;
@@ -2305,6 +2334,7 @@ static libbgp_err_t fsm_apply_update(
             attr->type == LIBBGP_PATTR_MP_REACH_IPV6) {
             for (j = 0u; j < attr->data.mp_reach_ipv6.nlri_count; j++) {
                 libbgp_rib6_route_t route;
+                libbgp_rib6_route_t best_snapshot;
                 bgp_rib6_change_t change;
                 bgp_rib6_saved_route_t replaced;
                 bool had_replaced = false;
@@ -2313,6 +2343,7 @@ static libbgp_err_t fsm_apply_update(
                 uint64_t update_id = 0u;
                 err = LIBBGP_OK;
                 memset(&route, 0, sizeof(route));
+                memset(&best_snapshot, 0, sizeof(best_snapshot));
                 memset(&change, 0, sizeof(change));
                 memset(&replaced, 0, sizeof(replaced));
 
@@ -2347,7 +2378,8 @@ static libbgp_err_t fsm_apply_update(
                         &change,
                         &update_id,
                         &replaced,
-                        &had_replaced);
+                        &had_replaced,
+                        &best_snapshot);
                     if (err == LIBBGP_OK && had_replaced) {
                         uint64_t replaced_update_id = 0u;
 
@@ -2370,7 +2402,8 @@ static libbgp_err_t fsm_apply_update(
                         update_id,
                         restore_replaced,
                         &replaced,
-                        &change);
+                        &change,
+                        &best_snapshot);
                 }
                 if (err != LIBBGP_OK && rib6 != NULL) {
                     (void)bgp_rib6_withdraw_exact_if_update_id(
@@ -2380,6 +2413,7 @@ static libbgp_err_t fsm_apply_update(
                         update_id);
                     (void)bgp_rib6_restore_saved_if_absent(rib6, peer_bgp_id, &replaced);
                 }
+                bgp_rib6_route_snapshot_destroy(&best_snapshot);
                 bgp_rib6_saved_route_destroy(&replaced);
                 if (err != LIBBGP_OK) {
                     return err;
