@@ -358,6 +358,34 @@ LIBBGP_TEST(hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_sto
     bgp_hashmap_destroy(&map);
 }
 
+LIBBGP_TEST(hashmap_reserve_zero_count_returns_ok_and_does_not_change_bucket_count)
+{
+    bgp_hashmap_t map;
+    size_t bucket_count_before;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
+    bucket_count_before = map.bucket_count;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, 0u));
+    LIBBGP_ASSERT_EQ_U64(bucket_count_before, map.bucket_count);
+
+    bgp_hashmap_destroy(&map);
+}
+
+LIBBGP_TEST(hashmap_reserve_smaller_after_larger_is_noop)
+{
+    bgp_hashmap_t map;
+    size_t bucket_count_after_first_reserve;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, 1000u));
+    bucket_count_after_first_reserve = map.bucket_count;
+    
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, 100u));
+    LIBBGP_ASSERT_EQ_U64(bucket_count_after_first_reserve, map.bucket_count);
+
+    bgp_hashmap_destroy(&map);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -370,7 +398,9 @@ int main(void)
         { "hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator", hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator },
         { "hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator", hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator },
         { "hashmap_resize_failure_preserves_existing_entries", hashmap_resize_failure_preserves_existing_entries },
-        { "hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops", hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops }
+        { "hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops", hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops },
+        { "hashmap_reserve_zero_count_returns_ok_and_does_not_change_bucket_count", hashmap_reserve_zero_count_returns_ok_and_does_not_change_bucket_count },
+        { "hashmap_reserve_smaller_after_larger_is_noop", hashmap_reserve_smaller_after_larger_is_noop }
     };
 
     return libbgp_run_tests("hashmap", tests, LIBBGP_ARRAY_LEN(tests));
