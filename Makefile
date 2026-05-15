@@ -62,7 +62,7 @@ BENCH_BINS := $(BENCH_SRCS:bench/%.c=$(BUILD_DIR)/bench/%)
 
 DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d) $(BENCH_OBJS:.o=.d)
 
-.PHONY: all clean test bench install headers examples symbol-check verify release-check FORCE
+.PHONY: all clean test bench install headers examples symbol-check verify release-check profile-perf profile-callgrind profile-heaptrack profile-cache FORCE
 .SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS) $(BENCH_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(STATIC_LIB_ALIAS) $(SHARED_LIB_ALIAS)
@@ -117,6 +117,36 @@ bench:
 	$(MAKE) CFLAGS_EXTRA="$(CFLAGS_EXTRA)" $(BENCH_BINS)
 	@echo "Running benchmarks with -O2 -g -fno-omit-frame-pointer"
 	$(BUILD_DIR)/bench/bench
+
+# P2 Profiling Targets: Use these to profile libbgp and verify optimization thresholds.
+#
+# Decision Gate Thresholds:
+#   - Radix slab/arena:         radix node malloc is top-5 allocation site (heaptrack, >10% of allocs)
+#   - IPv6 Patricia/stride:     radix pointer chase is top-3 cache miss source (cachegrind, >15% L1 misses)
+#   - Open addressing hashmap:  hashmap chain traversal dominates lookup (perf/callgrind, >20% lookup cycles)
+#   - Route+key merged alloc:   route clone malloc is top-3 allocation site (heaptrack, >15% of allocs)
+#   - RIB rwlock/RCU:           mutex contention >5% of wall time under load (perf + THREADSAFE=1)
+#
+profile-perf: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
+profile-perf: $(BENCH_BINS)
+	perf stat -d $(BUILD_DIR)/bench/bench
+	perf record -g -- $(BUILD_DIR)/bench/bench
+	@echo "Run 'perf report' to analyze"
+
+profile-callgrind: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
+profile-callgrind: $(BENCH_BINS)
+	valgrind --tool=callgrind --callgrind-out-file=$(BUILD_DIR)/libbgp.callgrind $(BUILD_DIR)/bench/bench
+	@echo "Run 'callgrind_annotate $(BUILD_DIR)/libbgp.callgrind | head -100'"
+
+profile-heaptrack: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
+profile-heaptrack: $(BENCH_BINS)
+	heaptrack $(BUILD_DIR)/bench/bench
+	@echo "Run 'heaptrack_print heaptrack.*.gz'"
+
+profile-cache: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
+profile-cache: $(BENCH_BINS)
+	valgrind --tool=cachegrind --cachegrind-out-file=$(BUILD_DIR)/libbgp.cachegrind $(BUILD_DIR)/bench/bench
+	@echo "Run 'cg_annotate $(BUILD_DIR)/libbgp.cachegrind'"
 
 examples: $(EXAMPLE_BINS)
 
