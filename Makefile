@@ -62,7 +62,7 @@ BENCH_BINS := $(BENCH_SRCS:bench/%.c=$(BUILD_DIR)/bench/%)
 
 DEPS := $(LIB_OBJS:.o=.d) $(TEST_COMMON_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(EXAMPLE_OBJS:.o=.d) $(BENCH_OBJS:.o=.d)
 
-.PHONY: all clean test bench install headers examples symbol-check verify release-check profile-perf profile-callgrind profile-heaptrack profile-cache FORCE
+.PHONY: all clean test bench install headers examples symbol-check docs docs-clean docs-check verify release-check profile-perf profile-callgrind profile-heaptrack profile-cache FORCE
 .SECONDARY: $(TEST_OBJS) $(TEST_COMMON_OBJS) $(EXAMPLE_OBJS) $(BENCH_OBJS)
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(STATIC_LIB_ALIAS) $(SHARED_LIB_ALIAS)
@@ -160,6 +160,15 @@ symbol-check: all
 		if test -n "$$bad_shared"; then printf '%s\n%s\n' "Unexpected shared symbols:" "$$bad_shared"; fi; \
 		exit 1; \
 	fi
+
+docs:
+	doxygen Doxyfile
+
+docs-clean:
+	rm -rf docs/html
+
+docs-check:
+	python3 tools/check_doxygen_docs.py
 
 verify:
 	$(MAKE) clean
