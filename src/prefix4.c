@@ -31,7 +31,8 @@ uint32_t libbgp_cidr_to_mask(uint8_t cidr)
     if (cidr > 32u) {
         return 0u;
     }
-    /* cidr_masks_nbo holds host-order bit patterns; pack as NBO bytes via memcpy */
+    /* Each entry N is the /N subnet mask in big-endian byte order:
+     * index 8 -> 0xff000000u -> bytes {0xff, 0x00, 0x00, 0x00} */
     uint32_t hp = cidr_masks_nbo[cidr];
     uint8_t bytes[4];
     uint32_t result;

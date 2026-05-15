@@ -291,9 +291,27 @@ LIBBGP_TEST(test_cidr_to_mask_all_values)
     LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[1]);
     LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[2]);
     LIBBGP_ASSERT_EQ_U64(0x00u, bytes8[3]);
+    /* /16 */
+    uint8_t bytes16[4];
+    uint32_t mask16 = libbgp_cidr_to_mask(16);
+    memcpy(bytes16, &mask16, 4);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes16[0]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes16[1]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes16[2]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes16[3]);
+    /* /24 */
+    uint8_t bytes24[4];
+    uint32_t mask24 = libbgp_cidr_to_mask(24);
+    memcpy(bytes24, &mask24, 4);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[0]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[1]);
+    LIBBGP_ASSERT_EQ_U64(0xffu, bytes24[2]);
+    LIBBGP_ASSERT_EQ_U64(0x00u, bytes24[3]);
     /* /33 invalid */
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_cidr_to_mask(33));
-}int main(void)
+}
+
+int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "prefix4_parse_write_roundtrip_masks_partial", prefix4_parse_write_roundtrip_masks_partial },
