@@ -313,6 +313,25 @@ static pattr_as_path_block_t *pattr_as_path_block_take(libbgp_as_path_segment_t 
     return NULL;
 }
 
+/*
+ * Free an AS_PATH segments array regardless of how it was allocated.
+ *
+ * Two ownership modes exist internally:
+ *
+ *   Contiguous block: All segment headers and their asns[] arrays live in a
+ *   single malloc'd block registered in pattr_as_path_blocks.  The block
+ *   header immediately precedes the first segment.  Detection is via
+ *   pattr_as_path_block_take(), which removes the block from the registry
+ *   and returns it; a single bgp_free() then releases everything.
+ *
+ *   Manual layout: Each segment's asns[] was allocated independently.
+ *   pattr_as_path_block_take() returns NULL, so we fall through to freeing
+ *   each asns[] individually and then the segments array itself.
+ *
+ * Callers must never mix modes for the same segments pointer: always use
+ * this function to release AS_PATH data rather than calling bgp_free()
+ * directly.
+ */
 void bgp_as_path_segments_free(libbgp_as_path_segment_t *segments, size_t segment_count)
 {
     pattr_as_path_block_t *block;
