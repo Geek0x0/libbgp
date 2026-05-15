@@ -42,20 +42,12 @@ LIBBGP_API extern const libbgp_alloc_t libbgp_default_alloc;
  *       while libbgp-owned objects exist can make deallocation use a different
  *       allocator than allocation.
  */
-/**
- * @brief Set the allocator for libbgp.
- * @param alloc Allocator table, or NULL to restore default.
- */
 LIBBGP_API void libbgp_set_alloc(const libbgp_alloc_t *alloc);
 
 /**
  * @brief Return the currently active allocator.
  *
  * @return Pointer to the active `libbgp_alloc_t`; never `NULL`.
- */
-/**
- * @brief Get the current allocator.
- * @return Current allocator table.
  */
 LIBBGP_API const libbgp_alloc_t *libbgp_get_alloc(void);
 
