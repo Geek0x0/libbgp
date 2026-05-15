@@ -339,6 +339,45 @@ LIBBGP_TEST(pattr_parse_rejects_as_path_segment_count_overrun_variants)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_as_path_contiguous_alloc_roundtrip)
+{
+    const uint8_t wire[] = {
+        0x40u, 2u, 30u,
+        2u, 3u,
+        0x00u, 0x00u, 0xfdu, 0xe9u,
+        0x00u, 0x00u, 0xfdu, 0xeau,
+        0x00u, 0x00u, 0xfdu, 0xebu,
+        1u, 1u,
+        0x00u, 0x00u, 0xfdu, 0xf2u,
+        2u, 2u,
+        0x00u, 0x00u, 0xfdu, 0xf4u,
+        0x00u, 0x00u, 0xfdu, 0xfdu
+    };
+    fail_after_alloc_ctx_t fail_ctx = { 0u, SIZE_MAX };
+    libbgp_alloc_t fail_alloc = fail_after_alloc_make(&fail_ctx);
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    size_t consumed = 0u;
+    libbgp_err_t err;
+
+    LIBBGP_ASSERT(attr != NULL);
+
+    libbgp_set_alloc(&fail_alloc);
+    err = libbgp_pattr_parse_as4(attr, wire, sizeof(wire), true, &consumed);
+    libbgp_set_alloc(NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, err);
+    LIBBGP_ASSERT_EQ_U64(sizeof(wire), consumed);
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.calls);
+    LIBBGP_ASSERT_EQ_U64(3u, attr->data.as_path.segment_count);
+    LIBBGP_ASSERT_EQ_U64(3u, attr->data.as_path.segments[0].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65001u, attr->data.as_path.segments[0].asns[0]);
+    LIBBGP_ASSERT_EQ_U64(1u, attr->data.as_path.segments[1].asn_count);
+    LIBBGP_ASSERT_EQ_U64(2u, attr->data.as_path.segments[2].asn_count);
+    LIBBGP_ASSERT_EQ_U64(65021u, attr->data.as_path.segments[2].asns[1]);
+
+    libbgp_pattr_unref(attr);
+}
+
 LIBBGP_TEST(pattr_parse_as_path_allocation_failure_cleans_partial_segments)
 {
     const uint8_t two_segments[] = {
@@ -346,7 +385,7 @@ LIBBGP_TEST(pattr_parse_as_path_allocation_failure_cleans_partial_segments)
         2u, 1u, 0xfdu, 0xe8u,
         1u, 2u, 0xfdu, 0xe9u, 0xfdu, 0xeau
     };
-    fail_after_alloc_ctx_t fail_ctx = { 0u, 3u };
+    fail_after_alloc_ctx_t fail_ctx = { 0u, 1u };
     libbgp_alloc_t fail_alloc = fail_after_alloc_make(&fail_ctx);
     libbgp_err_t err;
     libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
@@ -357,7 +396,7 @@ LIBBGP_TEST(pattr_parse_as_path_allocation_failure_cleans_partial_segments)
     libbgp_set_alloc(NULL);
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
-    LIBBGP_ASSERT_EQ_U64(3u, fail_ctx.calls);
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.calls);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
     LIBBGP_ASSERT(attr->data.unknown.value == NULL);
 
@@ -1420,7 +1459,7 @@ LIBBGP_TEST(pattr_parse_as_path_segment_calloc_failure)
         LIBBGP_PATTR_FLAG_TRANSITIVE, LIBBGP_PATTR_CODE_AS_PATH, 4u,
         2u, 1u, 0xfdu, 0xe8u
     };
-    fail_after_alloc_ctx_t fail_ctx = { 0u, 2u };
+    fail_after_alloc_ctx_t fail_ctx = { 0u, 1u };
     libbgp_alloc_t fail_alloc = fail_after_alloc_make(&fail_ctx);
     libbgp_err_t err;
     libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
@@ -1431,7 +1470,7 @@ LIBBGP_TEST(pattr_parse_as_path_segment_calloc_failure)
     libbgp_set_alloc(NULL);
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, err);
-    LIBBGP_ASSERT_EQ_U64(2u, fail_ctx.calls);
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.calls);
     LIBBGP_ASSERT_EQ_U64(LIBBGP_PATTR_UNKNOWN, attr->type);
     LIBBGP_ASSERT(attr->data.unknown.value == NULL);
 
@@ -1447,6 +1486,7 @@ int main(void)
         { "pattr_parse_rejects_malformed_known_flags", pattr_parse_rejects_malformed_known_flags },
         { "pattr_parse_write_aggregator_community_and_as_paths", pattr_parse_write_aggregator_community_and_as_paths },
         { "pattr_parse_rejects_as_path_segment_count_overrun_variants", pattr_parse_rejects_as_path_segment_count_overrun_variants },
+        { "pattr_as_path_contiguous_alloc_roundtrip", pattr_as_path_contiguous_alloc_roundtrip },
         { "pattr_parse_as_path_allocation_failure_cleans_partial_segments", pattr_parse_as_path_allocation_failure_cleans_partial_segments },
         { "pattr_write_rejects_type_code_and_as_width_mismatch", pattr_write_rejects_type_code_and_as_width_mismatch },
         { "pattr_wire_len_matches_write_and_rejects_invalid_write_state", pattr_wire_len_matches_write_and_rejects_invalid_write_state },

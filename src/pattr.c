@@ -194,10 +194,106 @@ static bool pattr_known_flags_valid(libbgp_pattr_type_t type, uint8_t flags)
     return true;
 }
 
-static void pattr_free_data(libbgp_pattr_t *attr)
+static bool pattr_as_path_block_layout(
+    size_t segment_count,
+    size_t asn_count,
+    size_t *asn_offset,
+    size_t *block_size)
+{
+    size_t seg_bytes;
+    size_t asn_bytes;
+    size_t offset;
+    size_t rem;
+    const size_t asn_align = _Alignof(uint32_t);
+
+    if (segment_count > SIZE_MAX / sizeof(libbgp_as_path_segment_t) ||
+        asn_count > SIZE_MAX / sizeof(uint32_t)) {
+        return false;
+    }
+    seg_bytes = segment_count * sizeof(libbgp_as_path_segment_t);
+    asn_bytes = asn_count * sizeof(uint32_t);
+    offset = seg_bytes;
+    rem = offset % asn_align;
+    if (rem != 0u) {
+        size_t padding = asn_align - rem;
+
+        if (offset > SIZE_MAX - padding) {
+            return false;
+        }
+        offset += padding;
+    }
+    if (offset > SIZE_MAX - asn_bytes) {
+        return false;
+    }
+    if (asn_offset != NULL) {
+        *asn_offset = offset;
+    }
+    if (block_size != NULL) {
+        *block_size = offset + asn_bytes;
+    }
+    return true;
+}
+
+bool bgp_as_path_segments_are_contiguous(
+    const libbgp_as_path_segment_t *segments,
+    size_t segment_count)
+{
+    const uint32_t *expected;
+    size_t total_asns = 0u;
+    size_t asn_offset;
+    size_t block_size;
+    size_t i;
+
+    if (segments == NULL) {
+        return false;
+    }
+    for (i = 0u; i < segment_count; i++) {
+        if (total_asns > SIZE_MAX - segments[i].asn_count) {
+            return false;
+        }
+        total_asns += segments[i].asn_count;
+    }
+    if (!pattr_as_path_block_layout(
+            segment_count,
+            total_asns,
+            &asn_offset,
+            &block_size)) {
+        return false;
+    }
+    (void)block_size;
+    expected = (const uint32_t *)((const uint8_t *)segments + asn_offset);
+    for (i = 0u; i < segment_count; i++) {
+        if (segments[i].asn_count == 0u) {
+            if (segments[i].asns != NULL) {
+                return false;
+            }
+            continue;
+        }
+        if (segments[i].asns != expected) {
+            return false;
+        }
+        expected += segments[i].asn_count;
+    }
+    return true;
+}
+
+void bgp_as_path_segments_free(libbgp_as_path_segment_t *segments, size_t segment_count)
 {
     size_t i;
 
+    if (segments == NULL) {
+        return;
+    }
+    if (!bgp_as_path_segments_are_contiguous(segments, segment_count)) {
+        for (i = 0u; i < segment_count; i++) {
+            bgp_free(segments[i].asns);
+        }
+    }
+    bgp_free(segments);
+}
+
+static void pattr_free_data(libbgp_pattr_t *attr)
+{
     if (attr == NULL) {
         return;
     }
@@ -205,12 +301,9 @@ static void pattr_free_data(libbgp_pattr_t *attr)
     switch (attr->type) {
     case LIBBGP_PATTR_AS_PATH:
     case LIBBGP_PATTR_AS4_PATH:
-        if (attr->data.as_path.segments != NULL) {
-            for (i = 0u; i < attr->data.as_path.segment_count; i++) {
-                bgp_free(attr->data.as_path.segments[i].asns);
-            }
-        }
-        bgp_free(attr->data.as_path.segments);
+        bgp_as_path_segments_free(
+            attr->data.as_path.segments,
+            attr->data.as_path.segment_count);
         break;
     case LIBBGP_PATTR_COMMUNITY:
         bgp_free(attr->data.community.values);
@@ -344,7 +437,11 @@ static libbgp_err_t parse_as_path(
 {
     size_t pos = 0u;
     size_t segment_count = 0u;
+    size_t total_asns = 0u;
     size_t asn_size = is_4b ? 4u : 2u;
+    size_t asn_offset;
+    size_t block_size;
+    uint32_t *asn_pool;
     size_t i;
 
     while (pos < value_len) {
@@ -365,6 +462,10 @@ static libbgp_err_t parse_as_path(
         if (value_len - pos < bytes) {
             return LIBBGP_ERR_BAD_LEN;
         }
+        if (total_asns > SIZE_MAX - count) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
+        total_asns += count;
         segment_count++;
         pos += bytes;
     }
@@ -375,11 +476,14 @@ static libbgp_err_t parse_as_path(
         return LIBBGP_OK;
     }
 
-    tmp->data.as_path.segments = (libbgp_as_path_segment_t *)bgp_calloc(
-        segment_count, sizeof(tmp->data.as_path.segments[0]));
+    if (!pattr_as_path_block_layout(segment_count, total_asns, &asn_offset, &block_size)) {
+        return LIBBGP_ERR_BAD_LEN;
+    }
+    tmp->data.as_path.segments = (libbgp_as_path_segment_t *)bgp_malloc(block_size);
     if (tmp->data.as_path.segments == NULL) {
         return LIBBGP_ERR_NOMEM;
     }
+    asn_pool = (uint32_t *)((uint8_t *)tmp->data.as_path.segments + asn_offset);
 
     pos = 0u;
     for (i = 0u; i < segment_count; i++) {
@@ -390,11 +494,9 @@ static libbgp_err_t parse_as_path(
         tmp->data.as_path.segments[i].asn_count = count;
         pos += 2u;
         if (count != 0u) {
-            tmp->data.as_path.segments[i].asns = (uint32_t *)bgp_malloc(
-                count * sizeof(tmp->data.as_path.segments[i].asns[0]));
-            if (tmp->data.as_path.segments[i].asns == NULL) {
-                return LIBBGP_ERR_NOMEM;
-            }
+            tmp->data.as_path.segments[i].asns = asn_pool;
+        } else {
+            tmp->data.as_path.segments[i].asns = NULL;
         }
         for (j = 0u; j < count; j++) {
             if (is_4b) {
@@ -404,6 +506,7 @@ static libbgp_err_t parse_as_path(
             }
             pos += asn_size;
         }
+        asn_pool += count;
     }
 
     return LIBBGP_OK;

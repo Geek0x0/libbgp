@@ -357,15 +357,7 @@ static libbgp_err_t update_set_attr_pair(
 
 static void update_free_as_path_segments(libbgp_as_path_segment_t *segments, size_t segment_count)
 {
-    size_t i;
-
-    if (segments == NULL) {
-        return;
-    }
-    for (i = 0u; i < segment_count; i++) {
-        bgp_free(segments[i].asns);
-    }
-    bgp_free(segments);
+    bgp_as_path_segments_free(segments, segment_count);
 }
 
 static libbgp_err_t update_validate_as_path_data(
