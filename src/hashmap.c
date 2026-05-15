@@ -1,3 +1,7 @@
+/**
+ * @file hashmap.c
+ * @brief Internal chained hashmap implementation.
+ */
 #include "hashmap.h"
 
 #include <assert.h>

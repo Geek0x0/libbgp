@@ -1,3 +1,7 @@
+/**
+ * @file capability.c
+ * @brief BGP OPEN capability parsing, serialization, and reference counting.
+ */
 #include "libbgp/capability.h"
 
 #include <string.h>

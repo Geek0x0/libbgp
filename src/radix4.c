@@ -1,3 +1,7 @@
+/**
+ * @file radix4.c
+ * @brief Internal IPv4 radix tree implementation.
+ */
 #include "radix4.h"
 
 #include <stdbool.h>

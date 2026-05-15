@@ -1,3 +1,7 @@
+/**
+ * @file packet.c
+ * @brief Top-level BGP packet parse and write implementation.
+ */
 #include "libbgp/packet.h"
 
 #include <string.h>

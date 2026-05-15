@@ -1,3 +1,7 @@
+/**
+ * @file alloc.c
+ * @brief Global allocator hook implementation.
+ */
 #include <stdatomic.h>
 #include <stdlib.h>
 #include "libbgp/alloc.h"

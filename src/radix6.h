@@ -1,6 +1,11 @@
 #ifndef LIBBGP_RADIX6_H
 #define LIBBGP_RADIX6_H
 
+
+/**
+ * @file radix6.h
+ * @brief Internal IPv6 radix tree for longest-prefix match lookups.
+ */
 #include <stddef.h>
 #include <stdint.h>
 

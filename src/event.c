@@ -1,3 +1,7 @@
+/**
+ * @file event.c
+ * @brief Thread-aware synchronous event bus implementation.
+ */
 #include "libbgp/event.h"
 
 #include <string.h>

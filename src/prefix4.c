@@ -1,3 +1,7 @@
+/**
+ * @file prefix4.c
+ * @brief IPv4 prefix wire-format and comparison helpers.
+ */
 #include "libbgp/prefix4.h"
 
 #include <string.h>

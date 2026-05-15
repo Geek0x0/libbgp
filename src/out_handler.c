@@ -1,3 +1,7 @@
+/**
+ * @file out_handler.c
+ * @brief File descriptor and callback-backed output handler implementation.
+ */
 #include "libbgp/out_handler.h"
 
 #include <stdbool.h>

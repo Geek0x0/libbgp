@@ -1,6 +1,12 @@
 #ifndef LIBBGP_FSM_H
 #define LIBBGP_FSM_H
 
+
+/**
+ * @file fsm.h
+ * @brief BGP finite state machine lifecycle, packet processing, timers, filters, and route import/export.
+ * @ingroup libbgp_fsm
+ */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

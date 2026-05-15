@@ -1,3 +1,7 @@
+/**
+ * @file errcode.c
+ * @brief Error-code to string mapping.
+ */
 #include "libbgp/types.h"
 
 const char *libbgp_strerror(libbgp_err_t err)

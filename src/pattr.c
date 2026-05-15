@@ -1,3 +1,7 @@
+/**
+ * @file pattr.c
+ * @brief BGP path attribute parse, write, format, and AS4 conversion helpers.
+ */
 #include "libbgp/pattr.h"
 
 #include <limits.h>

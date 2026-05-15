@@ -1,3 +1,7 @@
+/**
+ * @file filter.c
+ * @brief Ordered route filter implementation for IPv4 and IPv6 routes.
+ */
 #include "libbgp/filter.h"
 
 #include <string.h>

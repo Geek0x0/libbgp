@@ -1,6 +1,12 @@
 #ifndef LIBBGP_EVENT_H
 #define LIBBGP_EVENT_H
 
+
+/**
+ * @file event.h
+ * @brief Synchronous event bus for route, session, collision, and custom events.
+ * @ingroup libbgp_event
+ */
 #include <stddef.h>
 #include <stdint.h>
 
