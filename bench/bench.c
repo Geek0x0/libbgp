@@ -1153,7 +1153,8 @@ static int bench_hashmap_batch_insert(size_t count, bool use_reserve)
     }
 
     qsort(samples, count, sizeof(*samples), cmp_u64);
-    uint64_t p99 = count > 0u ? samples[((count * 99u) / 100u) - 1u] : 0u;
+    size_t p99_idx = (count * 99u) / 100u;
+    uint64_t p99 = (p99_idx > 0u) ? samples[p99_idx - 1u] : (count > 0u ? samples[0] : 0u);
 
     snprintf(name, sizeof(name), "hashmap insert %s", use_reserve ? "reserved" : "default");
     print_result(name, count, elapsed);
