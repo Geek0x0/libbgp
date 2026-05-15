@@ -1,5 +1,6 @@
 #include "hashmap.h"
 
+#include <assert.h>
 #include <limits.h>
 #include <string.h>
 
@@ -7,9 +8,15 @@
 
 #define BGP_HASHMAP_INITIAL_BUCKETS 16u
 
+static bool hashmap_is_power_of_two(size_t value)
+{
+    return value != 0u && (value & (value - 1u)) == 0u;
+}
+
 static size_t bucket_index(uint64_t hash, size_t bucket_count)
 {
     /* bucket_count is always a power of two; bitmask is faster than modulo */
+    assert(hashmap_is_power_of_two(bucket_count));
     return (size_t)(hash & (uint64_t)(bucket_count - 1u));
 }
 
@@ -27,6 +34,9 @@ static libbgp_err_t hashmap_resize(bgp_hashmap_t *map, size_t new_count)
     bgp_hashmap_entry_t **new_buckets;
     size_t i;
 
+    if (!hashmap_is_power_of_two(new_count)) {
+        return LIBBGP_ERR_INVALID;
+    }
     if (hashmap_alloc_buckets(&new_buckets, new_count) != LIBBGP_OK) {
         return LIBBGP_ERR_NOMEM;
     }
@@ -60,6 +70,9 @@ libbgp_err_t bgp_hashmap_init(
     }
 
     memset(map, 0, sizeof(*map));
+    if (!hashmap_is_power_of_two(BGP_HASHMAP_INITIAL_BUCKETS)) {
+        return LIBBGP_ERR_INVALID;
+    }
     if (hashmap_alloc_buckets(&map->buckets, BGP_HASHMAP_INITIAL_BUCKETS) != LIBBGP_OK) {
         return LIBBGP_ERR_NOMEM;
     }
@@ -107,9 +120,13 @@ libbgp_err_t bgp_hashmap_insert(bgp_hashmap_t *map, void *key, void *value)
     }
 
     if (map->len >= map->bucket_count - map->bucket_count / 4u) {
-        if (map->bucket_count > SIZE_MAX / 2u ||
-            hashmap_resize(map, map->bucket_count * 2u) != LIBBGP_OK) {
+        libbgp_err_t err;
+        if (map->bucket_count > SIZE_MAX / 2u) {
             return LIBBGP_ERR_NOMEM;
+        }
+        err = hashmap_resize(map, map->bucket_count * 2u);
+        if (err != LIBBGP_OK) {
+            return err;
         }
     }
 
