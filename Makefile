@@ -49,7 +49,10 @@ TEST_SRCS := $(filter-out tests/test_main.c,$(wildcard tests/test_*.c))
 TEST_OBJS := $(TEST_SRCS:%.c=$(BUILD_DIR)/%.o)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD_DIR)/tests/%)
 
-EXAMPLE_SRCS := examples/peer_and_print.c examples/route_server.c
+EXAMPLE_SRCS := examples/sink_fragmented_stream.c examples/open_capabilities.c \
+	examples/ipv6_mp_update.c examples/out_handler_callback.c examples/event_bus_publish_subscribe.c \
+	examples/custom_allocator.c examples/route_withdraw.c examples/packet_roundtrip.c \
+	examples/rib_filter_walkthrough.c examples/update_builder.c examples/peer_and_print.c examples/route_server.c
 EXAMPLE_OBJS := $(EXAMPLE_SRCS:%.c=$(BUILD_DIR)/%.o)
 EXAMPLE_BINS := $(EXAMPLE_SRCS:examples/%.c=$(BUILD_DIR)/examples/%)
 
@@ -102,11 +105,16 @@ $(BUILD_DIR)/bench/%: $(BUILD_DIR)/bench/%.o $(STATIC_LIB)
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS_EXTRA) -o $@
 
-test: $(TEST_BINS)
+test: override CFLAGS_EXTRA += -Werror
+test:
+	rm -rf $(BUILD_DIR)
+	$(MAKE) CFLAGS_EXTRA="$(CFLAGS_EXTRA)" $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do $$t; done
 
-bench: CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer
-bench: $(BENCH_BINS)
+bench: override CFLAGS_EXTRA += -O2 -g -fno-omit-frame-pointer -Werror
+bench:
+	rm -rf $(BUILD_DIR)
+	$(MAKE) CFLAGS_EXTRA="$(CFLAGS_EXTRA)" $(BENCH_BINS)
 	@echo "Running benchmarks with -O2 -g -fno-omit-frame-pointer"
 	$(BUILD_DIR)/bench/bench
 
