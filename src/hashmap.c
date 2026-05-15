@@ -20,6 +20,11 @@ static size_t bucket_index(uint64_t hash, size_t bucket_count)
     return (size_t)(hash & (uint64_t)(bucket_count - 1u));
 }
 
+static size_t hashmap_resize_threshold(size_t bucket_count)
+{
+    return bucket_count - bucket_count / 4u;
+}
+
 static libbgp_err_t hashmap_alloc_buckets(bgp_hashmap_entry_t ***out, size_t count)
 {
     if (count > SIZE_MAX / sizeof(**out)) {
@@ -109,6 +114,28 @@ void bgp_hashmap_destroy(bgp_hashmap_t *map)
     memset(map, 0, sizeof(*map));
 }
 
+libbgp_err_t bgp_hashmap_reserve(bgp_hashmap_t *map, size_t count)
+{
+    size_t target;
+
+    if (map == NULL || map->buckets == NULL || !hashmap_is_power_of_two(map->bucket_count)) {
+        return LIBBGP_ERR_INVALID;
+    }
+    if (count <= hashmap_resize_threshold(map->bucket_count)) {
+        return LIBBGP_OK;
+    }
+
+    target = map->bucket_count;
+    while (hashmap_resize_threshold(target) < count) {
+        if (target > SIZE_MAX / 2u) {
+            return LIBBGP_ERR_NOMEM;
+        }
+        target *= 2u;
+    }
+
+    return hashmap_resize(map, target);
+}
+
 libbgp_err_t bgp_hashmap_insert(bgp_hashmap_t *map, void *key, void *value)
 {
     bgp_hashmap_entry_t *entry;
@@ -119,7 +146,7 @@ libbgp_err_t bgp_hashmap_insert(bgp_hashmap_t *map, void *key, void *value)
         return LIBBGP_ERR_INVALID;
     }
 
-    if (map->len >= map->bucket_count - map->bucket_count / 4u) {
+    if (map->len >= hashmap_resize_threshold(map->bucket_count)) {
         libbgp_err_t err;
         if (map->bucket_count > SIZE_MAX / 2u) {
             return LIBBGP_ERR_NOMEM;

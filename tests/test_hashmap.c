@@ -200,6 +200,32 @@ LIBBGP_TEST(hashmap_resizes_and_preserves_entries)
     bgp_hashmap_destroy(&map);
 }
 
+LIBBGP_TEST(hashmap_reserve_prevents_resize_during_batch_insert)
+{
+    bgp_hashmap_t map;
+    int keys[1000];
+    size_t i;
+    const size_t n = LIBBGP_ARRAY_LEN(keys);
+    size_t bucket_count_before;
+    size_t resize_threshold;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, n));
+    resize_threshold = map.bucket_count - map.bucket_count / 4u;
+    LIBBGP_ASSERT(resize_threshold >= n);
+
+    bucket_count_before = map.bucket_count;
+    for (i = 0u; i < n; i++) {
+        keys[i] = (int)i;
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_insert(&map, &keys[i], NULL));
+    }
+    LIBBGP_ASSERT_EQ_U64(bucket_count_before, map.bucket_count);
+    LIBBGP_ASSERT_EQ_U64(n, bgp_hashmap_len(&map));
+
+    bgp_hashmap_destroy(&map);
+}
+
 LIBBGP_TEST(hashmap_invalid_inputs_and_destroy_null_are_safe)
 {
     bgp_hashmap_t map;
@@ -212,6 +238,8 @@ LIBBGP_TEST(hashmap_invalid_inputs_and_destroy_null_are_safe)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_init(NULL, int_hash, int_eq, NULL, NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_init(&map, NULL, int_eq, NULL, NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_init(&map, int_hash, NULL, NULL, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_reserve(NULL, 1u));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_reserve(&map, 1u));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_insert(NULL, &key, &value));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_insert(&map, &key, &value));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_remove_one(NULL, &key, &value));
@@ -336,6 +364,7 @@ int main(void)
         { "hashmap_remove_one_by_value_and_by_key", hashmap_remove_one_by_value_and_by_key },
         { "hashmap_destroy_invokes_callback_for_all_entries", hashmap_destroy_invokes_callback_for_all_entries },
         { "hashmap_resizes_and_preserves_entries", hashmap_resizes_and_preserves_entries },
+        { "hashmap_reserve_prevents_resize_during_batch_insert", hashmap_reserve_prevents_resize_during_batch_insert },
         { "hashmap_invalid_inputs_and_destroy_null_are_safe", hashmap_invalid_inputs_and_destroy_null_are_safe },
         { "hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator", hashmap_init_reports_bucket_alloc_failure_without_leaking_allocator },
         { "hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator", hashmap_insert_reports_entry_alloc_failure_without_leaking_allocator },
