@@ -43,6 +43,12 @@ typedef struct rib4_impl {
     uint64_t next_update_id;
 } rib4_impl_t;
 
+typedef struct rib4_neighbor_as_cache {
+    uint32_t value;
+    bool ready;
+    bool valid;
+} rib4_neighbor_as_cache_t;
+
 static uint64_t hash_u64_mix(uint64_t x)
 {
     x ^= x >> 33;
@@ -427,12 +433,29 @@ static bool rib4_neighbor_as(const libbgp_rib4_route_t *route, uint32_t *neighbo
     return false;
 }
 
-static bool rib4_better(const libbgp_rib4_route_t *a, const libbgp_rib4_route_t *b)
+static bool rib4_neighbor_as_cached(
+    const libbgp_rib4_route_t *route,
+    rib4_neighbor_as_cache_t *cache)
+{
+    if (cache == NULL) {
+        return false;
+    }
+    if (!cache->ready) {
+        cache->value = 0u;
+        cache->valid = rib4_neighbor_as(route, &cache->value);
+        cache->ready = true;
+    }
+    return cache->valid;
+}
+
+static bool rib4_better_cached(
+    const libbgp_rib4_route_t *a,
+    rib4_neighbor_as_cache_t *a_cache,
+    const libbgp_rib4_route_t *b,
+    rib4_neighbor_as_cache_t *b_cache)
 {
     uint32_t a_lp;
     uint32_t b_lp;
-    uint32_t a_neighbor_as;
-    uint32_t b_neighbor_as;
 
     if (b == NULL) {
         return true;
@@ -451,8 +474,8 @@ static bool rib4_better(const libbgp_rib4_route_t *a, const libbgp_rib4_route_t 
     if (a->origin != b->origin) {
         return a->origin < b->origin;
     }
-    if (a->med != b->med && rib4_neighbor_as(a, &a_neighbor_as) &&
-        rib4_neighbor_as(b, &b_neighbor_as) && a_neighbor_as == b_neighbor_as) {
+    if (a->med != b->med && rib4_neighbor_as_cached(a, a_cache) &&
+        rib4_neighbor_as_cached(b, b_cache) && a_cache->value == b_cache->value) {
         return a->med < b->med;
     }
     if (a->is_ibgp != b->is_ibgp) {
@@ -753,6 +776,7 @@ static libbgp_rib4_route_t *rib4_best_exact_locked(
     uint64_t hash;
     bgp_hashmap_entry_t *entry;
     libbgp_rib4_route_t *best = NULL;
+    rib4_neighbor_as_cache_t best_cache = { 0u, false, false };
 
     if (impl == NULL || prefix == NULL) {
         return NULL;
@@ -762,11 +786,13 @@ static libbgp_rib4_route_t *rib4_best_exact_locked(
     idx = (size_t)(hash % (uint64_t)impl->routes.bucket_count);
     for (entry = impl->routes.buckets[idx]; entry != NULL; entry = entry->next) {
         libbgp_rib4_route_t *route = (libbgp_rib4_route_t *)entry->value;
+        rib4_neighbor_as_cache_t route_cache = { 0u, false, false };
 
         if (entry->hash == hash && rib4_key_eq(entry->key, &find_key, NULL) &&
             libbgp_prefix4_eq(&route->prefix, prefix) &&
-            (best == NULL || rib4_better(route, best))) {
+            (best == NULL || rib4_better_cached(route, &route_cache, best, &best_cache))) {
             best = route;
+            best_cache = route_cache;
         }
     }
     return best;
@@ -788,6 +814,7 @@ static rib4_lpm_entry_t *rib4_lpm_group_find_locked(
 static libbgp_rib4_route_t *rib4_lpm_group_best_locked(const rib4_lpm_entry_t *group)
 {
     libbgp_rib4_route_t *best = NULL;
+    rib4_neighbor_as_cache_t best_cache = { 0u, false, false };
     size_t i;
 
     if (group == NULL) {
@@ -795,9 +822,11 @@ static libbgp_rib4_route_t *rib4_lpm_group_best_locked(const rib4_lpm_entry_t *g
     }
     for (i = 0u; i < group->count; i++) {
         libbgp_rib4_route_t *route = (libbgp_rib4_route_t *)group->entries[i]->value;
+        rib4_neighbor_as_cache_t route_cache = { 0u, false, false };
 
-        if (best == NULL || rib4_better(route, best)) {
+        if (best == NULL || rib4_better_cached(route, &route_cache, best, &best_cache)) {
             best = route;
+            best_cache = route_cache;
         }
     }
     return best;
@@ -915,7 +944,7 @@ static libbgp_err_t rib4_lpm_index_add_locked(rib4_impl_t *impl, bgp_hashmap_ent
 
     group->entries[group->count] = route_entry;
     group->count++;
-    if (group->best == NULL || rib4_better(route, group->best)) {
+    if (group->best == NULL) {
         libbgp_err_t err = bgp_radix4_insert(
             &impl->lpm_tree,
             group->prefix.addr,
@@ -930,6 +959,26 @@ static libbgp_err_t rib4_lpm_index_add_locked(rib4_impl_t *impl, bgp_hashmap_ent
             return err;
         }
         group->best = route;
+    } else {
+        rib4_neighbor_as_cache_t route_cache = { 0u, false, false };
+        rib4_neighbor_as_cache_t best_cache = { 0u, false, false };
+
+        if (rib4_better_cached(route, &route_cache, group->best, &best_cache)) {
+            libbgp_err_t err = bgp_radix4_insert(
+                &impl->lpm_tree,
+                group->prefix.addr,
+                group->prefix.len,
+                route);
+
+            if (err != LIBBGP_OK) {
+                group->count--;
+                if (created) {
+                    rib4_lpm_group_remove_locked(impl, group);
+                }
+                return err;
+            }
+            group->best = route;
+        }
     }
     return LIBBGP_OK;
 }
@@ -1480,6 +1529,7 @@ libbgp_err_t libbgp_rib4_lookup_scoped(
     rib4_impl_t *impl = rib4_impl_get(rib);
     rib4_source_entry_t *source;
     const libbgp_rib4_route_t *best = NULL;
+    rib4_neighbor_as_cache_t best_cache = { 0u, false, false };
     size_t i;
 
     if (impl == NULL || out_route == NULL) {
@@ -1496,6 +1546,7 @@ libbgp_err_t libbgp_rib4_lookup_scoped(
     for (i = 0u; i < source->count; i++) {
         bgp_hashmap_entry_t *entry = source->entries[i];
         const libbgp_rib4_route_t *route;
+        rib4_neighbor_as_cache_t route_cache = { 0u, false, false };
 
         if (entry == NULL || entry->value == NULL) {
             continue;
@@ -1505,8 +1556,10 @@ libbgp_err_t libbgp_rib4_lookup_scoped(
             continue;
         }
         if (best == NULL || route->prefix.len > best->prefix.len ||
-            (route->prefix.len == best->prefix.len && rib4_better(route, best))) {
+            (route->prefix.len == best->prefix.len &&
+                rib4_better_cached(route, &route_cache, best, &best_cache))) {
             best = route;
+            best_cache = route_cache;
         }
     }
 
