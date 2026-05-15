@@ -31,6 +31,8 @@ typedef struct event_snapshot {
     bgp_event_ctx_release_fn release;
 } event_snapshot_t;
 
+#define BGP_EVENT_STACK_SNAPSHOT 64u
+
 typedef struct event_bus_impl {
     event_subscriber_t *subs;
     size_t count;
@@ -244,7 +246,8 @@ size_t libbgp_event_bus_publish_from(
     const libbgp_event_t *event)
 {
     event_bus_impl_t *impl;
-    event_snapshot_t *snapshot = NULL;
+    event_snapshot_t stack_snapshot[BGP_EVENT_STACK_SNAPSHOT];
+    event_snapshot_t *snapshot = stack_snapshot;
     size_t match_count = 0u;
     size_t i;
 
@@ -261,7 +264,11 @@ size_t libbgp_event_bus_publish_from(
             match_count++;
         }
     }
-    if (match_count != 0u) {
+    if (match_count == 0u) {
+        bgp_unlock(&impl->lock);
+        return 0u;
+    }
+    if (match_count > BGP_EVENT_STACK_SNAPSHOT) {
         if (match_count > SIZE_MAX / sizeof(*snapshot)) {
             bgp_unlock(&impl->lock);
             return 0u;
@@ -271,18 +278,18 @@ size_t libbgp_event_bus_publish_from(
             bgp_unlock(&impl->lock);
             return 0u;
         }
-        match_count = 0u;
-        for (i = 0u; i < impl->count; i++) {
-            if (impl->subs[i].type == event->type &&
-                (publisher_id == 0u || impl->subs[i].id != publisher_id)) {
-                if (impl->subs[i].retain != NULL && !impl->subs[i].retain(impl->subs[i].ctx)) {
-                    continue;
-                }
-                snapshot[match_count].cb = impl->subs[i].cb;
-                snapshot[match_count].ctx = impl->subs[i].ctx;
-                snapshot[match_count].release = impl->subs[i].release;
-                match_count++;
+    }
+    match_count = 0u;
+    for (i = 0u; i < impl->count; i++) {
+        if (impl->subs[i].type == event->type &&
+            (publisher_id == 0u || impl->subs[i].id != publisher_id)) {
+            if (impl->subs[i].retain != NULL && !impl->subs[i].retain(impl->subs[i].ctx)) {
+                continue;
             }
+            snapshot[match_count].cb = impl->subs[i].cb;
+            snapshot[match_count].ctx = impl->subs[i].ctx;
+            snapshot[match_count].release = impl->subs[i].release;
+            match_count++;
         }
     }
     bgp_unlock(&impl->lock);
@@ -293,7 +300,9 @@ size_t libbgp_event_bus_publish_from(
             snapshot[i].release(snapshot[i].ctx);
         }
     }
-    bgp_free(snapshot);
+    if (snapshot != stack_snapshot) {
+        bgp_free(snapshot);
+    }
     return match_count;
 }
 

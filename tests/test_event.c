@@ -19,6 +19,15 @@ typedef struct callback_ctx {
     unsigned int retain_calls;
 } callback_ctx_t;
 
+static int test_event_publish_count = 0;
+
+static void test_event_publish_cb(const libbgp_event_t *event, void *ctx)
+{
+    (void)event;
+    (void)ctx;
+    test_event_publish_count++;
+}
+
 static void recording_cb(const libbgp_event_t *event, void *ctx)
 {
     callback_ctx_t *cb_ctx = (callback_ctx_t *)ctx;
@@ -412,6 +421,23 @@ static void *event_fail_realloc(void *ptr, size_t size, void *ctx)
     return NULL;
 }
 
+static void *event_fail_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)nmemb;
+    (void)size;
+    (void)ctx;
+    return NULL;
+}
+
+static size_t event_calloc_calls;
+
+static void *event_counting_calloc(size_t nmemb, size_t size, void *ctx)
+{
+    (void)ctx;
+    event_calloc_calls++;
+    return calloc(nmemb, size);
+}
+
 LIBBGP_TEST(event_subscribe_retain_reject_returns_bad_len)
 {
     libbgp_event_bus_t bus;
@@ -486,6 +512,64 @@ LIBBGP_TEST(event_subscribe_alloc_failure_calls_release)
     libbgp_event_bus_destroy(&bus);
 }
 
+LIBBGP_TEST(event_publish_small_snapshot_uses_stack_when_calloc_fails)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    libbgp_event_t event;
+    int i;
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    test_event_publish_count = 0;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    for (i = 0; i < 10; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                test_event_publish_cb, NULL, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.calloc = event_fail_calloc;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_U64(10u, libbgp_event_bus_publish(&bus, &event));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(10, test_event_publish_count);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
+LIBBGP_TEST(event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks)
+{
+    libbgp_alloc_t alloc;
+    libbgp_event_bus_t bus;
+    libbgp_event_t event;
+    int i;
+
+    memset(&event, 0, sizeof(event));
+    event.type = LIBBGP_EVENT_ROUTE_ADDED;
+    test_event_publish_count = 0;
+    event_calloc_calls = 0u;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_event_bus_init(&bus));
+    for (i = 0; i < 100; i++) {
+        LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+            libbgp_event_bus_subscribe(&bus, LIBBGP_EVENT_ROUTE_ADDED,
+                test_event_publish_cb, NULL, NULL));
+    }
+
+    alloc = libbgp_default_alloc;
+    alloc.calloc = event_counting_calloc;
+    libbgp_set_alloc(&alloc);
+    LIBBGP_ASSERT_EQ_U64(100u, libbgp_event_bus_publish(&bus, &event));
+    libbgp_set_alloc(NULL);
+    LIBBGP_ASSERT_EQ_I64(100, test_event_publish_count);
+    LIBBGP_ASSERT_EQ_U64(1u, event_calloc_calls);
+
+    libbgp_event_bus_destroy(&bus);
+}
+
 static bool selective_retain(void *ctx)
 {
     callback_ctx_t *cb_ctx = (callback_ctx_t *)ctx;
@@ -548,6 +632,8 @@ int main(void)
         { "event_subscribe_retain_reject_returns_bad_len", event_subscribe_retain_reject_returns_bad_len },
         { "event_subscribe_retained_on_destroyed_bus_calls_release", event_subscribe_retained_on_destroyed_bus_calls_release },
         { "event_subscribe_alloc_failure_calls_release", event_subscribe_alloc_failure_calls_release },
+        { "event_publish_small_snapshot_uses_stack_when_calloc_fails", event_publish_small_snapshot_uses_stack_when_calloc_fails },
+        { "event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks", event_publish_large_snapshot_uses_heap_and_invokes_all_callbacks },
         { "event_publish_retain_reject_skips_subscriber", event_publish_retain_reject_skips_subscriber }
     };
 
