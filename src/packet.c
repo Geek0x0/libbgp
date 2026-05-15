@@ -42,16 +42,14 @@ void libbgp_packet_destroy(libbgp_packet_t *pkt)
     pkt->type = LIBBGP_PACKET_UNKNOWN;
 }
 
+static const uint8_t bgp_marker_expected[LIBBGP_BGP_MARKER_LEN] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
 static bool packet_marker_valid(const uint8_t *buf)
 {
-    size_t i;
-
-    for (i = 0u; i < LIBBGP_BGP_MARKER_LEN; i++) {
-        if (buf[i] != 0xffu) {
-            return false;
-        }
-    }
-    return true;
+    return memcmp(buf, bgp_marker_expected, LIBBGP_BGP_MARKER_LEN) == 0;
 }
 
 static libbgp_packet_type_t packet_type_from_raw(uint8_t raw_type)
@@ -291,6 +289,7 @@ libbgp_err_t libbgp_packet_write(
     } else if (buf_len < LIBBGP_BGP_HEADER_LEN) {
         uint8_t scratch = 0u;
 
+        /* Validate type before returning LIBBGP_ERR_BUFFER: propagates BAD_TYPE for unrecognised types. */
         err = packet_write_body(pkt, &scratch, 0u, &raw_type, &body_len);
         if (err != LIBBGP_OK) {
             return err;
@@ -309,15 +308,17 @@ libbgp_err_t libbgp_packet_write(
         &raw_type,
         &body_len);
     if (err != LIBBGP_OK) {
+        if (err == LIBBGP_ERR_BUFFER) {
+            /* Clear any partial write: packet_write_body may have written bytes before
+             * detecting the overflow, so zero the body area to restore the caller's buffer. */
+            memset(buf + LIBBGP_BGP_HEADER_LEN, 0, buf_len - LIBBGP_BGP_HEADER_LEN);
+        }
         return err;
     }
     if (body_len > max_body_len) {
         return LIBBGP_ERR_BAD_LEN;
     }
     total_len = LIBBGP_BGP_HEADER_LEN + body_len;
-    if (buf_len < total_len) {
-        return LIBBGP_ERR_BUFFER;
-    }
 
     for (i = 0u; i < LIBBGP_BGP_MARKER_LEN; i++) {
         buf[i] = 0xffu;
