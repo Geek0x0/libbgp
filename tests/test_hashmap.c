@@ -212,6 +212,7 @@ LIBBGP_TEST(test_hashmap_reserve_prevents_resize)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, n));
+    LIBBGP_ASSERT(map.bucket_count >= n);
     resize_threshold = map.bucket_count - map.bucket_count / 4u;
     LIBBGP_ASSERT(resize_threshold >= n);
 
