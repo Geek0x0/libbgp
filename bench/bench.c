@@ -1,7 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "libbgp/event.h"
+#include "libbgp/fsm.h"
+#include "libbgp/out_handler.h"
 #include "libbgp/packet.h"
+#include "libbgp/pattr.h"
 #include "libbgp/prefix4.h"
 #include "libbgp/prefix6.h"
 #include "libbgp/rib4.h"
@@ -23,6 +26,8 @@
 #define BENCH_KEEPALIVE_BYTES LIBBGP_FIXTURE_KEEPALIVE_LEN
 
 static uint64_t bench_sink_value;
+
+static libbgp_prefix4_t bench_route_prefix4(size_t index);
 
 static uint64_t now_ns(void)
 {
@@ -92,6 +97,83 @@ static void print_result(const char *name, size_t ops, uint64_t elapsed_ns)
     double ns_per_op = ops == 0u ? 0.0 : (double)elapsed_ns / (double)ops;
 
     printf("%-24s %8zu ops %10.3f ms %10.1f ns/op\n", name, ops, ms, ns_per_op);
+}
+
+static libbgp_io_result_t bench_discard_send(void *ctx, const uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    (void)buf;
+    bench_sink_value += len;
+    return (libbgp_io_result_t)len;
+}
+
+static libbgp_pattr_t *bench_origin_attr(uint8_t origin_value)
+{
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
+
+    if (attr != NULL) {
+        attr->data.origin.origin = origin_value;
+    }
+    return attr;
+}
+
+static libbgp_pattr_t *bench_next_hop_attr(uint32_t next_hop)
+{
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+
+    if (attr != NULL) {
+        attr->data.next_hop.next_hop = next_hop;
+    }
+    return attr;
+}
+
+static libbgp_pattr_t *bench_local_pref_attr(uint32_t local_pref)
+{
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_LOCAL_PREF);
+
+    if (attr != NULL) {
+        attr->data.local_pref.value = local_pref;
+    }
+    return attr;
+}
+
+static libbgp_pattr_t *bench_as_path_attr(uint32_t asn)
+{
+    libbgp_pattr_t *attr = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_as_path_segment_t *segment;
+    uint32_t *asns;
+
+    if (attr == NULL) {
+        return NULL;
+    }
+    segment = (libbgp_as_path_segment_t *)calloc(1u, sizeof(*segment));
+    asns = (uint32_t *)calloc(1u, sizeof(*asns));
+    if (segment == NULL || asns == NULL) {
+        free(segment);
+        free(asns);
+        libbgp_pattr_unref(attr);
+        return NULL;
+    }
+    asns[0] = asn;
+    segment->type = 2u;
+    segment->asn_count = 1u;
+    segment->asns = asns;
+    attr->data.as_path.segments = segment;
+    attr->data.as_path.segment_count = 1u;
+    attr->data.as_path.is_4b = true;
+    return attr;
+}
+
+static int bench_update_add_attr_owned(libbgp_update_msg_t *update, libbgp_pattr_t *attr)
+{
+    libbgp_err_t err;
+
+    if (attr == NULL) {
+        return 1;
+    }
+    err = libbgp_update_add_attr(update, attr);
+    libbgp_pattr_unref(attr);
+    return err == LIBBGP_OK ? 0 : 1;
 }
 
 static int bench_rib_lookup(size_t routes, size_t lookups)
@@ -288,6 +370,124 @@ static int bench_rib_discard_collect(size_t routes_per_source)
     bgp_rib4_discard_result_destroy(&result);
     libbgp_rib4_destroy(&rib);
     return 0;
+}
+
+static int bench_fsm_apply_update(size_t prefixes_per_update)
+{
+    struct libbgp_fsm_config config;
+    libbgp_fsm_t fsm;
+    libbgp_out_handler_t out_handler;
+    libbgp_io_ops_t ops;
+    libbgp_rib4_t rib;
+    libbgp_packet_t open;
+    libbgp_packet_t keepalive;
+    libbgp_packet_t direct;
+    libbgp_packet_t parsed;
+    uint8_t raw[LIBBGP_BGP_MAX_PACKET_LEN];
+    size_t raw_len = 0u;
+    size_t consumed = 0u;
+    size_t cycles = env_size("LIBBGP_BENCH_FSM_UPDATES", 1000u);
+    size_t i;
+    uint64_t start;
+    uint64_t elapsed;
+    int rc = 1;
+
+    if (prefixes_per_update == 0u) {
+        return 1;
+    }
+
+    memset(&config, 0, sizeof(config));
+    config.local_asn = 65000u;
+    config.local_bgp_id = ip4(192u, 0u, 2u, 1u);
+    config.hold_time = 45u;
+    config.keepalive_time = 0u;
+    config.enable_4byte_asn = true;
+    config.enable_mpbgp_ipv6 = false;
+
+    libbgp_packet_init(&open);
+    libbgp_packet_init(&keepalive);
+    libbgp_packet_init(&direct);
+    libbgp_packet_init(&parsed);
+    memset(&ops, 0, sizeof(ops));
+    ops.send_fn = bench_discard_send;
+
+    if (libbgp_rib4_init(&rib) != LIBBGP_OK) {
+        goto done_packets;
+    }
+    if (libbgp_out_handler_init(&out_handler) != LIBBGP_OK) {
+        goto done_rib;
+    }
+    libbgp_out_handler_set_ops(&out_handler, &ops);
+    if (libbgp_fsm_init(&fsm, &config) != LIBBGP_OK) {
+        goto done_out;
+    }
+    libbgp_fsm_set_out_handler(&fsm, &out_handler);
+    libbgp_fsm_set_rib4(&fsm, &rib);
+
+    open.type = LIBBGP_PACKET_OPEN;
+    libbgp_open_init(&open.data.open);
+    open.data.open.version = 4u;
+    open.data.open.my_asn = 65010u;
+    open.data.open.hold_time = 45u;
+    open.data.open.bgp_id = ip4(198u, 51u, 100u, 10u);
+    keepalive.type = LIBBGP_PACKET_KEEPALIVE;
+
+    if (libbgp_fsm_start(&fsm) != LIBBGP_OK ||
+        libbgp_fsm_on_packet(&fsm, &open) != LIBBGP_OK ||
+        libbgp_fsm_on_packet(&fsm, &keepalive) != LIBBGP_OK ||
+        libbgp_fsm_state(&fsm) != LIBBGP_FSM_ESTABLISHED) {
+        goto done_fsm;
+    }
+
+    direct.type = LIBBGP_PACKET_UPDATE;
+    libbgp_update_init(&direct.data.update);
+    if (bench_update_add_attr_owned(&direct.data.update, bench_origin_attr(0u)) != 0 ||
+        bench_update_add_attr_owned(&direct.data.update, bench_as_path_attr(65010u)) != 0 ||
+        bench_update_add_attr_owned(&direct.data.update, bench_next_hop_attr(ip4(192u, 0u, 2u, 254u))) != 0 ||
+        bench_update_add_attr_owned(&direct.data.update, bench_local_pref_attr(200u)) != 0) {
+        goto done_fsm;
+    }
+    for (i = 0u; i < prefixes_per_update; i++) {
+        libbgp_prefix4_t prefix = bench_route_prefix4(i);
+
+        if (libbgp_update_add_nlri(&direct.data.update, &prefix) != LIBBGP_OK) {
+            goto done_fsm;
+        }
+    }
+    if (libbgp_packet_write(&direct, raw, sizeof(raw), &raw_len) != LIBBGP_OK ||
+        libbgp_packet_parse_as4(&parsed, raw, raw_len, true, &consumed) != LIBBGP_OK ||
+        consumed != raw_len ||
+        parsed.type != LIBBGP_PACKET_UPDATE) {
+        goto done_fsm;
+    }
+
+    start = now_ns();
+    for (i = 0u; i < cycles; i++) {
+        if (libbgp_fsm_on_packet(&fsm, &parsed) != LIBBGP_OK) {
+            goto done_fsm;
+        }
+    }
+    elapsed = now_ns() - start;
+    printf("fsm update import @ %-5zu %8zu ops %10.3f ms %10.1f ns/prefix\n",
+           prefixes_per_update,
+           cycles * prefixes_per_update,
+           (double)elapsed / 1000000.0,
+           (double)elapsed / (double)(cycles * prefixes_per_update));
+    bench_sink_value += libbgp_rib4_route_count(&rib);
+    rc = 0;
+
+done_fsm:
+    libbgp_fsm_destroy(&fsm);
+done_out:
+    libbgp_out_handler_destroy(&out_handler);
+done_rib:
+    libbgp_rib4_destroy(&rib);
+done_packets:
+    libbgp_packet_destroy(&parsed);
+    libbgp_packet_destroy(&direct);
+    libbgp_packet_destroy(&keepalive);
+    libbgp_packet_destroy(&open);
+    return rc;
 }
 
 static int bench_rib_insert(size_t routes)
@@ -984,6 +1184,9 @@ int main(void)
     rc |= bench_sink_batch(large);
     rc |= bench_update_parse_write(large);
     rc |= bench_rib_insert(small);
+    rc |= bench_fsm_apply_update(1u);
+    rc |= bench_fsm_apply_update(16u);
+    rc |= bench_fsm_apply_update(env_size("LIBBGP_BENCH_FSM_PREFIXES", 256u));
     rc |= bench_update_parse_large(large);
     rc |= bench_event_publish(subscribers, small);
     
