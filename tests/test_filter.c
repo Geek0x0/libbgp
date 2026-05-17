@@ -1325,6 +1325,113 @@ LIBBGP_TEST(filter_clear_keeps_capacity_for_reuse_without_allocator)
     libbgp_filter_destroy(&filter);
 }
 
+LIBBGP_TEST(filter_as_path_not_origin_requires_origin_presence_rfc4271)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(198u, 51u, 100u, 0u, 24u));
+    libbgp_pattr_t *empty_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { empty_path };
+
+    LIBBGP_ASSERT(empty_path != NULL);
+    empty_path->data.as_path.segment_count = 0u;
+    empty_path->data.as_path.segments = NULL;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64512u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    libbgp_pattr_unref(empty_path);
+}
+
+LIBBGP_TEST(filter_route6_as_path_not_origin_requires_origin_presence_rfc4271)
+{
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x70u };
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib6_route_t route = route6(p6(prefix_addr, 40u));
+    libbgp_pattr_t *empty_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { empty_path };
+
+    LIBBGP_ASSERT(empty_path != NULL);
+    empty_path->data.as_path.segment_count = 0u;
+    empty_path->data.as_path.segments = NULL;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_NOT_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64512u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route6(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    libbgp_pattr_unref(empty_path);
+}
+
+LIBBGP_TEST(filter_route6_as4_origin_matches_when_as_path_absent_rfc6793)
+{
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x71u };
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    const uint32_t as4_values[] = { 4200000001u, 4200000002u };
+    libbgp_pattr_t *as4_path = make_as_path(LIBBGP_PATTR_AS4_PATH, as4_values, LIBBGP_ARRAY_LEN(as4_values));
+    libbgp_pattr_t *attrs[] = { as4_path };
+    libbgp_rib6_route_t route = route6(p6(prefix_addr, 40u));
+
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 4200000002u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route6(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    free_attr_payload(as4_path);
+    libbgp_pattr_unref(as4_path);
+}
+
+LIBBGP_TEST(filter_route6_community_not_contains_denies_when_present_rfc1997)
+{
+    static const uint8_t prefix_addr[16] = { 0x20u, 0x01u, 0x0du, 0xb8u, 0x72u };
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    const uint32_t communities[] = { 0x000a0001u, 0x000a0002u };
+    libbgp_pattr_t *community = make_community(communities, LIBBGP_ARRAY_LEN(communities));
+    libbgp_pattr_t *attrs[] = { community };
+    libbgp_rib6_route_t route = route6(p6(prefix_addr, 40u));
+
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_COMMUNITY_NOT_CONTAINS;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.community = 0x000a0002u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route6(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    free_attr_payload(community);
+    libbgp_pattr_unref(community);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -1362,7 +1469,11 @@ int main(void)
         { "filter_operations_after_destroy_use_null_behavior", filter_operations_after_destroy_use_null_behavior },
         { "filter_add_rule_reports_realloc_failure_and_preserves_rules", filter_add_rule_reports_realloc_failure_and_preserves_rules },
         { "filter_clear_keeps_capacity_for_reuse_without_allocator", filter_clear_keeps_capacity_for_reuse_without_allocator },
-        { "filter_route6_match_any_permits_non_null_route", filter_route6_match_any_permits_non_null_route }
+        { "filter_route6_match_any_permits_non_null_route", filter_route6_match_any_permits_non_null_route },
+        { "filter_as_path_not_origin_requires_origin_presence_rfc4271", filter_as_path_not_origin_requires_origin_presence_rfc4271 },
+        { "filter_route6_as_path_not_origin_requires_origin_presence_rfc4271", filter_route6_as_path_not_origin_requires_origin_presence_rfc4271 },
+        { "filter_route6_as4_origin_matches_when_as_path_absent_rfc6793", filter_route6_as4_origin_matches_when_as_path_absent_rfc6793 },
+        { "filter_route6_community_not_contains_denies_when_present_rfc1997", filter_route6_community_not_contains_denies_when_present_rfc1997 }
     };
 
     return libbgp_run_tests("filter", tests, LIBBGP_ARRAY_LEN(tests));

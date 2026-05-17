@@ -257,6 +257,20 @@ LIBBGP_TEST(packet_unknown_type_preserves_raw_body_and_write_small_output)
     libbgp_packet_destroy(&pkt);
 }
 
+LIBBGP_TEST(packet_write_keepalive_small_buffer_returns_buffer_rfc4271)
+{
+    uint8_t out[LIBBGP_BGP_HEADER_LEN - 1u];
+    size_t out_len = 99u;
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    pkt.type = LIBBGP_PACKET_KEEPALIVE;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(99u, out_len);
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(packet_write_unknown_requires_raw_body_when_length_nonzero)
 {
     uint8_t out[64];
@@ -279,6 +293,7 @@ LIBBGP_TEST(packet_write_unknown_requires_raw_body_when_length_nonzero)
     libbgp_packet_destroy(&pkt);
 }
 
+
 LIBBGP_TEST(packet_write_unknown_allows_zero_length_body)
 {
     const uint8_t expected[] = {
@@ -299,6 +314,26 @@ LIBBGP_TEST(packet_write_unknown_allows_zero_length_body)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_packet_write(&pkt, out, sizeof(out), &out_len));
     LIBBGP_ASSERT_EQ_U64(sizeof(expected), out_len);
     LIBBGP_ASSERT_BYTES_EQ(expected, out, sizeof(expected));
+    libbgp_packet_destroy(&pkt);
+}
+
+
+LIBBGP_TEST(packet_parse_open_rejects_unconsumed_body_octet_rfc4271)
+{
+    const uint8_t open_with_trailing_octet[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x1e, 0x01,
+        0x04, 0xfd, 0xe8, 0x00, 0x5a, 0xcb, 0x00, 0x71, 0x01, 0x00,
+        0x00
+    };
+    size_t used = 99u;
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_packet_parse(&pkt, open_with_trailing_octet, sizeof(open_with_trailing_octet), &used));
+    LIBBGP_ASSERT_EQ_U64(99u, used);
     libbgp_packet_destroy(&pkt);
 }
 
@@ -436,6 +471,56 @@ LIBBGP_TEST(packet_parse_short_notification_body_sets_header_error)
     libbgp_packet_destroy(&pkt);
 }
 
+LIBBGP_TEST(packet_parse_short_update_body_rejects_message_rfc4271)
+{
+    const uint8_t short_update[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x13, 0x02
+    };
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_packet_parse(&pkt, short_update, sizeof(short_update), NULL));
+    libbgp_packet_destroy(&pkt);
+}
+
+LIBBGP_TEST(packet_parse_ipv4_update_missing_next_hop_rejects_message_rfc4271)
+{
+    const uint8_t missing_next_hop[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x26, 0x02,
+        0x00, 0x00,
+        0x00, 0x0b,
+        0x40, 0x01, 0x01, 0x00,
+        0x40, 0x02, 0x04, 0x02, 0x01, 0xfc, 0x00,
+        0x18, 0xcb, 0x00, 0x71
+    };
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID,
+        libbgp_packet_parse(&pkt, missing_next_hop, sizeof(missing_next_hop), NULL));
+    libbgp_packet_destroy(&pkt);
+}
+
+LIBBGP_TEST(packet_parse_rejects_truncated_declared_length_rfc4271)
+{
+    const uint8_t truncated_keepalive[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x14, 0x04
+    };
+    libbgp_packet_t pkt;
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN,
+        libbgp_packet_parse(&pkt, truncated_keepalive, sizeof(truncated_keepalive), NULL));
+    libbgp_packet_destroy(&pkt);
+}
+
 /* RFC 4271 Section 4: packet write with NULL out_len pointer covers line 309. */
 LIBBGP_TEST(packet_write_null_out_len_still_writes)
 {
@@ -474,14 +559,19 @@ int main(void)
         { "packet_parse_as4_uses_four_octet_update_context", packet_parse_as4_uses_four_octet_update_context },
         { "packet_rejects_marker_length_and_keepalive_body", packet_rejects_marker_length_and_keepalive_body },
         { "packet_unknown_type_preserves_raw_body_and_write_small_output", packet_unknown_type_preserves_raw_body_and_write_small_output },
+        { "packet_write_keepalive_small_buffer_returns_buffer_rfc4271", packet_write_keepalive_small_buffer_returns_buffer_rfc4271 },
         { "packet_write_unknown_requires_raw_body_when_length_nonzero", packet_write_unknown_requires_raw_body_when_length_nonzero },
         { "packet_write_unknown_allows_zero_length_body", packet_write_unknown_allows_zero_length_body },
+        { "packet_parse_open_rejects_unconsumed_body_octet_rfc4271", packet_parse_open_rejects_unconsumed_body_octet_rfc4271 },
         { "packet_parse_known_body_failure_preserves_existing_packet", packet_parse_known_body_failure_preserves_existing_packet },
         { "packet_write_oversized_unknown_leaves_output_unchanged", packet_write_oversized_unknown_leaves_output_unchanged },
         { "packet_write_known_body_failure_leaves_output_unchanged", packet_write_known_body_failure_leaves_output_unchanged },
         { "packet_write_open_header_only_buffer_returns_buffer_error", packet_write_open_header_only_buffer_returns_buffer_error },
         { "packet_init_destroy_null_is_noop", packet_init_destroy_null_is_noop },
         { "packet_parse_short_notification_body_sets_header_error", packet_parse_short_notification_body_sets_header_error },
+        { "packet_parse_short_update_body_rejects_message_rfc4271", packet_parse_short_update_body_rejects_message_rfc4271 },
+        { "packet_parse_ipv4_update_missing_next_hop_rejects_message_rfc4271", packet_parse_ipv4_update_missing_next_hop_rejects_message_rfc4271 },
+        { "packet_parse_rejects_truncated_declared_length_rfc4271", packet_parse_rejects_truncated_declared_length_rfc4271 },
         { "packet_write_null_out_len_still_writes", packet_write_null_out_len_still_writes },
         { "packet_parse_null_consumed", packet_parse_null_consumed }
     };

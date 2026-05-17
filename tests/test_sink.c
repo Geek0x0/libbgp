@@ -486,47 +486,81 @@ LIBBGP_TEST(sink_reuses_packet_queue_slots_after_partial_pop)
     libbgp_sink_destroy(&sink);
 }
 
-/* Test that sink_compact_buf is triggered when tail space is exhausted.
- * Covers src/sink.c lines 61 and 80-82 (compact path in sink_reserve_buf). */
-LIBBGP_TEST(sink_compacts_buffer_when_tail_space_exhausted)
+LIBBGP_TEST(sink_reassembles_fragmented_keepalive_after_complete_frame_rfc4271)
 {
-    /* keepalive (19 bytes) + 5 bytes of a second keepalive = 24 bytes.
-     * Initial buf_cap grows from 0 -> 19 -> 38 to fit 24 bytes.
-     * After processing the first keepalive: buf_off=19, buf_len=5, buf_cap=38.
-     * Tail space = 38 - 19 - 5 = 14.
-     * Feed 15 bytes: needed=20, 15 > 14 (no tail room), 20 <= 38 (fits after compact).
-     * This triggers sink_compact_buf via the sink_reserve_buf compact path. */
-    uint8_t batch[24];
-    uint8_t tail[15];
+    enum { KEEPALIVE_PREFIX_LEN = 5, NEXT_MARKER_OCTETS = 1 };
+    uint8_t batch[LIBBGP_FIXTURE_KEEPALIVE_LEN + KEEPALIVE_PREFIX_LEN];
+    uint8_t tail[(LIBBGP_FIXTURE_KEEPALIVE_LEN - KEEPALIVE_PREFIX_LEN) + NEXT_MARKER_OCTETS];
     libbgp_sink_t sink;
     libbgp_packet_t pkt;
 
     memcpy(batch, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
-    memcpy(batch + LIBBGP_FIXTURE_KEEPALIVE_LEN, LIBBGP_FIXTURE_KEEPALIVE, 5u);
+    memcpy(batch + LIBBGP_FIXTURE_KEEPALIVE_LEN, LIBBGP_FIXTURE_KEEPALIVE, KEEPALIVE_PREFIX_LEN);
 
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, batch, sizeof(batch)));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
-    LIBBGP_ASSERT_EQ_U64(5u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(KEEPALIVE_PREFIX_LEN, libbgp_sink_buffered_len(&sink));
 
-    /* Pop the first keepalive to verify it was parsed correctly */
     libbgp_packet_init(&pkt);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
     libbgp_packet_destroy(&pkt);
 
-    /* Feed 15 bytes: remaining 14 bytes of keepalive (indices 5-18) + 1 extra byte.
-     * This triggers the compact path because 15 > tail_space(14) but needed(20) <= buf_cap(38). */
-    memcpy(tail, LIBBGP_FIXTURE_KEEPALIVE + 5u, LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u);
-    tail[LIBBGP_FIXTURE_KEEPALIVE_LEN - 5u] = 0xffu;
-    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
-        libbgp_sink_feed(&sink, tail, sizeof(tail)));
+    memcpy(tail, LIBBGP_FIXTURE_KEEPALIVE + KEEPALIVE_PREFIX_LEN, LIBBGP_FIXTURE_KEEPALIVE_LEN - KEEPALIVE_PREFIX_LEN);
+    tail[LIBBGP_FIXTURE_KEEPALIVE_LEN - KEEPALIVE_PREFIX_LEN] = 0xffu;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, tail, sizeof(tail)));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
     LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_buffered_len(&sink));
 
     libbgp_packet_init(&pkt);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+    libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_preserves_fragmented_unknown_frame_after_complete_frame)
+{
+    enum { UNKNOWN_FRAME_LEN = 80, FIRST_UNKNOWN_LEN = 21, MIDDLE_UNKNOWN_LEN = 37 };
+    uint8_t unknown[UNKNOWN_FRAME_LEN];
+    uint8_t first[LIBBGP_FIXTURE_KEEPALIVE_LEN + FIRST_UNKNOWN_LEN];
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    memset(unknown, 0xa5, sizeof(unknown));
+    memset(unknown, 0xff, LIBBGP_BGP_MARKER_LEN);
+    unknown[16] = 0u;
+    unknown[17] = UNKNOWN_FRAME_LEN;
+    unknown[18] = 99u;
+    memcpy(first, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN);
+    memcpy(first + LIBBGP_FIXTURE_KEEPALIVE_LEN, unknown, FIRST_UNKNOWN_LEN);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, first, sizeof(first)));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(FIRST_UNKNOWN_LEN, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_sink_feed(&sink, unknown + FIRST_UNKNOWN_LEN, MIDDLE_UNKNOWN_LEN));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(FIRST_UNKNOWN_LEN + MIDDLE_UNKNOWN_LEN, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK,
+        libbgp_sink_feed(
+            &sink,
+            unknown + FIRST_UNKNOWN_LEN + MIDDLE_UNKNOWN_LEN,
+            UNKNOWN_FRAME_LEN - FIRST_UNKNOWN_LEN - MIDDLE_UNKNOWN_LEN));
+    LIBBGP_ASSERT_EQ_U64(2u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_KEEPALIVE, pkt.type);
+    libbgp_packet_destroy(&pkt);
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_pop(&sink, &pkt));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_PACKET_UNKNOWN, pkt.type);
+    LIBBGP_ASSERT_EQ_U64(99u, pkt.raw_type);
+    LIBBGP_ASSERT_EQ_U64(UNKNOWN_FRAME_LEN - LIBBGP_BGP_HEADER_LEN, pkt.raw_body_len);
     libbgp_packet_destroy(&pkt);
     libbgp_sink_destroy(&sink);
 }
@@ -588,7 +622,8 @@ int main(void)
         { "sink_feeds_and_pops_1k_keepalive_batch", sink_feeds_and_pops_1k_keepalive_batch },
         { "sink_feeds_and_pops_10k_keepalive_batch", sink_feeds_and_pops_10k_keepalive_batch },
         { "sink_reuses_packet_queue_slots_after_partial_pop", sink_reuses_packet_queue_slots_after_partial_pop },
-        { "sink_compacts_buffer_when_tail_space_exhausted", sink_compacts_buffer_when_tail_space_exhausted },
+        { "sink_reassembles_fragmented_keepalive_after_complete_frame_rfc4271", sink_reassembles_fragmented_keepalive_after_complete_frame_rfc4271 },
+        { "sink_preserves_fragmented_unknown_frame_after_complete_frame", sink_preserves_fragmented_unknown_frame_after_complete_frame },
         { "sink_delays_compact_when_growth_is_needed_before_half_offset", sink_delays_compact_when_growth_is_needed_before_half_offset }
     };
 

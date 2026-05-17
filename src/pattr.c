@@ -520,6 +520,9 @@ static libbgp_err_t parse_as_path(
             return LIBBGP_ERR_INVALID;
         }
         count = value[pos + 1u];
+        if (count == 0u) {
+            return LIBBGP_ERR_BAD_LEN;
+        }
         if (count > (SIZE_MAX - 2u) / asn_size) {
             return LIBBGP_ERR_BAD_LEN;
         }
