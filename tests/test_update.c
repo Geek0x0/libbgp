@@ -67,6 +67,29 @@ static void test_attr_view_basic(void)
     LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_NEXT_HOP) == NULL);
 }
 
+static void test_attr_view_rejects_null_and_skips_empty_slots(void)
+{
+    bgp_attr_view_t view;
+    libbgp_pattr_t origin = {0};
+    libbgp_pattr_t *attrs[3];
+
+    origin.type_code = LIBBGP_PATTR_CODE_ORIGIN;
+    origin.type = LIBBGP_PATTR_ORIGIN;
+    attrs[0] = NULL;
+    attrs[1] = &origin;
+    attrs[2] = NULL;
+
+    bgp_attr_view_init(&view);
+    LIBBGP_ASSERT(!bgp_attr_view_add(NULL, &origin));
+    LIBBGP_ASSERT(!bgp_attr_view_add(&view, NULL));
+    LIBBGP_ASSERT(bgp_attr_view_get(NULL, LIBBGP_PATTR_CODE_ORIGIN) == NULL);
+    bgp_attr_view_build(&view, NULL, 3u);
+    LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_ORIGIN) == NULL);
+    bgp_attr_view_build(&view, attrs, LIBBGP_ARRAY_LEN(attrs));
+    LIBBGP_ASSERT(bgp_attr_view_get(&view, LIBBGP_PATTR_CODE_ORIGIN) == &origin);
+    LIBBGP_ASSERT(!view.duplicate_found);
+}
+
 static size_t test_as_path_asn_count(const libbgp_pattr_t *attr)
 {
     size_t count = 0u;
@@ -4551,6 +4574,7 @@ int main(void)
 {
     const libbgp_test_case_t tests[] = {
         { "attr_view_basic", test_attr_view_basic },
+        { "attr_view_rejects_null_and_skips_empty_slots", test_attr_view_rejects_null_and_skips_empty_slots },
         { "update_parse_write_empty_fixture_body", update_parse_write_empty_fixture_body },
         { "update_parse_write_with_withdrawn_attrs_and_nlri", update_parse_write_with_withdrawn_attrs_and_nlri },
         { "update_parse_ipv4_nlri_accepts_atomic_aggregate_rfc4271", update_parse_ipv4_nlri_accepts_atomic_aggregate_rfc4271 },

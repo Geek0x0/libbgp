@@ -379,11 +379,53 @@ LIBBGP_TEST(hashmap_reserve_smaller_after_larger_is_noop)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, 1000u));
     bucket_count_after_first_reserve = map.bucket_count;
-    
+
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_reserve(&map, 100u));
     LIBBGP_ASSERT_EQ_U64(bucket_count_after_first_reserve, map.bucket_count);
 
     bgp_hashmap_destroy(&map);
+}
+
+LIBBGP_TEST(hashmap_rejects_corrupted_public_state_without_mutation)
+{
+    bgp_hashmap_t map;
+    int key = 1;
+    int value = 2;
+    bgp_hash_fn saved_hash;
+    bgp_key_eq_fn saved_eq;
+    size_t saved_bucket_count;
+    size_t saved_len;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_init(&map, int_hash, int_eq, NULL, NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, bgp_hashmap_insert(&map, &key, &value));
+    saved_len = bgp_hashmap_len(&map);
+    saved_hash = map.hash;
+    saved_eq = map.eq;
+    saved_bucket_count = map.bucket_count;
+
+    map.hash = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_insert(&map, &key, &value));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_remove_one(&map, &key, &value));
+    LIBBGP_ASSERT(bgp_hashmap_find_first(&map, &key) == NULL);
+    LIBBGP_ASSERT_EQ_U64(0u, bgp_hashmap_count_key(&map, &key));
+    LIBBGP_ASSERT_EQ_U64(saved_len, bgp_hashmap_len(&map));
+
+    map.hash = saved_hash;
+    map.eq = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_remove_one(&map, &key, &value));
+    LIBBGP_ASSERT(bgp_hashmap_find_first(&map, &key) == NULL);
+    LIBBGP_ASSERT_EQ_U64(0u, bgp_hashmap_count_key(&map, &key));
+    LIBBGP_ASSERT_EQ_U64(saved_len, bgp_hashmap_len(&map));
+
+    map.eq = saved_eq;
+    map.bucket_count = 0u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, bgp_hashmap_reserve(&map, 100u));
+    LIBBGP_ASSERT_EQ_U64(saved_len, bgp_hashmap_len(&map));
+    LIBBGP_ASSERT_EQ_U64(0u, map.bucket_count);
+    map.bucket_count = saved_bucket_count;
+
+    bgp_hashmap_destroy(&map);
+    LIBBGP_ASSERT_EQ_U64(0u, bgp_hashmap_len(NULL));
 }
 
 int main(void)
@@ -400,7 +442,8 @@ int main(void)
         { "hashmap_resize_failure_preserves_existing_entries", hashmap_resize_failure_preserves_existing_entries },
         { "hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops", hashmap_chained_lookup_count_remove_and_foreach_cover_misses_and_stops },
         { "hashmap_reserve_zero_count_returns_ok_and_does_not_change_bucket_count", hashmap_reserve_zero_count_returns_ok_and_does_not_change_bucket_count },
-        { "hashmap_reserve_smaller_after_larger_is_noop", hashmap_reserve_smaller_after_larger_is_noop }
+        { "hashmap_reserve_smaller_after_larger_is_noop", hashmap_reserve_smaller_after_larger_is_noop },
+        { "hashmap_rejects_corrupted_public_state_without_mutation", hashmap_rejects_corrupted_public_state_without_mutation }
     };
 
     return libbgp_run_tests("hashmap", tests, LIBBGP_ARRAY_LEN(tests));

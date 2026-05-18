@@ -1432,6 +1432,110 @@ LIBBGP_TEST(filter_route6_community_not_contains_denies_when_present_rfc1997)
     libbgp_pattr_unref(community);
 }
 
+LIBBGP_TEST(filter_as_path_contains_fails_closed_on_missing_segments_rfc4271)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { as_path };
+
+    LIBBGP_ASSERT(as_path != NULL);
+    as_path->data.as_path.segment_count = 1u;
+    as_path->data.as_path.segments = NULL;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_CONTAINS;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64512u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    as_path->data.as_path.segment_count = 0u;
+    libbgp_pattr_unref(as_path);
+}
+
+LIBBGP_TEST(filter_as_path_origin_fails_closed_on_missing_segment_asns_rfc4271)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { as_path };
+
+    LIBBGP_ASSERT(as_path != NULL);
+    as_path->data.as_path.segments = (libbgp_as_path_segment_t *)calloc(1u, sizeof(*as_path->data.as_path.segments));
+    LIBBGP_ASSERT(as_path->data.as_path.segments != NULL);
+    as_path->data.as_path.segment_count = 1u;
+    as_path->data.as_path.segments[0].type = 2u;
+    as_path->data.as_path.segments[0].asn_count = 1u;
+    as_path->data.as_path.segments[0].asns = NULL;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64512u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_DENY,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    free_attr_payload(as_path);
+    libbgp_pattr_unref(as_path);
+}
+
+LIBBGP_TEST(filter_duplicate_as_path_origin_ignores_as_set_tail_rfc4271)
+{
+    libbgp_filter_t filter;
+    libbgp_filter_rule_t rule;
+    libbgp_rib4_route_t route = route4(p4(203u, 0u, 113u, 0u, 24u));
+    libbgp_pattr_t *path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *duplicate = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *attrs[] = { path, duplicate };
+    uint32_t path_asns[] = { 64512u, 64513u };
+    uint32_t set_asns[] = { 64599u };
+
+    LIBBGP_ASSERT(path != NULL);
+    LIBBGP_ASSERT(duplicate != NULL);
+    path->data.as_path.segments = (libbgp_as_path_segment_t *)calloc(2u, sizeof(*path->data.as_path.segments));
+    LIBBGP_ASSERT(path->data.as_path.segments != NULL);
+    path->data.as_path.segment_count = 2u;
+    path->data.as_path.segments[0].type = 2u;
+    path->data.as_path.segments[0].asn_count = LIBBGP_ARRAY_LEN(path_asns);
+    path->data.as_path.segments[0].asns = path_asns;
+    path->data.as_path.segments[1].type = 1u;
+    path->data.as_path.segments[1].asn_count = LIBBGP_ARRAY_LEN(set_asns);
+    path->data.as_path.segments[1].asns = set_asns;
+    duplicate->data.as_path.segment_count = 0u;
+    duplicate->data.as_path.segments = NULL;
+    route.attrs = attrs;
+    route.attr_count = LIBBGP_ARRAY_LEN(attrs);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_init(&filter));
+    memset(&rule, 0, sizeof(rule));
+    rule.match_type = LIBBGP_FILTER_MATCH_AS_PATH_ORIGIN;
+    rule.decision = LIBBGP_FILTER_PERMIT;
+    rule.match.asn = 64513u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_filter_add_rule(&filter, &rule));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_FILTER_PERMIT,
+        libbgp_filter_apply_route(&filter, &route, LIBBGP_FILTER_DENY));
+
+    libbgp_filter_destroy(&filter);
+    path->data.as_path.segments[0].asns = NULL;
+    path->data.as_path.segments[1].asns = NULL;
+    free_attr_payload(path);
+    libbgp_pattr_unref(duplicate);
+    libbgp_pattr_unref(path);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -1473,7 +1577,10 @@ int main(void)
         { "filter_as_path_not_origin_requires_origin_presence_rfc4271", filter_as_path_not_origin_requires_origin_presence_rfc4271 },
         { "filter_route6_as_path_not_origin_requires_origin_presence_rfc4271", filter_route6_as_path_not_origin_requires_origin_presence_rfc4271 },
         { "filter_route6_as4_origin_matches_when_as_path_absent_rfc6793", filter_route6_as4_origin_matches_when_as_path_absent_rfc6793 },
-        { "filter_route6_community_not_contains_denies_when_present_rfc1997", filter_route6_community_not_contains_denies_when_present_rfc1997 }
+        { "filter_route6_community_not_contains_denies_when_present_rfc1997", filter_route6_community_not_contains_denies_when_present_rfc1997 },
+        { "filter_as_path_contains_fails_closed_on_missing_segments_rfc4271", filter_as_path_contains_fails_closed_on_missing_segments_rfc4271 },
+        { "filter_as_path_origin_fails_closed_on_missing_segment_asns_rfc4271", filter_as_path_origin_fails_closed_on_missing_segment_asns_rfc4271 },
+        { "filter_duplicate_as_path_origin_ignores_as_set_tail_rfc4271", filter_duplicate_as_path_origin_ignores_as_set_tail_rfc4271 }
     };
 
     return libbgp_run_tests("filter", tests, LIBBGP_ARRAY_LEN(tests));

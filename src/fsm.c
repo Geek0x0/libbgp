@@ -2056,6 +2056,29 @@ static bool fsm_semantic_duplicate_attr(libbgp_pattr_type_t type)
     }
 }
 
+static bool fsm_valid_as_path_attr(const libbgp_pattr_t *attr)
+{
+    size_t i;
+
+    if (attr->type != LIBBGP_PATTR_AS_PATH && attr->type != LIBBGP_PATTR_AS4_PATH) {
+        return true;
+    }
+    if (attr->data.as_path.segment_count != 0u && attr->data.as_path.segments == NULL) {
+        return false;
+    }
+    for (i = 0u; i < attr->data.as_path.segment_count; i++) {
+        const libbgp_as_path_segment_t *seg = &attr->data.as_path.segments[i];
+
+        if (seg->type != 1u && seg->type != 2u) {
+            return false;
+        }
+        if (seg->asn_count == 0u || seg->asn_count > 255u || seg->asns == NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update, uint8_t *notify_subcode)
 {
     bgp_attr_view_t attr_view;
@@ -2111,6 +2134,12 @@ static libbgp_err_t fsm_validate_update(const libbgp_update_msg_t *update, uint8
             return LIBBGP_ERR_INVALID;
         }
         type = update->attrs[i]->type;
+        if (!fsm_valid_as_path_attr(update->attrs[i])) {
+            if (notify_subcode != NULL) {
+                *notify_subcode = FSM_UPDATE_ERR_MALFORMED_ATTR_LIST;
+            }
+            return LIBBGP_ERR_INVALID;
+        }
         if ((size_t)type <= (size_t)LIBBGP_PATTR_UNKNOWN) {
             attr_counts[(size_t)type]++;
             if (fsm_semantic_duplicate_attr(type) && attr_counts[(size_t)type] > 1u) {

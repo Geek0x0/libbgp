@@ -890,10 +890,19 @@ LIBBGP_TEST(pattr_format_provides_debug_strings)
 {
     libbgp_pattr_t *origin = libbgp_pattr_new(LIBBGP_PATTR_ORIGIN);
     libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+    libbgp_pattr_t *as4_path = libbgp_pattr_new(LIBBGP_PATTR_AS4_PATH);
     libbgp_pattr_t *next_hop = libbgp_pattr_new(LIBBGP_PATTR_NEXT_HOP);
+    libbgp_pattr_t *med = libbgp_pattr_new(LIBBGP_PATTR_MED);
+    libbgp_pattr_t *local_pref = libbgp_pattr_new(LIBBGP_PATTR_LOCAL_PREF);
+    libbgp_pattr_t *atomic = libbgp_pattr_new(LIBBGP_PATTR_ATOMIC_AGGREGATE);
+    libbgp_pattr_t *aggregator = libbgp_pattr_new(LIBBGP_PATTR_AGGREGATOR);
+    libbgp_pattr_t *community = libbgp_pattr_new(LIBBGP_PATTR_COMMUNITY);
     libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    libbgp_pattr_t *mp_unreach = libbgp_pattr_new(LIBBGP_PATTR_MP_UNREACH_IPV6);
+    libbgp_pattr_t *unknown = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
     libbgp_as_path_segment_t *segment;
     uint32_t *asns;
+    uint32_t communities[2];
     libbgp_prefix6_t *prefix6;
     char buf[256];
     char tiny[8];
@@ -901,8 +910,16 @@ LIBBGP_TEST(pattr_format_provides_debug_strings)
 
     LIBBGP_ASSERT(origin != NULL);
     LIBBGP_ASSERT(as_path != NULL);
+    LIBBGP_ASSERT(as4_path != NULL);
     LIBBGP_ASSERT(next_hop != NULL);
+    LIBBGP_ASSERT(med != NULL);
+    LIBBGP_ASSERT(local_pref != NULL);
+    LIBBGP_ASSERT(atomic != NULL);
+    LIBBGP_ASSERT(aggregator != NULL);
+    LIBBGP_ASSERT(community != NULL);
     LIBBGP_ASSERT(mp_reach != NULL);
+    LIBBGP_ASSERT(mp_unreach != NULL);
+    LIBBGP_ASSERT(unknown != NULL);
 
     origin->data.origin.origin = 1u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(origin, buf, sizeof(buf), &out_len));
@@ -929,10 +946,47 @@ LIBBGP_TEST(pattr_format_provides_debug_strings)
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_pattr_format(as_path, tiny, sizeof(tiny), &out_len));
     LIBBGP_ASSERT(out_len >= sizeof(tiny));
 
+    as4_path->data.as_path.segment_count = 1u;
+    as4_path->data.as_path.segments = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(as4_path, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "AS4_PATH") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "malformed") != NULL);
+
     next_hop->data.next_hop.next_hop = 0xc0000201u;
     LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(next_hop, buf, sizeof(buf), NULL));
     LIBBGP_ASSERT(strstr(buf, "NEXT_HOP") != NULL);
     LIBBGP_ASSERT(strstr(buf, "0xc0000201") != NULL);
+
+    med->data.med.value = 50u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(med, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "MED") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "med=50") != NULL);
+
+    local_pref->data.local_pref.value = 150u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(local_pref, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "LOCAL_PREF") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "local_pref=150") != NULL);
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(atomic, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "ATOMIC_AGGREGATE") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "atomic=1") != NULL);
+
+    aggregator->data.aggregator.asn = 65000u;
+    aggregator->data.aggregator.router_id = 0xc6336401u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(aggregator, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "AGGREGATOR") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "asn=65000") != NULL);
+
+    communities[0] = 0x0000fde8u;
+    communities[1] = 0x0000fde9u;
+    community->data.community.count = 2u;
+    community->data.community.values = communities;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(community, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "COMMUNITY") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "65000") != NULL);
+    community->data.community.values = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(community, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "malformed") != NULL);
 
     prefix6 = (libbgp_prefix6_t *)calloc(1u, sizeof(*prefix6));
     LIBBGP_ASSERT(prefix6 != NULL);
@@ -950,11 +1004,43 @@ LIBBGP_TEST(pattr_format_provides_debug_strings)
     LIBBGP_ASSERT(strstr(buf, "MP_REACH_IPV6") != NULL);
     LIBBGP_ASSERT(strstr(buf, "nexthop_len=16") != NULL);
     LIBBGP_ASSERT(strstr(buf, "nlri_count=1") != NULL);
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(mp_reach, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "malformed") != NULL);
+    mp_reach->data.mp_reach_ipv6.nlri = prefix6;
 
+    mp_unreach->data.mp_unreach_ipv6.withdrawn_count = 1u;
+    mp_unreach->data.mp_unreach_ipv6.withdrawn = prefix6;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(mp_unreach, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "MP_UNREACH_IPV6") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "withdrawn_count=1") != NULL);
+    mp_unreach->data.mp_unreach_ipv6.withdrawn = NULL;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(mp_unreach, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "malformed") != NULL);
+
+    unknown->data.unknown.len = 3u;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(unknown, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "UNKNOWN") != NULL);
+    LIBBGP_ASSERT(strstr(buf, "len=3") != NULL);
+
+    unknown->type = (libbgp_pattr_type_t)99;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_pattr_format(unknown, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT(strstr(buf, "invalid=1") != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BUFFER, libbgp_pattr_format(unknown, NULL, 0u, &out_len));
+    LIBBGP_ASSERT(out_len != 0u);
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_format(NULL, buf, sizeof(buf), NULL));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_pattr_format(origin, NULL, sizeof(buf), NULL));
 
+    libbgp_pattr_unref(unknown);
+    libbgp_pattr_unref(mp_unreach);
     libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(community);
+    libbgp_pattr_unref(aggregator);
+    libbgp_pattr_unref(atomic);
+    libbgp_pattr_unref(local_pref);
+    libbgp_pattr_unref(med);
     libbgp_pattr_unref(next_hop);
+    libbgp_pattr_unref(as4_path);
     libbgp_pattr_unref(as_path);
     libbgp_pattr_unref(origin);
 }
@@ -1760,6 +1846,100 @@ LIBBGP_TEST(pattr_format_reports_rfc4760_empty_mp_reach_and_unreach)
     libbgp_pattr_unref(attr);
 }
 
+LIBBGP_TEST(pattr_write_rejects_public_value_lengths_over_65535_rfc4271_4760)
+{
+    enum { many_communities = 16384, many_prefixes = 3856 };
+    uint8_t out[64];
+    size_t wire_len = 33u;
+    size_t out_len = 44u;
+    size_t i;
+    uint32_t *communities = (uint32_t *)calloc(many_communities, sizeof(*communities));
+    libbgp_prefix6_t *prefixes = (libbgp_prefix6_t *)calloc(many_prefixes, sizeof(*prefixes));
+    libbgp_pattr_t *community = libbgp_pattr_new(LIBBGP_PATTR_COMMUNITY);
+    libbgp_pattr_t *mp_reach = libbgp_pattr_new(LIBBGP_PATTR_MP_REACH_IPV6);
+    libbgp_pattr_t *mp_unreach = libbgp_pattr_new(LIBBGP_PATTR_MP_UNREACH_IPV6);
+
+    LIBBGP_ASSERT(communities != NULL);
+    LIBBGP_ASSERT(prefixes != NULL);
+    LIBBGP_ASSERT(community != NULL);
+    LIBBGP_ASSERT(mp_reach != NULL);
+    LIBBGP_ASSERT(mp_unreach != NULL);
+    for (i = 0u; i < many_communities; i++) {
+        communities[i] = (uint32_t)i;
+    }
+    for (i = 0u; i < many_prefixes; i++) {
+        prefixes[i].len = 128u;
+    }
+
+    community->data.community.count = many_communities;
+    community->data.community.values = communities;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_wire_len(community, &wire_len));
+    LIBBGP_ASSERT_EQ_U64(33u, wire_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(community, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(44u, out_len);
+    community->data.community.count = 0u;
+    community->data.community.values = NULL;
+
+    mp_reach->data.mp_reach_ipv6.nexthop_len = 16u;
+    mp_reach->data.mp_reach_ipv6.nlri_count = many_prefixes;
+    mp_reach->data.mp_reach_ipv6.nlri = prefixes;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_wire_len(mp_reach, &wire_len));
+    LIBBGP_ASSERT_EQ_U64(33u, wire_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(mp_reach, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(44u, out_len);
+    mp_reach->data.mp_reach_ipv6.nlri_count = 0u;
+    mp_reach->data.mp_reach_ipv6.nlri = NULL;
+
+    mp_unreach->data.mp_unreach_ipv6.withdrawn_count = many_prefixes;
+    mp_unreach->data.mp_unreach_ipv6.withdrawn = prefixes;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_wire_len(mp_unreach, &wire_len));
+    LIBBGP_ASSERT_EQ_U64(33u, wire_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(mp_unreach, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(44u, out_len);
+    mp_unreach->data.mp_unreach_ipv6.withdrawn_count = 0u;
+    mp_unreach->data.mp_unreach_ipv6.withdrawn = NULL;
+
+    libbgp_pattr_unref(mp_unreach);
+    libbgp_pattr_unref(mp_reach);
+    libbgp_pattr_unref(community);
+    free(prefixes);
+    free(communities);
+}
+
+/* RFC 4271 §4.3 encodes AS_PATH segment counts in one octet. */
+LIBBGP_TEST(pattr_write_rejects_invalid_type_and_oversized_as_segment_rfc4271)
+{
+    uint8_t out[64];
+    size_t wire_len = 77u;
+    size_t out_len = 88u;
+    libbgp_pattr_t *invalid = libbgp_pattr_new(LIBBGP_PATTR_UNKNOWN);
+    libbgp_pattr_t *as_path = libbgp_pattr_new(LIBBGP_PATTR_AS_PATH);
+
+    LIBBGP_ASSERT(invalid != NULL);
+    LIBBGP_ASSERT(as_path != NULL);
+
+    invalid->type = (libbgp_pattr_type_t)99;
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_wire_len(invalid, &wire_len));
+    LIBBGP_ASSERT_EQ_U64(77u, wire_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(invalid, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(88u, out_len);
+
+    as_path->data.as_path.segment_count = 1u;
+    as_path->data.as_path.segments = (libbgp_as_path_segment_t *)calloc(1u, sizeof(as_path->data.as_path.segments[0]));
+    LIBBGP_ASSERT(as_path->data.as_path.segments != NULL);
+    as_path->data.as_path.segments[0].type = 2u;
+    as_path->data.as_path.segments[0].asn_count = 256u;
+    as_path->data.as_path.segments[0].asns = (uint32_t *)calloc(256u, sizeof(as_path->data.as_path.segments[0].asns[0]));
+    LIBBGP_ASSERT(as_path->data.as_path.segments[0].asns != NULL);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_wire_len(as_path, &wire_len));
+    LIBBGP_ASSERT_EQ_U64(77u, wire_len);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_pattr_write(as_path, out, sizeof(out), &out_len));
+    LIBBGP_ASSERT_EQ_U64(88u, out_len);
+
+    libbgp_pattr_unref(as_path);
+    libbgp_pattr_unref(invalid);
+}
+
 int main(void)
 {
     const libbgp_test_case_t tests[] = {
@@ -1807,7 +1987,9 @@ int main(void)
         { "pattr_rfc_flags_type_names_and_type_from_short_extended_header", pattr_rfc_flags_type_names_and_type_from_short_extended_header },
         { "pattr_parse_rejects_fixed_width_length_mismatches_rfc4271_6793", pattr_parse_rejects_fixed_width_length_mismatches_rfc4271_6793 },
         { "pattr_write_uses_rfc4271_extended_length_boundaries", pattr_write_uses_rfc4271_extended_length_boundaries },
-        { "pattr_format_reports_rfc4760_empty_mp_reach_and_unreach", pattr_format_reports_rfc4760_empty_mp_reach_and_unreach }
+        { "pattr_format_reports_rfc4760_empty_mp_reach_and_unreach", pattr_format_reports_rfc4760_empty_mp_reach_and_unreach },
+        { "pattr_write_rejects_public_value_lengths_over_65535_rfc4271_4760", pattr_write_rejects_public_value_lengths_over_65535_rfc4271_4760 },
+        { "pattr_write_rejects_invalid_type_and_oversized_as_segment_rfc4271", pattr_write_rejects_invalid_type_and_oversized_as_segment_rfc4271 }
     };
 
     return libbgp_run_tests("pattr", tests, LIBBGP_ARRAY_LEN(tests));

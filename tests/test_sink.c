@@ -167,6 +167,25 @@ LIBBGP_TEST(sink_rejects_bad_length_and_clears_buffer)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_rejects_oversized_frame_length_rfc4271)
+{
+    uint8_t bad[LIBBGP_BGP_HEADER_LEN];
+    libbgp_sink_t sink;
+
+    memset(bad, 0xff, LIBBGP_BGP_MARKER_LEN);
+    bad[16] = 0x10u;
+    bad[17] = 0x01u;
+    bad[18] = LIBBGP_PACKET_KEEPALIVE;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_BAD_LEN, libbgp_sink_feed(&sink, bad, sizeof(bad)));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_feed(&sink, LIBBGP_FIXTURE_KEEPALIVE, LIBBGP_FIXTURE_KEEPALIVE_LEN));
+    LIBBGP_ASSERT_EQ_U64(1u, libbgp_sink_packet_count(&sink));
+    libbgp_sink_destroy(&sink);
+}
+
 LIBBGP_TEST(sink_rejects_bad_marker_and_clears_buffer)
 {
     uint8_t bad[LIBBGP_FIXTURE_KEEPALIVE_LEN];
@@ -219,6 +238,30 @@ LIBBGP_TEST(sink_zero_length_null_feed_is_noop)
     libbgp_sink_destroy(&sink);
 }
 
+LIBBGP_TEST(sink_init_reports_nomem_when_context_alloc_fails)
+{
+    sink_fail_alloc_ctx_t fail_ctx = { 0u, 0u, 1u, 0u };
+    libbgp_alloc_t alloc = sink_fail_alloc_make(&fail_ctx);
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+    libbgp_err_t init_rc;
+
+    libbgp_set_alloc(&alloc);
+    init_rc = libbgp_sink_init(&sink);
+    if (init_rc == LIBBGP_OK) {
+        libbgp_sink_destroy(&sink);
+    }
+    libbgp_set_alloc(NULL);
+
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_NOMEM, init_rc);
+    LIBBGP_ASSERT_EQ_U64(1u, fail_ctx.calloc_calls);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_pop(&sink, &pkt));
+    libbgp_packet_destroy(&pkt);
+}
+
 LIBBGP_TEST(sink_null_handles_are_safe)
 {
     LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_init(NULL));
@@ -242,6 +285,21 @@ LIBBGP_TEST(sink_pop_empty_and_null_output_are_errors)
     LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
     libbgp_packet_destroy(&pkt);
     libbgp_sink_destroy(&sink);
+}
+
+LIBBGP_TEST(sink_operations_after_destroy_are_safe)
+{
+    libbgp_sink_t sink;
+    libbgp_packet_t pkt;
+
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_OK, libbgp_sink_init(&sink));
+    libbgp_sink_destroy(&sink);
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_packet_count(&sink));
+    LIBBGP_ASSERT_EQ_U64(0u, libbgp_sink_buffered_len(&sink));
+    libbgp_sink_clear(&sink);
+    libbgp_packet_init(&pkt);
+    LIBBGP_ASSERT_EQ_I64(LIBBGP_ERR_INVALID, libbgp_sink_pop(&sink, &pkt));
+    libbgp_packet_destroy(&pkt);
 }
 
 LIBBGP_TEST(sink_rejects_null_data_for_nonzero_len)
@@ -607,11 +665,14 @@ int main(void)
         { "sink_pops_multiple_packets_in_order", sink_pops_multiple_packets_in_order },
         { "sink_partial_header_reports_buffered_len", sink_partial_header_reports_buffered_len },
         { "sink_rejects_bad_length_and_clears_buffer", sink_rejects_bad_length_and_clears_buffer },
+        { "sink_rejects_oversized_frame_length_rfc4271", sink_rejects_oversized_frame_length_rfc4271 },
         { "sink_rejects_bad_marker_and_clears_buffer", sink_rejects_bad_marker_and_clears_buffer },
         { "sink_rejects_partial_bad_marker_then_accepts_valid_frame", sink_rejects_partial_bad_marker_then_accepts_valid_frame },
         { "sink_zero_length_null_feed_is_noop", sink_zero_length_null_feed_is_noop },
+        { "sink_init_reports_nomem_when_context_alloc_fails", sink_init_reports_nomem_when_context_alloc_fails },
         { "sink_null_handles_are_safe", sink_null_handles_are_safe },
         { "sink_pop_empty_and_null_output_are_errors", sink_pop_empty_and_null_output_are_errors },
+        { "sink_operations_after_destroy_are_safe", sink_operations_after_destroy_are_safe },
         { "sink_rejects_null_data_for_nonzero_len", sink_rejects_null_data_for_nonzero_len },
         { "sink_feed_reports_nomem_when_buffer_realloc_fails", sink_feed_reports_nomem_when_buffer_realloc_fails },
         { "sink_feed_reports_nomem_when_packet_array_alloc_fails", sink_feed_reports_nomem_when_packet_array_alloc_fails },
